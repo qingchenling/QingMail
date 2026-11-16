@@ -417,7 +417,12 @@ impl Render for Accounts {
             if expanded {
                 tree = tree
                     .child(div().text_sm().child(settings.address.clone()))
-                    .child(div().text_sm().child("尚未同步文件夹与邮件"));
+                    .child(div().text_sm().child("文件夹与缓存状态请在邮件窗口查看"))
+                    .child(
+                        MaterialButton::new(("open-mailbox", index))
+                            .child("打开邮件")
+                            .on_click(|_, _, cx| crate::mailbox::open(cx)),
+                    );
             }
         }
         if self.saved.is_empty() {

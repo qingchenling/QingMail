@@ -41,6 +41,32 @@ pub enum ConnectionSecurity {
     StartTls,
 }
 
+/// LIST 成功快照；目录节点可以不可选择，不虚构 UIDVALIDITY。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteFolder {
+    pub name: String,
+    pub display_name: String,
+    pub delimiter: Option<String>,
+    pub selectable: bool,
+}
+/// 一个文件夹的有界只读索引批次，不代表完整邮箱镜像。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FolderBatch {
+    pub remote_name: String,
+    pub uidvalidity: u32,
+    pub since: i64,
+    pub has_more: bool,
+    pub messages: Vec<(u32, MessageEnvelope)>,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FolderCache {
+    pub folder: Folder,
+    pub synced_at: i64,
+    pub since: i64,
+    pub has_more: bool,
+    pub messages: Vec<CachedMessage>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FolderId(pub String);
 

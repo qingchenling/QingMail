@@ -6,6 +6,7 @@ rust-version.workspace = true
 
 [dependencies]
 mail-core = { workspace = true }
+mail-parser = { workspace = true }
 secret-service = { workspace = true }
 imap-proto = { workspace = true }
 nom = "=8.0.0"

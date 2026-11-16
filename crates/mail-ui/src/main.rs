@@ -1,5 +1,4 @@
-//! QingMail P0 迭代 2：验证输入（含中文 IME）、列表、菜单与明暗主题切换
-//! （主文档 §9 P0、§11 任务 2、§10.3）。全部使用合成数据，不连接真实邮箱。
+//! QingMail 原生窗口入口：账号、只读邮件索引及既有开发验证窗口。
 
 use gpui_kit::base::input::InputState;
 use gpui_kit::prelude::*;
@@ -14,6 +13,7 @@ use gpui_kit_material::theme;
 mod accounts;
 mod composer;
 mod lifecycle;
+mod mailbox;
 mod perf_probe;
 mod reader;
 
@@ -199,6 +199,11 @@ impl Render for Home {
                     .flex()
                     .gap_2()
                     .child(
+                        MaterialButton::new("mailbox")
+                            .child("邮件")
+                            .on_click(|_, _, cx| mailbox::open(cx)),
+                    )
+                    .child(
                         MaterialButton::new("account-settings")
                             .child("添加邮箱")
                             .on_click(|_, _, cx| accounts::open(cx)),
@@ -325,6 +330,11 @@ fn main() {
         Command::Editor
     } else if args
         .iter()
+        .any(|arg| matches!(arg.as_str(), "--mailbox" | "--mailbox-probe"))
+    {
+        Command::Mailbox
+    } else if args
+        .iter()
         .any(|arg| matches!(arg.as_str(), "--accounts" | "--accounts-probe"))
     {
         Command::Accounts
@@ -348,7 +358,9 @@ fn main() {
         eprintln!("生命周期探针需要独立运行目录和草稿目录，未启动。");
         std::process::exit(1);
     }
-    if args.iter().any(|arg| arg == "--accounts-probe")
+    if args
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "--accounts-probe" | "--mailbox-probe"))
         && (std::env::var_os("QINGMAIL_P0_RUNTIME_ROOT").is_none()
             || std::env::var_os("QINGMAIL_P0_DRAFT_ROOT").is_none())
     {
@@ -390,6 +402,9 @@ fn main() {
                 return;
             }
             lifecycle::open_main(cx);
+            if command == Command::Mailbox {
+                mailbox::open(cx);
+            }
             if args
                 .iter()
                 .any(|arg| matches!(arg.as_str(), "--accounts" | "--accounts-probe"))
