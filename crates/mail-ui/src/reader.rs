@@ -1,4 +1,4 @@
-//! P0 合成邮件阅读窗口，不连接真实账号。
+//! 复用安全阅读组件：合成验证与按需下载的邮件均使用同一受控文档。
 use gpui_kit::{
     App, Bounds, Context, Entity, Image, ImageFormat, Render, TitlebarOptions, Window,
     WindowBounds, WindowOptions,
@@ -83,7 +83,30 @@ pub(super) fn open(cx: &mut App) {
     }
 }
 
+pub(super) fn open_content(content: MailContent, cx: &mut App) {
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+            None,
+            size(px(1100.), px(760.)),
+            cx,
+        ))),
+        titlebar: Some(TitlebarOptions {
+            title: Some("QingMail — 简化阅读".into()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    if gpui_kit::open_window(options, cx, |_, cx| {
+        cx.new(|cx| Reader::from_content(content, true, cx))
+    })
+    .is_err()
+    {
+        eprintln!("无法打开邮件阅读窗口");
+    }
+}
+
 struct Reader {
+    external: bool,
     selected: usize,
     content: MailContent,
     text: Entity<TextViewState>,
@@ -97,17 +120,45 @@ struct Reader {
 impl Reader {
     fn new(cx: &mut Context<Self>) -> Self {
         let content = mail_content::parse(SAMPLES[0].1).expect("bounded synthetic sample");
+        Self::from_content(content, false, cx)
+    }
+    fn from_content(content: MailContent, external: bool, cx: &mut Context<Self>) -> Self {
         let text = cx.new(|cx| TextViewState::html(&content.document.native_html(), cx));
-        Self {
+        let mut this = Self {
+            external,
             selected: 0,
             content,
             text,
             plain: false,
             font_size: 16.0,
             busy: false,
-            status: "合成邮件 · 不连接真实邮箱".into(),
+            status: if external {
+                "已打开缓存邮件 · 简化阅读 · 远程图片默认阻止".into()
+            } else {
+                "合成邮件 · 不连接真实邮箱".into()
+            },
             images: Vec::new(),
+        };
+        this.refresh_text(cx);
+        if external && std::env::args().any(|a| a == "--body-probe") {
+            cx.spawn(async move |entity, cx| {
+                cx.background_executor().timer(std::time::Duration::from_millis(200)).await;
+                entity.update(cx, |this, cx| {
+                    assert!(this.external);
+                    assert!(!this.content.plain.is_empty());
+                    assert!(!this.images.is_empty());
+                    assert!(!this.content.attachments.is_empty());
+                    this.plain = true;
+                    this.refresh_text(cx);
+                    this.plain = false;
+                    this.refresh_text(cx);
+                    CopyStore::open(&cache_parent().unwrap()).unwrap().write(&this.content).unwrap();
+                    eprintln!("QINGMAIL_BODY_PROBE: PASS · offline cache / native reader / CID / attachments / plain toggle / browser copy");
+                    cx.quit();
+                }).expect("body reader probe");
+            }).detach();
         }
+        this
     }
 
     fn refresh_text(&mut self, cx: &mut Context<Self>) {
@@ -330,14 +381,20 @@ impl Render for Reader {
             );
         let samples = div()
             .id("content-samples")
-            .w(px(240.0))
+            .w(px(if self.external { 0. } else { 240. }))
             .flex_shrink_0()
             .overflow_y_scroll()
-            .children(SAMPLES.iter().enumerate().map(|(index, (label, _))| {
-                ListItem::new(index, *label)
-                    .selected(self.selected == index)
-                    .on_click(cx.listener(move |this, _, _, cx| this.select(index, cx)))
-            }));
+            .children(
+                SAMPLES
+                    .iter()
+                    .enumerate()
+                    .take(if self.external { 0 } else { SAMPLES.len() })
+                    .map(|(index, (label, _))| {
+                        ListItem::new(index, *label)
+                            .selected(self.selected == index)
+                            .on_click(cx.listener(move |this, _, _, cx| this.select(index, cx)))
+                    }),
+            );
         let body =
             div()
                 .id("content-reader")
@@ -423,18 +480,25 @@ impl Render for Reader {
             .bg(theme::color(ColorRole::SURFACE))
             .text_color(theme::color(ColorRole::ON_SURFACE))
             .child(TextSelectionLayer)
-            .child(
-                div()
-                    .p_3()
-                    .text_size(px(18.0))
-                    .child("QingMail · P0 邮件内容验证"),
-            )
+            .child(div().p_3().text_size(px(18.0)).child(if self.external {
+                "QingMail · 简化阅读"
+            } else {
+                "QingMail · P0 邮件内容验证"
+            }))
             .child(div().flex().flex_1().min_h_0().child(samples).child(body))
             .child(div().p_3().text_size(px(12.0)).child(self.status.clone()))
     }
 }
 
 fn cache_parent() -> std::io::Result<PathBuf> {
+    if let Some(root) = std::env::var_os("QINGMAIL_P0_DRAFT_ROOT") {
+        let path = PathBuf::from(root).join("reading-cache");
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&path)?;
+        return Ok(path);
+    }
     let root = match std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .filter(|path| path.is_absolute())

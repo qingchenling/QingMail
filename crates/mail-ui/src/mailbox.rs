@@ -142,6 +142,29 @@ impl Mailbox {
             })
             .detach();
         }
+        if std::env::args().any(|a| a == "--body-probe") {
+            cx.spawn_in(window, async move |entity, cx| {
+                for step in 0..3 {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(700))
+                        .await;
+                    entity
+                        .update_in(cx, |this, _, cx| {
+                            assert!(!this.busy);
+                            match step {
+                                0 => this.select_folder("INBOX".into(), cx),
+                                1 => {
+                                    this.selected = Some(0);
+                                    this.read_message(cx);
+                                }
+                                _ => panic!("body reader did not complete: {}", this.status),
+                            }
+                        })
+                        .expect("body probe mailbox");
+                }
+            })
+            .detach();
+        }
         this
     }
     fn reload(&mut self, cx: &mut Context<Self>) {
@@ -377,6 +400,72 @@ impl Mailbox {
                     this.status = format!("同步失败：{e}。保留上次缓存，可重试");
                     cx.notify();
                 }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+    fn read_message(&mut self, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        let Some(message) = self
+            .selected
+            .and_then(|index| self.messages().get(index))
+            .cloned()
+        else {
+            return;
+        };
+        let Some((account, settings)) = self.account.clone() else {
+            return;
+        };
+        if account != message.location.account {
+            return;
+        }
+        let Some(name) = self.selected_folder.clone() else {
+            return;
+        };
+        self.busy = true;
+        self.status = "正在读取缓存；未缓存时将只读下载完整邮件（含内含附件，最多8MiB）…".into();
+        let store = self.store.clone();
+        let task = cx.background_executor().spawn(async move {
+            let raw = match receive(store.message_body(message.location.clone()))? {
+                Some(raw) => raw,
+                None => {
+                    let _guard = NETWORK
+                        .try_lock()
+                        .map_err(|_| "另一个网络请求仍在结束，请稍后重试".to_owned())?;
+                    let credentials = SystemVault.load(&account).map_err(|e| e.to_string())?;
+                    let raw = sync::message(
+                        &settings.imap,
+                        &credentials.imap,
+                        &name,
+                        message.location.uidvalidity,
+                        message.location.uid,
+                    )
+                    .map_err(|e| e.to_string())?;
+                    receive(store.save_message_body(message.location.clone(), raw.clone()))?;
+                    // 重新读取时再核对关联与摘要；不将损坏缓存误当可用下载。
+                    receive(store.message_body(message.location.clone()))?
+                        .ok_or_else(|| "邮件缓存未确认".to_owned())?
+                }
+            };
+            mail_content::parse(&raw).map_err(|e| e.to_string())
+        });
+        cx.spawn(async move |entity, cx| {
+            let result = task.await;
+            let _ = entity.update(cx, |this, cx| {
+                this.busy = false;
+                match result {
+                    Ok(content) => {
+                        this.status = "邮件已缓存并交给简化阅读，远端已读状态未改变".into();
+                        cx.defer(move |cx| crate::reader::open_content(content, cx));
+                    }
+                    Err(e) => {
+                        this.status = format!("无法打开邮件：{e}。索引与原缓存已保留，可重试")
+                    }
+                };
+                cx.notify();
             });
         })
         .detach();
@@ -695,7 +784,8 @@ impl Render for Mailbox {
                     "UID {} · UIDVALIDITY {}",
                     message.location.uid, message.location.uidvalidity
                 ))
-                .child("正文尚未下载。本轮只读索引，不改变远端已读状态。");
+                .child("首次打开将下载完整邮件及其内含附件（≤8MiB）；缓存后可离线重开，不改变远端已读状态。")
+                .child(MaterialButton::new("read-cached-message").disabled(self.busy).child("打开正文 / 缓存").on_click(cx.listener(|this,_,_,cx|this.read_message(cx))));
         } else {
             detail = detail.child("选择邮件查看头部详情");
         }

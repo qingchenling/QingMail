@@ -173,3 +173,78 @@ fn more_than_200_results_are_bounded_without_claiming_full_sync() {
     assert!(result.has_more);
     worker.join().unwrap();
 }
+
+fn body_fixture(mode: &str) -> Result<Vec<u8>, CheckError> {
+    let (cert, key) = certificate();
+    let accept = acceptor(&cert, &key);
+    let listener = listener();
+    let settings = server(&listener, ConnectionSecurity::Tls);
+    let mode = mode.to_owned();
+    let worker = thread::spawn(move || {
+        let mut r = BufReader::new(accept.accept(socket(listener)).unwrap());
+        r.get_mut().write_all(b"* OK synthetic\r\n").unwrap();
+        assert!(line(&mut r).starts_with("QM2 LOGIN "));
+        r.get_mut().write_all(b"QM2 OK authenticated\r\n").unwrap();
+        assert_eq!(line(&mut r), "QM3 EXAMINE \"INBOX\"\r\n");
+        let epoch = if mode == "epoch" { 99 } else { 42 };
+        r.get_mut()
+            .write_all(
+                format!("* OK [UIDVALIDITY {epoch}] stable\r\nQM3 OK [READ-ONLY] examined\r\n")
+                    .as_bytes(),
+            )
+            .unwrap();
+        if mode == "epoch" {
+            let mut next = String::new();
+            let _ = std::io::BufRead::read_line(&mut r, &mut next);
+            assert!(next.is_empty());
+            return;
+        }
+        assert_eq!(line(&mut r), "QM4 UID FETCH 7 (UID BODY.PEEK[])\r\n");
+        if mode == "oversize" {
+            r.get_mut()
+                .write_all(b"* 1 FETCH (UID 7 BODY[] {8388609}\r\n")
+                .unwrap();
+            return;
+        }
+        let mut raw="Subject: downloaded\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n正文🙂\n((((( \"quoted\" { literal data".as_bytes().to_vec();
+        if mode == "large" {
+            raw.extend(vec![b'x'; 2 * 1024 * 1024]);
+        }
+        let uid = if mode == "wrong-uid" { 8 } else { 7 };
+        r.get_mut()
+            .write_all(format!("* 88 FETCH (UID {uid} BODY[] {{{}}}\r\n", raw.len()).as_bytes())
+            .unwrap();
+        if mode == "partial" {
+            r.get_mut().write_all(&raw[..20]).unwrap();
+            return;
+        }
+        r.get_mut().write_all(&raw).unwrap();
+        r.get_mut().write_all(b")\r\nQM4 OK fetched\r\n").unwrap();
+        if mode == "wrong-uid" {
+            return;
+        }
+        assert_eq!(line(&mut r), "QM9 LOGOUT\r\n");
+    });
+    let tls = native_tls::TlsConnector::builder()
+        .add_root_certificate(native_tls::Certificate::from_pem(&cert).unwrap())
+        .build()
+        .unwrap();
+    let result = message_using(&settings, "synthetic-password", "INBOX", 42, 7, &tls);
+    worker.join().unwrap();
+    result
+}
+#[test]
+fn full_mime_download_is_read_only_and_preserves_literal_bytes_above_index_budget() {
+    let small = body_fixture("good").unwrap();
+    assert!(small.ends_with(b"literal data"));
+    assert!(String::from_utf8_lossy(&small).contains("正文🙂"));
+    let large = body_fixture("large").unwrap();
+    assert_eq!(large.len(), small.len() + 2 * 1024 * 1024);
+}
+#[test]
+fn changed_epoch_wrong_uid_truncation_and_oversize_never_return_a_body() {
+    assert_eq!(body_fixture("epoch"), Err(CheckError::EpochChanged));
+    assert_eq!(body_fixture("wrong-uid"), Err(CheckError::Protocol));
+    assert_eq!(body_fixture("oversize"), Err(CheckError::Limit));
+    assert!(body_fixture("partial").is_err());
+}

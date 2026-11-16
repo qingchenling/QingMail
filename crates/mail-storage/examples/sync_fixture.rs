@@ -95,5 +95,19 @@ fn main() {
             1794816000,
         )
         .unwrap();
+    if std::env::args().any(|arg| arg == "--bodies") {
+        let cache = store
+            .folder_cache(&account, "INBOX", None)
+            .unwrap()
+            .unwrap();
+        let samples: &[&[u8]] = &[
+            include_bytes!("../../../tests/fixtures/mime/03-alternative-related.eml"),
+            include_bytes!("../../../tests/fixtures/mime/04-adversarial.eml"),
+            include_bytes!("../../../tests/fixtures/mime/06-broken.eml"),
+        ];
+        for (message, raw) in cache.messages.iter().zip(samples) {
+            store.save_message_body(&message.location, raw).unwrap();
+        }
+    }
     println!("合成目录与240封头部索引已写入隔离目录；未创建系统凭据或访问网络");
 }
