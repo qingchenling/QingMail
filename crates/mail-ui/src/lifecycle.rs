@@ -26,6 +26,7 @@ pub(super) struct Lifecycle {
     editors: Vec<Editor>,
     worker: Background,
     storage: mail_daemon::storage::StorageWorker,
+    sync: mail_daemon::SyncEngine,
     sending: mail_daemon::sending::SendCoordinator,
     _control: Option<ControlServer>,
     tray: Option<Tray>,
@@ -60,6 +61,7 @@ pub(super) fn start(instance: Option<Instance>, cx: &mut App) -> Result<(), Stri
     let storage =
         mail_daemon::storage::StorageWorker::start(storage_path).map_err(|e| e.to_string())?;
     let worker = Background::start().map_err(|e| e.to_string())?;
+    let sync = mail_daemon::SyncEngine::start(storage.client());
     let tray_enabled = !std::env::args().any(|arg| {
         matches!(
             arg.as_str(),
@@ -75,6 +77,7 @@ pub(super) fn start(instance: Option<Instance>, cx: &mut App) -> Result<(), Stri
         editors: vec![],
         worker,
         storage,
+        sync,
         sending: Default::default(),
         _control: control,
         tray: None,
@@ -210,6 +213,15 @@ pub(super) fn storage(cx: &App) -> mail_daemon::storage::StorageClient {
     cx.global::<Lifecycle>().storage.client()
 }
 
+pub(super) fn sync_status(cx: &App) -> String {
+    cx.global::<Lifecycle>().sync.status()
+}
+pub(super) fn sync_paused(cx: &App) -> bool {
+    cx.global::<Lifecycle>().sync.paused()
+}
+pub(super) fn toggle_sync(cx: &App) {
+    cx.global::<Lifecycle>().sync.toggle_paused();
+}
 pub(super) fn sending(cx: &App) -> mail_daemon::sending::SendCoordinator {
     cx.global::<Lifecycle>().sending.clone()
 }

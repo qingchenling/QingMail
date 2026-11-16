@@ -216,43 +216,16 @@ fn copy_over(
 
 /// 优先沿用上次记录的文件夹；否则按已知“已发送”名称与叶子名做确定性选择。
 pub fn choose_sent_folder(folders: &[RemoteFolder], preferred: Option<&str>) -> Option<String> {
-    let selectable = folders.iter().filter(|folder| folder.selectable);
-    if let Some(preferred) = preferred
-        && let Some(folder) = selectable.clone().find(|folder| folder.name == preferred)
-    {
-        return Some(folder.name.clone());
-    }
-    let mut best: Option<(u8, &str)> = None;
-    for folder in selectable {
-        let leaf = leaf_name(folder);
-        let score = if leaf == "sent" {
-            0
-        } else if SENT_NAMES.contains(&leaf.as_str()) {
-            1
-        } else if leaf.starts_with("已发送")
-            || leaf.starts_with("sent ")
-            || leaf.starts_with("sent-")
-        {
-            2
-        } else {
-            continue;
-        };
-        if best.is_none_or(|(current, _)| score < current) {
-            best = Some((score, &folder.name));
-        }
-    }
-    best.map(|(_, name)| name.to_owned())
+    crate::folders::choose(
+        folders,
+        preferred,
+        SENT_NAMES,
+        &["sent ", "sent-", "已发送"],
+    )
 }
-fn leaf_name(folder: &RemoteFolder) -> String {
-    // 服务端名是 modified UTF-7；先解码，才能识别中文“已发送”等常见名称。
-    let decoded = accounts::folder_label(&folder.name);
-    let leaf = match folder.delimiter.as_deref().and_then(|d| d.chars().next()) {
-        Some(separator) => decoded.rsplit(separator).next().unwrap_or(&decoded),
-        None => decoded.rsplit(['/', '.']).next().unwrap_or(&decoded),
-    };
-    leaf.trim().to_lowercase()
-}
+
 const SENT_NAMES: &[&str] = &[
+    "sent",
     "sent items",
     "sent messages",
     "sent mail",

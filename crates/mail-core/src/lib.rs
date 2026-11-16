@@ -49,14 +49,30 @@ pub struct RemoteFolder {
     pub delimiter: Option<String>,
     pub selectable: bool,
 }
-/// 一个文件夹的有界只读索引批次，不代表完整邮箱镜像。
+/// 一个文件夹的有界索引批次；Recent 表示最近窗口，History 表示主动更早历史。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchKind {
+    Recent,
+    History,
+}
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MessageFlags {
+    pub seen: bool,
+    pub flagged: bool,
+}
+/// 一个文件夹的有界索引批次，不代表完整邮箱镜像。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FolderBatch {
     pub remote_name: String,
     pub uidvalidity: u32,
     pub since: i64,
     pub has_more: bool,
+    /// 本次是否覆盖整个查询范围（无分页游标）；只有完整最近批次可对账删除。
+    pub complete: bool,
+    pub kind: BatchKind,
     pub messages: Vec<(u32, MessageEnvelope)>,
+    /// 每封邮件的远端标记；缺失时按未读/未星标处理。
+    pub flags: std::collections::BTreeMap<u32, MessageFlags>,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FolderCache {
@@ -94,6 +110,8 @@ pub struct CachedMessage {
     pub id: MessageId,
     pub location: MailUid,
     pub envelope: MessageEnvelope,
+    pub seen: bool,
+    pub flagged: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

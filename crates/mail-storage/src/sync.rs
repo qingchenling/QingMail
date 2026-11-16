@@ -1,5 +1,5 @@
 use super::*;
-use mail_core::{FolderBatch, FolderCache, RemoteFolder};
+use mail_core::{BatchKind, FolderBatch, FolderCache, RemoteFolder};
 use std::collections::HashSet;
 
 impl Store {
@@ -141,13 +141,33 @@ impl Store {
         for (uid, message) in &batch.messages {
             let existing:Option<String>=tx.query_row("SELECT message_id FROM folder_messages WHERE account_id=?1 AND folder_id=?2 AND uidvalidity=?3 AND uid=?4",params![account.0,id,batch.uidvalidity,uid],|r|r.get(0)).optional()?;
             let message_id = existing.map(Ok).unwrap_or_else(new_id)?;
+            let flags = batch.flags.get(uid).copied().unwrap_or_default();
             tx.execute("INSERT INTO messages VALUES (?1,?2,?3,?4,?5) ON CONFLICT(id) DO UPDATE SET subject=excluded.subject,sender=excluded.sender,received_at=excluded.received_at",params![message_id,account.0,message.subject,message.sender,message.received_at])?;
             tx.execute(
-                "INSERT INTO folder_messages VALUES (?1,?2,?3,?4,?5) ON CONFLICT DO NOTHING",
-                params![account.0, id, batch.uidvalidity, uid, message_id],
+                "INSERT INTO folder_messages(account_id,folder_id,uidvalidity,uid,message_id,seen,flagged) VALUES (?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(account_id,folder_id,uidvalidity,uid) DO UPDATE SET seen=excluded.seen,flagged=excluded.flagged",
+                params![account.0, id, batch.uidvalidity, uid, message_id, flags.seen, flags.flagged],
             )?;
         }
-        tx.execute("INSERT INTO folder_sync VALUES (?1,?2,?3,?4) ON CONFLICT(folder_id) DO UPDATE SET synced_at=excluded.synced_at,since=excluded.since,has_more=excluded.has_more",params![id,now,batch.since,batch.has_more])?;
+        // 只有最近窗口的完整批次才删除远端已不存在的缓存；90天之前的缓存保留。
+        if batch.kind == BatchKind::Recent && batch.complete && !batch.has_more {
+            let cached: Vec<(u32, i64)> = tx
+                .prepare("SELECT fm.uid,m.received_at FROM folder_messages fm JOIN messages m ON m.id=fm.message_id AND m.account_id=fm.account_id WHERE fm.account_id=?1 AND fm.folder_id=?2 AND fm.uidvalidity=?3")?
+                .query_map(params![account.0, id, batch.uidvalidity], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<std::result::Result<_, _>>()?;
+            for (uid, received_at) in cached {
+                if !uids.contains(&uid) && received_at >= batch.since {
+                    tx.execute(
+                        "DELETE FROM folder_messages WHERE account_id=?1 AND folder_id=?2 AND uidvalidity=?3 AND uid=?4",
+                        params![account.0, id, batch.uidvalidity, uid],
+                    )?;
+                }
+            }
+        }
+        if batch.kind == BatchKind::Recent {
+            tx.execute("INSERT INTO folder_sync VALUES (?1,?2,?3,?4) ON CONFLICT(folder_id) DO UPDATE SET synced_at=excluded.synced_at,since=excluded.since,has_more=excluded.has_more",params![id,now,batch.since,batch.has_more])?;
+        } else {
+            tx.execute("INSERT INTO folder_sync VALUES (?1,?2,?3,?4) ON CONFLICT(folder_id) DO UPDATE SET synced_at=excluded.synced_at,has_more=excluded.has_more",params![id,now,batch.since,batch.has_more])?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -182,6 +202,67 @@ impl Store {
             since,
             has_more,
         }))
+    }
+
+    /// 远端标记操作成功后回写本地；失败时调用方不得改动缓存。
+    pub fn set_flags(
+        &mut self,
+        account: &AccountId,
+        name: &str,
+        uidvalidity: u32,
+        uids: &[u32],
+        seen: Option<bool>,
+        flagged: Option<bool>,
+    ) -> Result<()> {
+        let folder_id = self.folder_id(account, name)?;
+        let tx = self.connection.transaction()?;
+        for uid in uids {
+            if let Some(seen) = seen {
+                tx.execute(
+                    "UPDATE folder_messages SET seen=?1 WHERE account_id=?2 AND folder_id=?3 AND uidvalidity=?4 AND uid=?5",
+                    params![seen, account.0, folder_id, uidvalidity, uid],
+                )?;
+            }
+            if let Some(flagged) = flagged {
+                tx.execute(
+                    "UPDATE folder_messages SET flagged=?1 WHERE account_id=?2 AND folder_id=?3 AND uidvalidity=?4 AND uid=?5",
+                    params![flagged, account.0, folder_id, uidvalidity, uid],
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// 远端移动/删除成功后移除源文件夹缓存；目标文件夹等下次同步补齐。
+    pub fn remove_cached(
+        &mut self,
+        account: &AccountId,
+        name: &str,
+        uidvalidity: u32,
+        uids: &[u32],
+    ) -> Result<()> {
+        let folder_id = self.folder_id(account, name)?;
+        let tx = self.connection.transaction()?;
+        for uid in uids {
+            tx.execute(
+                "DELETE FROM folder_messages WHERE account_id=?1 AND folder_id=?2 AND uidvalidity=?3 AND uid=?4",
+                params![account.0, folder_id, uidvalidity, uid],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn folder_id(&self, account: &AccountId, name: &str) -> Result<String> {
+        self.connection
+            .query_row(
+                "SELECT id FROM folders WHERE account_id=?1 AND remote_name=?2",
+                params![account.0, name],
+                |r| r.get(0),
+            )
+            .optional()?
+            .ok_or(Error::Invalid("文件夹尚未同步，请先刷新"))
     }
 }
 #[cfg(test)]
@@ -225,6 +306,9 @@ mod tests {
             uidvalidity: epoch,
             since: 1,
             has_more: false,
+            complete: true,
+            kind: BatchKind::Recent,
+            flags: Default::default(),
             messages: vec![(
                 uid,
                 MessageEnvelope {
@@ -290,6 +374,75 @@ mod tests {
         assert_eq!(store.folder_cache(&a, "INBOX", None).unwrap().unwrap(), new);
     }
     #[test]
+    fn flags_prune_and_remove_follow_remote_updates() {
+        use mail_core::MessageFlags;
+        let root = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&root.path().join("data")).unwrap();
+        let account = store.create_account(&settings()).unwrap();
+        store
+            .replace_remote_folders(&account, &catalog(), 1)
+            .unwrap();
+        let mut recent = batch(1, 4);
+        recent.flags.insert(
+            4,
+            MessageFlags {
+                seen: true,
+                flagged: true,
+            },
+        );
+        store.apply_folder_batch(&account, &recent, 2).unwrap();
+        let cache = store
+            .folder_cache(&account, "INBOX", None)
+            .unwrap()
+            .unwrap();
+        assert!(cache.messages[0].seen);
+        assert!(cache.messages[0].flagged);
+
+        // 完整最近批次缺少的 UID 视为远端已移走/删除。
+        let mut without = batch(1, 5);
+        without.since = 10;
+        store.apply_folder_batch(&account, &without, 3).unwrap();
+        let cache = store
+            .folder_cache(&account, "INBOX", None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(cache.messages.len(), 1);
+        assert_eq!(cache.messages[0].location.uid, 5);
+
+        // 90天之前的历史缓存不因最近窗口完整批次而删除。
+        let mut history = batch(1, 2);
+        history.kind = BatchKind::History;
+        history.since = 10;
+        history.messages[0].1.received_at = 1;
+        store.apply_folder_batch(&account, &history, 4).unwrap();
+        let mut latest = batch(1, 6);
+        latest.since = 10;
+        store.apply_folder_batch(&account, &latest, 5).unwrap();
+        let cache = store
+            .folder_cache(&account, "INBOX", None)
+            .unwrap()
+            .unwrap();
+        assert!(cache.messages.iter().any(|m| m.location.uid == 2));
+        assert!(!cache.messages.iter().any(|m| m.location.uid == 5));
+
+        store
+            .set_flags(&account, "INBOX", 1, &[6], Some(true), Some(true))
+            .unwrap();
+        let cache = store
+            .folder_cache(&account, "INBOX", None)
+            .unwrap()
+            .unwrap();
+        let message = cache.messages.iter().find(|m| m.location.uid == 6).unwrap();
+        assert!(message.seen && message.flagged);
+        store.remove_cached(&account, "INBOX", 1, &[6]).unwrap();
+        let cache = store
+            .folder_cache(&account, "INBOX", None)
+            .unwrap()
+            .unwrap();
+        assert!(!cache.messages.iter().any(|m| m.location.uid == 6));
+    }
+
+    #[test]
     fn invalid_catalog_and_failed_sql_keep_previous_cache() {
         let root = tempfile::tempdir().unwrap();
         let mut store = Store::open(&root.path().join("data")).unwrap();
@@ -315,7 +468,7 @@ mod tests {
         let path = root.path().join("data");
         let mut store = Store::open(&path).unwrap();
         let a = store.create_account(&settings()).unwrap();
-        store.connection.execute_batch("DROP TABLE message_bodies; DROP TABLE remote_folders; DROP TABLE folder_sync; DROP TABLE catalog_sync; ALTER TABLE send_tasks DROP COLUMN copy_folder; ALTER TABLE send_tasks DROP COLUMN copy_uidvalidity; ALTER TABLE send_tasks DROP COLUMN copy_uid; PRAGMA user_version=3;").unwrap();
+        store.connection.execute_batch("DROP TABLE message_bodies; DROP TABLE remote_folders; DROP TABLE folder_sync; DROP TABLE catalog_sync; ALTER TABLE send_tasks DROP COLUMN copy_folder; ALTER TABLE send_tasks DROP COLUMN copy_uidvalidity; ALTER TABLE send_tasks DROP COLUMN copy_uid; ALTER TABLE folder_messages DROP COLUMN seen; ALTER TABLE folder_messages DROP COLUMN flagged; PRAGMA user_version=3;").unwrap();
         drop(store);
         let store = Store::open(&path).unwrap();
         assert_eq!(store.account(&a).unwrap(), Some(settings()));

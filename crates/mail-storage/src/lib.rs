@@ -21,7 +21,7 @@ use private_dir::PrivateDir;
 use rusqlite::{Connection, MAIN_DB, OpenFlags, OptionalExtension, params};
 use std::{fmt, fs::File, io, path::Path, time::Duration};
 
-const SCHEMA_VERSION: u32 = 6;
+const SCHEMA_VERSION: u32 = 7;
 const APPLICATION_ID: u32 = 0x514d4149;
 const SCHEMA: &str = include_str!("schema.sql");
 const SCHEMA_V2: &str = include_str!("schema-v2.sql");
@@ -329,7 +329,7 @@ impl Store {
             params![id,location.account.0,envelope.subject,envelope.sender,envelope.received_at],
         )?;
         tx.execute(
-            "INSERT INTO folder_messages VALUES (?1,?2,?3,?4,?5) ON CONFLICT DO NOTHING",
+            "INSERT INTO folder_messages(account_id,folder_id,uidvalidity,uid,message_id,seen,flagged) VALUES (?1,?2,?3,?4,?5,0,0) ON CONFLICT DO NOTHING",
             params![
                 location.account.0,
                 location.folder_id,
@@ -353,7 +353,7 @@ impl Store {
             return Err(Error::Invalid("分页数量须为 1–200"));
         }
         let mut query = self.connection.prepare(
-            "SELECT m.id,fm.uid,m.subject,m.sender,m.received_at FROM folder_messages fm JOIN messages m ON m.id=fm.message_id AND m.account_id=fm.account_id WHERE fm.account_id=?1 AND fm.folder_id=?2 AND fm.uidvalidity=?3 AND (?4 IS NULL OR fm.uid < ?4) ORDER BY fm.uid DESC LIMIT ?5",
+            "SELECT m.id,fm.uid,m.subject,m.sender,m.received_at,fm.seen,fm.flagged FROM folder_messages fm JOIN messages m ON m.id=fm.message_id AND m.account_id=fm.account_id WHERE fm.account_id=?1 AND fm.folder_id=?2 AND fm.uidvalidity=?3 AND (?4 IS NULL OR fm.uid < ?4) ORDER BY fm.uid DESC LIMIT ?5",
         )?;
         Ok(query
             .query_map(
@@ -378,6 +378,8 @@ impl Store {
                             sender: r.get(3)?,
                             received_at: r.get(4)?,
                         },
+                        seen: r.get(5)?,
+                        flagged: r.get(6)?,
                     })
                 },
             )?
@@ -449,6 +451,9 @@ fn migrate(
     }
     if version < 6 {
         tx.execute_batch(include_str!("schema-v6.sql"))?;
+    }
+    if version < 7 {
+        tx.execute_batch(include_str!("schema-v7.sql"))?;
     }
     tx.pragma_update(None, "application_id", APPLICATION_ID)?;
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;

@@ -2,9 +2,11 @@
 mod instance;
 pub mod sending;
 pub mod storage;
+pub mod sync_engine;
 mod tray;
 
 pub use instance::{Command, Instance, Launch, control};
+pub use sync_engine::SyncEngine;
 pub use tray::Tray;
 
 use std::{
