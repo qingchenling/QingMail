@@ -1,9 +1,9 @@
-//! 单进程一次发送协调；存储线程发许可，独立线程做凭据与网络，结果再持久化。
+//! 单进程一次发送协调；存储线程发许可，独立线程做凭据、网络与已发送副本。
 use crate::storage::{StorageClient, StorageResult, receive};
-use mail_core::{AccountId, DraftHeaders, DraftId};
+use mail_core::{AccountId, DraftHeaders, DraftId, SendState, SendTaskId, ServerSettings};
 use mail_service::{
     credentials::{CredentialVault, SystemVault},
-    outgoing,
+    outgoing, sent,
 };
 use mail_storage::{SendTask, SmtpAttempt, Store, StoredDraft};
 use std::sync::{
@@ -111,6 +111,56 @@ pub(crate) fn begin(
     })
 }
 
+fn copy_outcome(result: sent::CopyResult) -> mail_storage::CopyOutcome {
+    match result {
+        sent::CopyResult::Saved(saved) => mail_storage::CopyOutcome::Saved {
+            folder: saved.folder,
+            uidvalidity: saved.uidvalidity,
+            uid: saved.uid,
+            existed: saved.existed,
+        },
+        // 只有网络中断等不可确认分支进入 Uncertain；失败与不确定都保持 CopyPending。
+        sent::CopyResult::Failed(error) if error.is_uncertain() => {
+            mail_storage::CopyOutcome::Uncertain { code: error.code() }
+        }
+        sent::CopyResult::Failed(error) => mail_storage::CopyOutcome::Failed { code: error.code() },
+    }
+}
+
+/// 用冻结快照确定性重建同一份 MIME，再交给副本适配；不涉及 SMTP。
+fn save_copy(
+    store: &StorageClient,
+    account: &AccountId,
+    task: &SendTaskId,
+    imap_password: &str,
+    copy: impl FnOnce(&ServerSettings, &str, &str, &[u8], Option<&str>) -> sent::CopyResult,
+) -> StorageResult<SendTask> {
+    let ready = receive(store.copy_ready(account.clone(), task.clone()))?;
+    let message = match outgoing::prepare(&ready.snapshot, true) {
+        Ok(message) => message,
+        Err(_) => {
+            receive(store.finish_copy(
+                account.clone(),
+                task.clone(),
+                mail_storage::CopyOutcome::Failed {
+                    code: "copy_prepare_failed",
+                },
+            ))?;
+            return receive(store.task(account.clone(), task.clone()));
+        }
+    };
+    let result = copy(
+        &ready.imap,
+        imap_password,
+        &ready.snapshot.message_id,
+        message.raw(),
+        ready.folder.as_deref(),
+    );
+    receive(store.finish_copy(account.clone(), task.clone(), copy_outcome(result)))
+        .map_err(|e| format!("副本结果尚未确认写盘，请勿重发，稍后刷新发送记录：{e}"))?;
+    receive(store.task(account.clone(), task.clone()))
+}
+
 fn dispatch(
     store: StorageClient,
     review: SendReview,
@@ -121,13 +171,36 @@ fn dispatch(
         &str,
         outgoing::PreparedMessage,
     ) -> outgoing::Delivery,
+    copy: impl FnOnce(&ServerSettings, &str, &str, &[u8], Option<&str>) -> sent::CopyResult,
 ) -> StorageResult<SendTask> {
     // 取密钥先于建立任务；密钥库不可用时草稿仍可编辑且无未提交任务。
     let credentials = vault.load(&review.account).map_err(|e| e.to_string())?;
     let ready = receive(store.begin_send(review, allow_empty_subject))?;
     let result = transmit(&ready.server, &credentials.smtp, ready.message);
-    receive(store.finish_send(ready.attempt, result.outcome))
-        .map_err(|e| format!("发送结果尚未确认写盘，请勿重复发送：{e}"))
+    let task = receive(store.finish_send(ready.attempt, result.outcome))
+        .map_err(|e| format!("发送结果尚未确认写盘，请勿重复发送：{e}"))?;
+    if task.state != SendState::CopyPending {
+        return Ok(task);
+    }
+    // SMTP 已接受；保存副本失败不推翻发送结论，也不自动重发。
+    save_copy(
+        &store,
+        &task.account,
+        &task.id,
+        credentials.imap.as_str(),
+        copy,
+    )
+}
+
+fn retry_copy_once(
+    store: StorageClient,
+    vault: &impl CredentialVault,
+    account: AccountId,
+    task: SendTaskId,
+    copy: impl FnOnce(&ServerSettings, &str, &str, &[u8], Option<&str>) -> sent::CopyResult,
+) -> StorageResult<SendTask> {
+    let credentials = vault.load(&account).map_err(|e| e.to_string())?;
+    save_copy(&store, &account, &task, credentials.imap.as_str(), copy)
 }
 
 #[derive(Clone, Default)]
@@ -158,8 +231,19 @@ impl SendCoordinator {
                 allow_empty_subject,
                 &SystemVault,
                 outgoing::deliver,
+                sent::save_copy,
             )
         })
+    }
+
+    /// 只允许 CopyPending 任务；重试前按冻结 Message-ID 查重，绝不重发邮件。
+    pub fn retry_copy(
+        &self,
+        store: StorageClient,
+        account: AccountId,
+        task: SendTaskId,
+    ) -> StorageResult<Receiver<StorageResult<SendTask>>> {
+        self.start(move || retry_copy_once(store, &SystemVault, account, task, sent::save_copy))
     }
 
     fn start(

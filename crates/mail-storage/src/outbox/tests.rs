@@ -125,12 +125,31 @@ fn task_snapshot_stays_frozen_after_draft_change_and_discard() {
             .is_err()
     );
     assert_eq!(store.begin_copy(&account, &id).unwrap(), snapshot);
-    store.finish_copy(&account, &id, false).unwrap();
+    store
+        .finish_copy(
+            &account,
+            &id,
+            CopyOutcome::Failed {
+                code: "copy_append_rejected",
+            },
+        )
+        .unwrap();
     assert_eq!(
         store.task(&account, &id).unwrap().state,
         SendState::CopyPending
     );
-    store.finish_copy(&account, &id, true).unwrap();
+    store
+        .finish_copy(
+            &account,
+            &id,
+            CopyOutcome::Saved {
+                folder: "Sent".into(),
+                uidvalidity: 42,
+                uid: Some(7),
+                existed: false,
+            },
+        )
+        .unwrap();
     assert_eq!(store.task(&account, &id).unwrap().state, SendState::Sent);
     assert!(store.begin_smtp(&account, &id).is_err());
     assert!(store.begin_copy(&account, &id).is_err());
@@ -446,7 +465,20 @@ fn cancel_and_stop_do_not_create_submissions_or_claim_recall() {
     let uncertain = task(&mut store, &account);
     let attempt = store.begin_smtp(&account, &uncertain).unwrap();
     assert!(store.cancel_pending(&account, &uncertain).is_err());
-    assert!(store.finish_copy(&account, &uncertain, true).is_err());
+    assert!(
+        store
+            .finish_copy(
+                &account,
+                &uncertain,
+                CopyOutcome::Saved {
+                    folder: "Sent".into(),
+                    uidvalidity: 42,
+                    uid: Some(7),
+                    existed: false,
+                },
+            )
+            .is_err()
+    );
     assert!(store.begin_copy(&account, &uncertain).is_err());
     assert!(
         store
@@ -583,7 +615,7 @@ fn v2_upgrade_keeps_existing_drafts_and_remote_account_identity() {
     drop(store);
     // 从当前库移除 v3/v4 的结构，恢复真实 v2 布局；正文和 v2 行保持原样。
     let conn = Connection::open(path.join("state.sqlite3")).unwrap();
-    conn.execute_batch("DROP TABLE message_bodies; DROP TABLE remote_folders; DROP TABLE folder_sync; DROP TABLE catalog_sync; DROP TABLE local_editor; DROP INDEX one_local_workspace; ALTER TABLE accounts DROP COLUMN kind; PRAGMA user_version=2;").unwrap();
+    conn.execute_batch("DROP TABLE message_bodies; DROP TABLE remote_folders; DROP TABLE folder_sync; DROP TABLE catalog_sync; DROP TABLE local_editor; DROP INDEX one_local_workspace; ALTER TABLE accounts DROP COLUMN kind; ALTER TABLE send_tasks DROP COLUMN copy_folder; ALTER TABLE send_tasks DROP COLUMN copy_uidvalidity; ALTER TABLE send_tasks DROP COLUMN copy_uid; PRAGMA user_version=2;").unwrap();
     drop(conn);
     let mut store = Store::open(&path).unwrap();
     assert_eq!(store.draft(&account, &draft.id).unwrap(), draft);
@@ -596,5 +628,128 @@ fn v2_upgrade_keeps_existing_drafts_and_remote_account_identity() {
             .file_name()
             .to_string_lossy()
             .starts_with("migration-v2-")
+    }));
+}
+
+#[test]
+fn copy_is_confirmed_before_sent_and_failures_keep_the_task_retryable() {
+    let (_root, mut store, account) = setup();
+    let id = task(&mut store, &account);
+    let attempt = store.begin_smtp(&account, &id).unwrap();
+    store.finish_smtp(attempt, SmtpOutcome::Accepted).unwrap();
+    assert_eq!(
+        store.task(&account, &id).unwrap().state,
+        SendState::CopyPending
+    );
+    let ready = store.copy_ready(&account, &id).unwrap();
+    assert_eq!(ready.imap, settings().imap);
+    assert!(ready.folder.is_none());
+    assert_eq!(store.copy_pending_tasks(&account).unwrap().len(), 1);
+
+    for code in [
+        "copy_no_sent_folder",
+        "copy_append_rejected",
+        "copy_result_unknown",
+    ] {
+        let outcome = if code == "copy_result_unknown" {
+            CopyOutcome::Uncertain { code }
+        } else {
+            CopyOutcome::Failed { code }
+        };
+        store.finish_copy(&account, &id, outcome).unwrap();
+        let task = store.task(&account, &id).unwrap();
+        assert_eq!(task.state, SendState::CopyPending);
+        assert_eq!(task.detail, code);
+        assert!(task.copy.is_none());
+        assert!(store.begin_smtp(&account, &id).is_err());
+        assert!(
+            store
+                .resend_task(&account, &id, ResendAuthorization::UserConfirmed)
+                .is_err()
+        );
+    }
+    assert!(
+        store
+            .finish_copy(
+                &account,
+                &id,
+                CopyOutcome::Failed {
+                    code: "server said: password rejected",
+                },
+            )
+            .is_err(),
+        "only fixed diagnostic codes may be stored"
+    );
+
+    // 查重命中也只写副本位置，不产生第二个 SMTP 许可。
+    store
+        .finish_copy(
+            &account,
+            &id,
+            CopyOutcome::Saved {
+                folder: "Sent Items".into(),
+                uidvalidity: 42,
+                uid: Some(9),
+                existed: true,
+            },
+        )
+        .unwrap();
+    let task = store.task(&account, &id).unwrap();
+    assert_eq!(task.state, SendState::Sent);
+    assert_eq!(task.detail, "copy_already_present");
+    assert_eq!(
+        task.copy,
+        Some(SentCopy {
+            folder: "Sent Items".into(),
+            uidvalidity: 42,
+            uid: Some(9),
+        })
+    );
+    assert!(store.copy_pending_tasks(&account).unwrap().is_empty());
+    assert!(store.copy_ready(&account, &id).is_err());
+    assert!(store.begin_copy(&account, &id).is_err());
+
+    // 副本保存成功后，编辑草稿仍不能再次提交同一版本。
+    assert!(store.begin_smtp(&account, &id).is_err());
+}
+
+#[test]
+fn v5_upgrade_adds_copy_columns_and_preserves_copy_pending_tasks() {
+    let (root, mut store, account) = setup();
+    let id = task(&mut store, &account);
+    let attempt = store.begin_smtp(&account, &id).unwrap();
+    store.finish_smtp(attempt, SmtpOutcome::Accepted).unwrap();
+    let path = root.path().join("qingmail");
+    drop(store);
+    let conn = Connection::open(path.join("state.sqlite3")).unwrap();
+    conn.execute_batch(
+        "ALTER TABLE send_tasks DROP COLUMN copy_folder; \
+         ALTER TABLE send_tasks DROP COLUMN copy_uidvalidity; \
+         ALTER TABLE send_tasks DROP COLUMN copy_uid; \
+         PRAGMA user_version=5;",
+    )
+    .unwrap();
+    drop(conn);
+    let store = Store::open(&path).unwrap();
+    let columns = store
+        .connection
+        .prepare("PRAGMA table_info(send_tasks)")
+        .unwrap()
+        .query_map([], |r| r.get::<_, String>(1))
+        .unwrap()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap();
+    for name in ["copy_folder", "copy_uidvalidity", "copy_uid"] {
+        assert!(columns.iter().any(|column| column == name), "{name}");
+    }
+    let task = store.task(&account, &id).unwrap();
+    assert_eq!(task.state, SendState::CopyPending);
+    assert!(task.copy.is_none());
+    assert!(store.begin_copy(&account, &id).is_ok());
+    assert!(fs::read_dir(&path).unwrap().any(|e| {
+        e.unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("migration-v5-")
     }));
 }

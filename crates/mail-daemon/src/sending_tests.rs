@@ -120,7 +120,8 @@ fn missing_credential_creates_no_task_and_outcomes_persist_without_retry() {
                 preview,
                 false,
                 &Vault(false),
-                |_, _, _| panic!("no SMTP without credentials")
+                |_, _, _| panic!("no SMTP without credentials"),
+                |_, _, _, _, _| panic!("no copy without credentials"),
             )
             .is_err()
         );
@@ -144,14 +145,39 @@ fn missing_credential_creates_no_task_and_outcomes_persist_without_retry() {
                     detail: outgoing::DeliveryDetail::ResultUnknown,
                 }
             },
+            |server, password, message_id, raw, preferred| {
+                assert!(matches!(outcome, SmtpOutcome::Accepted));
+                assert_eq!(server.host, "example.invalid");
+                assert_eq!(password, "synthetic");
+                assert!(message_id.starts_with('<'));
+                assert!(!raw.is_empty());
+                assert!(preferred.is_none());
+                sent::CopyResult::Saved(sent::CopiedMessage {
+                    folder: "Sent".into(),
+                    uidvalidity: 42,
+                    uid: Some(7),
+                    existed: false,
+                })
+            },
         )
         .unwrap();
+        // SMTP 接受后才保存副本；其余结果不触碰 IMAP。
         let expected = match outcome {
-            SmtpOutcome::Accepted => SendState::CopyPending,
+            SmtpOutcome::Accepted => SendState::Sent,
             SmtpOutcome::DefinitelyRejected => SendState::Failed,
             SmtpOutcome::Uncertain => SendState::Uncertain,
         };
         assert_eq!(task.state, expected);
+        if matches!(outcome, SmtpOutcome::Accepted) {
+            assert_eq!(
+                task.copy,
+                Some(mail_storage::SentCopy {
+                    folder: "Sent".into(),
+                    uidvalidity: 42,
+                    uid: Some(7),
+                })
+            );
+        }
         worker.stop();
         let store = Store::open(&root.path().join("data")).unwrap();
         assert_eq!(
@@ -174,16 +200,30 @@ fn coordinator_rejects_concurrent_clicks_and_survives_view_receiver_drop() {
     let (done_tx, done_rx) = mpsc::sync_channel(1);
     let reply = coordinator
         .start(move || {
-            let result = dispatch(client, preview, false, &Vault(true), |_, _, _| {
-                entered_tx.send(()).unwrap();
-                release_rx
-                    .recv_timeout(std::time::Duration::from_secs(3))
-                    .unwrap();
-                outgoing::Delivery {
-                    outcome: SmtpOutcome::Accepted,
-                    detail: outgoing::DeliveryDetail::Accepted,
-                }
-            });
+            let result = dispatch(
+                client,
+                preview,
+                false,
+                &Vault(true),
+                |_, _, _| {
+                    entered_tx.send(()).unwrap();
+                    release_rx
+                        .recv_timeout(std::time::Duration::from_secs(3))
+                        .unwrap();
+                    outgoing::Delivery {
+                        outcome: SmtpOutcome::Accepted,
+                        detail: outgoing::DeliveryDetail::Accepted,
+                    }
+                },
+                |_, _, _, _, _| {
+                    sent::CopyResult::Saved(sent::CopiedMessage {
+                        folder: "Sent".into(),
+                        uidvalidity: 42,
+                        uid: Some(7),
+                        existed: false,
+                    })
+                },
+            );
             done_tx.send(()).unwrap();
             result
         })
@@ -204,7 +244,7 @@ fn coordinator_rejects_concurrent_clicks_and_survives_view_receiver_drop() {
         .unwrap();
     let tasks = receive(worker.client().draft_tasks(draft.account, draft.id)).unwrap();
     assert_eq!(tasks.len(), 1);
-    assert_eq!(tasks[0].state, SendState::CopyPending);
+    assert_eq!(tasks[0].state, SendState::Sent);
     worker.stop();
 }
 
@@ -228,4 +268,152 @@ fn changed_attachment_after_review_never_creates_send_task() {
     std::fs::write(root.path().join("data/objects").join(info.id.0), b"changed").unwrap();
     assert!(begin(&mut store, preview, false).is_err());
     assert!(store.task_ids(&draft.account).unwrap().is_empty());
+}
+
+#[test]
+fn copy_failure_keeps_task_pending_and_retry_only_saves_the_copy() {
+    let (root, store, draft) = setup();
+    drop(store);
+    let mut worker = StorageWorker::start(Some(root.path().join("data"))).unwrap();
+    let client = worker.client();
+    let preview = receive(client.review_send(draft.clone())).unwrap();
+    let mut smtp_calls = 0;
+    let task = dispatch(
+        client.clone(),
+        preview,
+        false,
+        &Vault(true),
+        |_, _, _| {
+            smtp_calls += 1;
+            outgoing::Delivery {
+                outcome: SmtpOutcome::Accepted,
+                detail: outgoing::DeliveryDetail::Accepted,
+            }
+        },
+        |_, _, _, _, _| sent::CopyResult::Failed(sent::CopyError::Rejected),
+    )
+    .unwrap();
+    assert_eq!(smtp_calls, 1);
+    assert_eq!(task.state, SendState::CopyPending);
+    assert_eq!(task.detail, "copy_append_rejected");
+    assert!(task.copy.is_none());
+    // 重试只提交副本：不经过 SMTP，也不创建第二个任务。
+    let saved = retry_copy_once(
+        client.clone(),
+        &Vault(true),
+        draft.account.clone(),
+        task.id.clone(),
+        |server, password, message_id, raw, preferred| {
+            assert_eq!(server.host, "example.invalid");
+            assert_eq!(password, "synthetic");
+            assert!(message_id.starts_with('<'));
+            assert!(!raw.is_empty());
+            assert!(preferred.is_none());
+            sent::CopyResult::Saved(sent::CopiedMessage {
+                folder: "Sent".into(),
+                uidvalidity: 42,
+                uid: Some(7),
+                existed: false,
+            })
+        },
+    )
+    .unwrap();
+    assert_eq!(saved.state, SendState::Sent);
+    assert_eq!(
+        saved.copy,
+        Some(mail_storage::SentCopy {
+            folder: "Sent".into(),
+            uidvalidity: 42,
+            uid: Some(7),
+        })
+    );
+    assert_eq!(smtp_calls, 1);
+    assert_eq!(
+        receive(client.draft_tasks(draft.account, draft.id))
+            .unwrap()
+            .len(),
+        1
+    );
+    worker.stop();
+}
+
+#[test]
+fn uncertain_copy_is_retried_by_finding_the_existing_copy() {
+    let (root, store, draft) = setup();
+    drop(store);
+    let mut worker = StorageWorker::start(Some(root.path().join("data"))).unwrap();
+    let client = worker.client();
+    let preview = receive(client.review_send(draft.clone())).unwrap();
+    let task = dispatch(
+        client.clone(),
+        preview,
+        false,
+        &Vault(true),
+        |_, _, _| outgoing::Delivery {
+            outcome: SmtpOutcome::Accepted,
+            detail: outgoing::DeliveryDetail::Accepted,
+        },
+        |_, _, _, _, _| sent::CopyResult::Failed(sent::CopyError::ResultUnknown),
+    )
+    .unwrap();
+    assert_eq!(task.state, SendState::CopyPending);
+    assert_eq!(task.detail, "copy_result_unknown");
+    let saved = retry_copy_once(
+        client.clone(),
+        &Vault(true),
+        draft.account.clone(),
+        task.id.clone(),
+        |_, _, _, _, _| {
+            sent::CopyResult::Saved(sent::CopiedMessage {
+                folder: "Sent".into(),
+                uidvalidity: 42,
+                uid: Some(9),
+                existed: true,
+            })
+        },
+    )
+    .unwrap();
+    assert_eq!(saved.state, SendState::Sent);
+    assert_eq!(saved.detail, "copy_already_present");
+    worker.stop();
+}
+
+#[test]
+fn retry_copy_rejects_tasks_that_already_have_a_saved_copy() {
+    let (root, store, draft) = setup();
+    drop(store);
+    let mut worker = StorageWorker::start(Some(root.path().join("data"))).unwrap();
+    let client = worker.client();
+    let preview = receive(client.review_send(draft.clone())).unwrap();
+    let task = dispatch(
+        client.clone(),
+        preview,
+        false,
+        &Vault(true),
+        |_, _, _| outgoing::Delivery {
+            outcome: SmtpOutcome::Accepted,
+            detail: outgoing::DeliveryDetail::Accepted,
+        },
+        |_, _, _, _, _| {
+            sent::CopyResult::Saved(sent::CopiedMessage {
+                folder: "Sent".into(),
+                uidvalidity: 42,
+                uid: None,
+                existed: false,
+            })
+        },
+    )
+    .unwrap();
+    assert_eq!(task.state, SendState::Sent);
+    assert!(
+        retry_copy_once(
+            client,
+            &Vault(true),
+            draft.account,
+            task.id,
+            |_, _, _, _, _| panic!("a saved copy must not be appended again"),
+        )
+        .is_err()
+    );
+    worker.stop();
 }

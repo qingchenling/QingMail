@@ -4,7 +4,7 @@ use std::io::Read;
 use mail_content::draft::{Draft, MAX_JSON};
 use mail_core::{
     AccountId, AttachmentId, DraftHeaders, DraftId, ResendAuthorization, SendState, SendTaskId,
-    SmtpOutcome,
+    ServerSettings, SmtpOutcome,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -40,6 +40,40 @@ pub struct SendTask {
     /// 固定诊断代码，不接受包含密码或服务器原始响应的错误字符串。
     pub detail: String,
     pub resend_of: Option<SendTaskId>,
+    /// 只有副本确认保存或查重命中后才存在；不表示允许重发。
+    pub copy: Option<SentCopy>,
+}
+/// 已保存副本的服务器位置。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SentCopy {
+    pub folder: String,
+    pub uidvalidity: u32,
+    /// 服务器未提供 APPENDUID 时为 None。
+    pub uid: Option<u32>,
+}
+/// 副本保存结果；Failed/Uncertain 都保持 CopyPending，只能重试副本。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CopyOutcome {
+    Saved {
+        folder: String,
+        uidvalidity: u32,
+        uid: Option<u32>,
+        existed: bool,
+    },
+    Failed {
+        code: &'static str,
+    },
+    Uncertain {
+        code: &'static str,
+    },
+}
+/// 副本网络阶段的只读输入；调用前后都不改变发送任务状态。
+#[derive(Debug)]
+pub struct CopyReady {
+    pub snapshot: OutgoingSnapshot,
+    /// 上次记录或用户可沿用的文件夹；None 时由网络层定位。
+    pub folder: Option<String>,
+    pub imap: ServerSettings,
 }
 /// 只能由成功持久化 Sending 状态的 begin_smtp 返回；不可克隆或自行构造。
 #[derive(Debug)]
@@ -316,7 +350,26 @@ impl Store {
     }
 
     pub fn task(&self, account: &AccountId, id: &SendTaskId) -> Result<SendTask> {
-        let (draft,revision,state,detail,parent):(String,u32,String,String,Option<String>)=self.connection.query_row("SELECT source_draft,source_revision,state,detail,resend_of FROM send_tasks WHERE id=?1 AND account_id=?2",params![id.0,account.0],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
+        type TaskRow = (
+            String,
+            u32,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<u32>,
+            Option<u32>,
+        );
+        let (draft,revision,state,detail,parent,folder,epoch,uid): TaskRow = self.connection.query_row("SELECT source_draft,source_revision,state,detail,resend_of,copy_folder,copy_uidvalidity,copy_uid FROM send_tasks WHERE id=?1 AND account_id=?2",params![id.0,account.0],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?)))?;
+        let copy = match (folder, epoch) {
+            (Some(folder), Some(uidvalidity)) if uidvalidity != 0 => Some(SentCopy {
+                folder,
+                uidvalidity,
+                uid,
+            }),
+            (None, None) => None,
+            _ => return Err(Error::Invalid("发送副本位置不完整")),
+        };
         Ok(SendTask {
             id: id.clone(),
             account: account.clone(),
@@ -325,6 +378,7 @@ impl Store {
             state: parse_state(&state)?,
             detail,
             resend_of: parent.map(SendTaskId),
+            copy,
         })
     }
 
@@ -404,14 +458,77 @@ impl Store {
         self.task_snapshot(account, id)
     }
 
-    pub fn finish_copy(&mut self, account: &AccountId, id: &SendTaskId, saved: bool) -> Result<()> {
-        self.transition(
-            account,
-            id,
-            "copy_pending",
-            if saved { "sent" } else { "copy_pending" },
-            if saved { "" } else { "copy_save_failed" },
-        )
+    /// 读取冻结快照、上次副本文件夹与 IMAP 配置；只在 CopyPending 时可用。
+    pub fn copy_ready(&self, account: &AccountId, id: &SendTaskId) -> Result<CopyReady> {
+        let task = self.task(account, id)?;
+        if task.state != SendState::CopyPending {
+            return Err(Error::Conflict);
+        }
+        let imap = self
+            .account(account)?
+            .ok_or(Error::Invalid("账号不存在"))?
+            .imap;
+        Ok(CopyReady {
+            snapshot: self.task_snapshot(account, id)?,
+            folder: task.copy.map(|copy| copy.folder),
+            imap,
+        })
+    }
+
+    /// 保存成功才进入 Sent；失败或不确定都保持 CopyPending，等待用户只重试副本。
+    pub fn finish_copy(
+        &mut self,
+        account: &AccountId,
+        id: &SendTaskId,
+        outcome: CopyOutcome,
+    ) -> Result<()> {
+        match outcome {
+            CopyOutcome::Saved {
+                folder,
+                uidvalidity,
+                uid,
+                existed,
+            } => {
+                if folder.is_empty()
+                    || folder.len() > 4096
+                    || folder.chars().any(char::is_control)
+                    || uidvalidity == 0
+                    || uid == Some(0)
+                {
+                    return Err(Error::Invalid("已发送副本位置无效"));
+                }
+                let detail = if existed { "copy_already_present" } else { "" };
+                if self.connection.execute(
+                    "UPDATE send_tasks SET state='sent',detail=?1,copy_folder=?2,copy_uidvalidity=?3,copy_uid=?4 WHERE id=?5 AND account_id=?6 AND state='copy_pending'",
+                    params![detail, folder, uidvalidity, uid, id.0, account.0],
+                )? != 1
+                {
+                    return Err(Error::Conflict);
+                }
+            }
+            CopyOutcome::Failed { code } | CopyOutcome::Uncertain { code } => {
+                if !known_copy_code(code) {
+                    return Err(Error::Invalid("未知副本诊断代码"));
+                }
+                if self.connection.execute(
+                    "UPDATE send_tasks SET detail=?1 WHERE id=?2 AND account_id=?3 AND state='copy_pending'",
+                    params![code, id.0, account.0],
+                )? != 1
+                {
+                    return Err(Error::Conflict);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// 副本仍需保存的任务；用于任务入口，不触发任何网络或自动重试。
+    pub fn copy_pending_tasks(&self, account: &AccountId) -> Result<Vec<SendTask>> {
+        let mut query=self.connection.prepare("SELECT id FROM send_tasks WHERE account_id=?1 AND state='copy_pending' ORDER BY created_at DESC,rowid DESC LIMIT 50")?;
+        let ids = query
+            .query_map([&account.0], |r| Ok(SendTaskId(r.get(0)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        ids.iter().map(|id| self.task(account, id)).collect()
     }
 
     pub fn cancel_pending(&mut self, account: &AccountId, id: &SendTaskId) -> Result<()> {
@@ -595,6 +712,25 @@ fn decode_headers(subject: String, recipients: &str) -> Result<DraftHeaders> {
     };
     validate_headers(&headers, false)?;
     Ok(headers)
+}
+/// 只接受固定诊断代码，避免把服务器原文或凭据写进任务记录。
+fn known_copy_code(code: &str) -> bool {
+    matches!(
+        code,
+        "copy_invalid"
+            | "copy_no_sent_folder"
+            | "copy_connection_failed"
+            | "copy_timeout"
+            | "copy_tls_failed"
+            | "copy_auth_failed"
+            | "copy_protocol_failed"
+            | "copy_limit"
+            | "copy_search_failed"
+            | "copy_append_rejected"
+            | "copy_result_unknown"
+            | "copy_prepare_failed"
+            | "copy_already_present"
+    )
 }
 fn parse_state(value: &str) -> Result<SendState> {
     match value {

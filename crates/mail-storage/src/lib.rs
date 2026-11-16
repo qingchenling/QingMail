@@ -6,8 +6,8 @@ mod outbox;
 mod paths;
 mod sync;
 pub use outbox::{
-    AttachmentInfo, DraftDocument, MAX_ATTACHMENT_BYTES, OutgoingAttachment, OutgoingSnapshot,
-    SendTask, SmtpAttempt, StoredDraft,
+    AttachmentInfo, CopyOutcome, CopyReady, DraftDocument, MAX_ATTACHMENT_BYTES,
+    OutgoingAttachment, OutgoingSnapshot, SendTask, SentCopy, SmtpAttempt, StoredDraft,
 };
 mod private_dir;
 
@@ -21,7 +21,7 @@ use private_dir::PrivateDir;
 use rusqlite::{Connection, MAIN_DB, OpenFlags, OptionalExtension, params};
 use std::{fmt, fs::File, io, path::Path, time::Duration};
 
-const SCHEMA_VERSION: u32 = 5;
+const SCHEMA_VERSION: u32 = 6;
 const APPLICATION_ID: u32 = 0x514d4149;
 const SCHEMA: &str = include_str!("schema.sql");
 const SCHEMA_V2: &str = include_str!("schema-v2.sql");
@@ -446,6 +446,9 @@ fn migrate(
     }
     if version < 5 {
         tx.execute_batch(include_str!("schema-v5.sql"))?;
+    }
+    if version < 6 {
+        tx.execute_batch(include_str!("schema-v6.sql"))?;
     }
     tx.pragma_update(None, "application_id", APPLICATION_ID)?;
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;

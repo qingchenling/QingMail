@@ -1,14 +1,42 @@
 //! 明确发送确认；预览不联网、不排队，发送结果持续展示。
 use super::*;
 use mail_core::SendState;
-fn state_label(state: SendState) -> &'static str {
-    match state {
+fn copy_detail_label(detail: &str) -> &'static str {
+    match detail {
+        "copy_no_sent_folder" => "未找到服务器“已发送”文件夹；请添加或重命名后重试副本",
+        "copy_auth_failed" => "IMAP 认证失败；请检查凭据后重试副本",
+        "copy_tls_failed" => "IMAP 加密连接失败",
+        "copy_connection_failed" => "暂时无法连接 IMAP 服务器",
+        "copy_timeout" => "IMAP 连接或响应超时",
+        "copy_protocol_failed" => "服务器响应不符合预期",
+        "copy_search_failed" => "无法确认是否已有同一副本，已停止追加以免重复",
+        "copy_append_rejected" => "服务器拒绝保存已发送副本",
+        "copy_limit" => "邮件或响应超过副本保存上限",
+        "copy_result_unknown" => "副本是否已保存未知；重试前会先查重",
+        "copy_prepare_failed" => "无法重建冻结的发送内容，副本未保存",
+        "copy_invalid" => "副本保存参数无效",
+        _ => "已发送副本尚未保存",
+    }
+}
+fn state_label(task: &mail_storage::SendTask) -> String {
+    let base = match task.state {
         SendState::Pending => "待提交；不会自动发送",
         SendState::Sending => "正在交给邮件服务器；请勿重复发送",
-        SendState::Sent => "发送成功，已保存副本",
+        SendState::Sent => {
+            if task.detail == "copy_already_present" {
+                "发送成功；服务器上已有同一副本，未重复保存"
+            } else {
+                "发送成功，已保存副本"
+            }
+        }
         SendState::Failed => "发送未完成；不会自动重试",
         SendState::Uncertain => "结果不确定：收件人可能已收到，请勿重复发送",
         SendState::CopyPending => "邮件服务器已接受；已发送副本尚未保存，请勿重发",
+    };
+    if task.state == SendState::CopyPending {
+        format!("{base}。{}", copy_detail_label(&task.detail))
+    } else {
+        base.into()
     }
 }
 impl Composer {
@@ -138,8 +166,48 @@ impl Composer {
             let _ = entity.update(cx, |this, cx| {
                 this.sending = false;
                 this.status = match result {
-                    Ok(task) => state_label(task.state).into(),
+                    Ok(task) => state_label(&task),
                     Err(e) => format!("未确认发送完成：{e}"),
+                };
+                this.refresh_send_tasks(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+    fn retry_copy(&mut self, task: &mail_storage::SendTask, cx: &mut Context<Self>) {
+        if self.closing || self.sending {
+            return;
+        }
+        let result = crate::lifecycle::sending(cx).retry_copy(
+            crate::lifecycle::storage(cx),
+            task.account.clone(),
+            task.id.clone(),
+        );
+        let reply = match result {
+            Ok(reply) => reply,
+            Err(e) => {
+                self.status = e;
+                cx.notify();
+                return;
+            }
+        };
+        self.sending = true;
+        self.status = "正在重试保存已发送副本；只重试副本，不会重发邮件…".into();
+        let task = cx.background_executor().spawn(async move {
+            reply
+                .recv()
+                .map_err(|_| "副本保存任务中断，请查看发送记录".to_owned())
+                .and_then(|r| r)
+        });
+        cx.spawn(async move |entity, cx| {
+            let result = task.await;
+            let _ = entity.update(cx, |this, cx| {
+                this.sending = false;
+                this.status = match result {
+                    Ok(task) => state_label(&task),
+                    Err(e) => format!("副本仍未保存：{e}"),
                 };
                 this.refresh_send_tasks(cx);
                 cx.notify();
@@ -231,12 +299,29 @@ impl Composer {
             .flex_col()
             .gap_1();
         for task in &self.send_tasks {
-            records = records.child(div().text_size(px(13.)).child(format!(
+            let mut row = div().flex().items_center().gap_2();
+            let mut text = format!(
                 "任务 {} · 草稿版本{} · {}",
                 &task.id.0[..8],
                 task.source_revision,
-                state_label(task.state)
-            )));
+                state_label(task)
+            );
+            if let Some(copy) = &task.copy {
+                text.push_str(&format!("（{}）", copy.folder));
+            }
+            row = row.child(div().text_size(px(13.)).child(text));
+            if task.state == SendState::CopyPending && !self.sending {
+                let task = task.clone();
+                row = row.child(
+                    MaterialButton::new(format!("retry-copy-{}", task.id.0))
+                        .child("重试保存副本")
+                        .disabled(self.loading || self.closing)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.retry_copy(&task, cx);
+                        })),
+                );
+            }
+            records = records.child(row);
         }
         area.child(records)
     }

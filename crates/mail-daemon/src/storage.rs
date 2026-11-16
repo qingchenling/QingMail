@@ -115,6 +115,22 @@ enum Request {
         outcome: mail_core::SmtpOutcome,
         reply: SyncSender<StorageResult<mail_storage::SendTask>>,
     },
+    CopyReady {
+        account: AccountId,
+        task: mail_core::SendTaskId,
+        reply: SyncSender<StorageResult<mail_storage::CopyReady>>,
+    },
+    FinishCopy {
+        account: AccountId,
+        task: mail_core::SendTaskId,
+        outcome: mail_storage::CopyOutcome,
+        reply: SyncSender<StorageResult<mail_storage::SendTask>>,
+    },
+    Task {
+        account: AccountId,
+        id: mail_core::SendTaskId,
+        reply: SyncSender<StorageResult<mail_storage::SendTask>>,
+    },
     DraftTasks {
         account: AccountId,
         id: mail_core::DraftId,
@@ -289,6 +305,37 @@ impl StorageClient {
             outcome,
             reply,
         })
+    }
+    pub(crate) fn copy_ready(
+        &self,
+        account: AccountId,
+        task: mail_core::SendTaskId,
+    ) -> StorageResult<Receiver<StorageResult<mail_storage::CopyReady>>> {
+        self.request(|reply| Request::CopyReady {
+            account,
+            task,
+            reply,
+        })
+    }
+    pub(crate) fn finish_copy(
+        &self,
+        account: AccountId,
+        task: mail_core::SendTaskId,
+        outcome: mail_storage::CopyOutcome,
+    ) -> StorageResult<Receiver<StorageResult<mail_storage::SendTask>>> {
+        self.request(|reply| Request::FinishCopy {
+            account,
+            task,
+            outcome,
+            reply,
+        })
+    }
+    pub(crate) fn task(
+        &self,
+        account: AccountId,
+        id: mail_core::SendTaskId,
+    ) -> StorageResult<Receiver<StorageResult<mail_storage::SendTask>>> {
+        self.request(|reply| Request::Task { account, id, reply })
     }
     pub fn draft_tasks(
         &self,
@@ -624,6 +671,33 @@ fn run(path: Option<PathBuf>, receiver: Receiver<Request>) {
                     s.finish_smtp(attempt, outcome).map_err(|e| e.to_string())?;
                     s.task(&account, &id).map_err(|e| e.to_string())
                 }));
+            }
+            Request::CopyReady {
+                account,
+                task,
+                reply,
+            } => {
+                let _ =
+                    reply
+                        .send(opened.and_then(|s| {
+                            s.copy_ready(&account, &task).map_err(|e| e.to_string())
+                        }));
+            }
+            Request::FinishCopy {
+                account,
+                task,
+                outcome,
+                reply,
+            } => {
+                let _ = reply.send(opened.and_then(|s| {
+                    s.finish_copy(&account, &task, outcome)
+                        .map_err(|e| e.to_string())?;
+                    s.task(&account, &task).map_err(|e| e.to_string())
+                }));
+            }
+            Request::Task { account, id, reply } => {
+                let _ = reply
+                    .send(opened.and_then(|s| s.task(&account, &id).map_err(|e| e.to_string())));
             }
             Request::DraftTasks { account, id, reply } => {
                 let _ = reply.send(
