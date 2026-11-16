@@ -1,0 +1,4 @@
+# 本机（Arch Linux）当前使用系统 Rust 1.100.0 且未安装 rustup，
+# 此文件在安装 rustup 后生效，用于锁定工具链。
+[toolchain]
+channel = "1.100.0"

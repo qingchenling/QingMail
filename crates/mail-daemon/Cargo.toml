@@ -1,0 +1,12 @@
+[package]
+name = "mail-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+mail-core = { workspace = true }
+mail-protocol = { workspace = true }
+mail-content = { workspace = true }
+mail-storage = { workspace = true }
+mail-service = { workspace = true }
