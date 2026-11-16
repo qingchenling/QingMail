@@ -12,6 +12,7 @@ mail-storage = { workspace = true }
 mail-service = { workspace = true }
 rustix = { workspace = true }
 zbus = { workspace = true }
+getrandom = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

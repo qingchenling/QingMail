@@ -20,6 +20,7 @@ struct Editor {
 pub(super) struct Lifecycle {
     main: Option<AnyWindowHandle>,
     reader: Option<AnyWindowHandle>,
+    accounts: Option<(AnyWindowHandle, WeakEntity<crate::accounts::Accounts>)>,
     editors: Vec<Editor>,
     worker: Background,
     storage: mail_daemon::storage::StorageWorker,
@@ -65,6 +66,7 @@ pub(super) fn start(instance: Option<Instance>, cx: &mut App) -> Result<(), Stri
     cx.set_global(Lifecycle {
         main: None,
         reader: None,
+        accounts: None,
         editors: vec![],
         worker,
         storage,
@@ -166,6 +168,18 @@ pub(super) fn register_reader(window: AnyWindowHandle, cx: &mut App) {
     cx.global_mut::<Lifecycle>().reader = Some(window);
 }
 
+pub(super) fn reuse_accounts(cx: &mut App) -> bool {
+    let window = cx.global::<Lifecycle>().accounts.as_ref().map(|(w, _)| *w);
+    window.is_some_and(|w| activate(w, cx))
+}
+pub(super) fn register_accounts(
+    window: AnyWindowHandle,
+    entity: WeakEntity<crate::accounts::Accounts>,
+    cx: &mut App,
+) {
+    cx.global_mut::<Lifecycle>().accounts = Some((window, entity));
+}
+
 pub(super) fn storage(cx: &App) -> mail_daemon::storage::StorageClient {
     cx.global::<Lifecycle>().storage.client()
 }
@@ -210,6 +224,7 @@ fn tick(cx: &mut App) {
                         Command::Open => open_main(cx),
                         Command::Editor => composer::open(cx),
                         Command::Reader => reader::open(cx),
+                        Command::Accounts => crate::accounts::open(cx),
                         _ => {
                             let _ = queue;
                         }
@@ -255,7 +270,12 @@ fn tick(cx: &mut App) {
                     break;
                 }
             }
-            if state.quitting && state.editors.is_empty() {
+            let account_saving = state.accounts.as_ref().is_some_and(|(_, entity)| {
+                entity
+                    .upgrade()
+                    .is_some_and(|entity| entity.read(cx).saving)
+            });
+            if state.quitting && state.editors.is_empty() && !account_saving {
                 cx.quit();
             }
         }

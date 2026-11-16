@@ -9,6 +9,7 @@ use std::{
 };
 
 pub type StorageResult<T> = Result<T, String>;
+pub type AccountList = Vec<(AccountId, mail_core::AccountSettings)>;
 
 #[derive(Clone)]
 pub struct StorageClient {
@@ -40,6 +41,14 @@ enum Request {
     Select {
         id: mail_core::DraftId,
         reply: SyncSender<StorageResult<StoredDraft>>,
+    },
+    AddAccount {
+        settings: Box<mail_core::AccountSettings>,
+        credentials: mail_service::credentials::Credentials,
+        reply: SyncSender<StorageResult<AccountId>>,
+    },
+    Accounts {
+        reply: SyncSender<StorageResult<AccountList>>,
     },
     Stop,
 }
@@ -82,6 +91,20 @@ impl StorageClient {
             .try_send(build(reply))
             .map_err(|_| "存储队列繁忙或后台已停止，请重试".to_owned())?;
         Ok(receive)
+    }
+    pub fn add_account(
+        &self,
+        settings: mail_core::AccountSettings,
+        credentials: mail_service::credentials::Credentials,
+    ) -> StorageResult<Receiver<StorageResult<AccountId>>> {
+        self.request(|reply| Request::AddAccount {
+            settings: Box::new(settings),
+            credentials,
+            reply,
+        })
+    }
+    pub fn accounts(&self) -> StorageResult<Receiver<StorageResult<AccountList>>> {
+        self.request(|reply| Request::Accounts { reply })
     }
     pub fn open_editor(
         &self,
@@ -181,6 +204,23 @@ fn run(path: Option<PathBuf>, receiver: Receiver<Request>) {
                     s.select_local_draft(&account, &id)
                         .map_err(|e| e.to_string())?;
                     Ok(draft)
+                }));
+            }
+            Request::Accounts { reply } => {
+                let _ = reply.send(opened.and_then(|s| s.accounts().map_err(|e| e.to_string())));
+            }
+            Request::AddAccount {
+                settings,
+                credentials,
+                reply,
+            } => {
+                let _ = reply.send(opened.and_then(|s| {
+                    persist_account(
+                        s,
+                        &mail_service::credentials::SystemVault,
+                        &settings,
+                        &credentials,
+                    )
                 }));
             }
             Request::Stop => break,
@@ -293,5 +333,168 @@ mod failure_tests {
         let draft = receive(client.open_editor(Draft::plain("initial").unwrap())).unwrap();
         assert_eq!(draft.document.body.text(), "initial");
         worker.stop();
+    }
+}
+
+fn persist_account(
+    store: &mut Store,
+    vault: &impl mail_service::credentials::CredentialVault,
+    settings: &mail_core::AccountSettings,
+    credentials: &mail_service::credentials::Credentials,
+) -> StorageResult<AccountId> {
+    let mut random = [0; 16];
+    getrandom::fill(&mut random).map_err(|_| "无法生成账号 ID".to_owned())?;
+    let id = AccountId(format!("{:032x}", u128::from_be_bytes(random)));
+    persist_account_with_id(store, vault, settings, credentials, id)
+}
+fn persist_account_with_id(
+    store: &mut Store,
+    vault: &impl mail_service::credentials::CredentialVault,
+    settings: &mail_core::AccountSettings,
+    credentials: &mail_service::credentials::Credentials,
+    id: AccountId,
+) -> StorageResult<AccountId> {
+    mail_service::accounts::validate(settings).map_err(|e| e.to_string())?;
+    if !store.accounts().map_err(|e| e.to_string())?.is_empty() {
+        return Err("P2 当前仅支持一个远程账号".into());
+    }
+    vault.save(&id, credentials).map_err(|e| match e {
+        mail_service::credentials::VaultError::OperationFailed
+        | mail_service::credentials::VaultError::Timeout => {
+            format!("{e}；账号未写入，密钥库可能留有凭据项")
+        }
+        _ => e.to_string(),
+    })?;
+    if let Err(e) = store.insert_account(&id, settings) {
+        // 提交结果可能不确定；只有确认账号不存在才删密钥。
+        match store.account(&id) {
+            Ok(None) => {
+                if vault.delete(&id).is_err() {
+                    return Err("账号保存失败，密钥库可能保留孤立凭据，请检查后重试".into());
+                }
+            }
+            _ => return Err("账号保存结果需重新检查，凭据已保留，请刷新账号列表".into()),
+        }
+        return Err(e.to_string());
+    }
+    Ok(id)
+}
+
+#[cfg(test)]
+mod account_tests {
+    use super::*;
+    use mail_core::{AccountSettings, ConnectionSecurity, ServerSettings};
+    use mail_service::credentials::{CredentialVault, Credentials, VaultError};
+    use std::cell::Cell;
+    struct Vault {
+        error: Option<VaultError>,
+        saves: Cell<usize>,
+        deletes: Cell<usize>,
+    }
+    impl CredentialVault for Vault {
+        fn status(&self) -> Result<(), VaultError> {
+            self.error.map_or(Ok(()), Err)
+        }
+        fn save(&self, _: &AccountId, _: &Credentials) -> Result<(), VaultError> {
+            self.saves.set(self.saves.get() + 1);
+            self.status()
+        }
+        fn load(&self, _: &AccountId) -> Result<Credentials, VaultError> {
+            Err(VaultError::Missing)
+        }
+        fn delete(&self, _: &AccountId) -> Result<(), VaultError> {
+            self.deletes.set(self.deletes.get() + 1);
+            Ok(())
+        }
+    }
+    fn settings() -> AccountSettings {
+        let server = ServerSettings {
+            host: "example.invalid".into(),
+            port: 993,
+            username: "synthetic".into(),
+            security: ConnectionSecurity::Tls,
+        };
+        AccountSettings {
+            display_name: "测试".into(),
+            address: "test@example.invalid".into(),
+            imap: server.clone(),
+            smtp: server,
+        }
+    }
+    #[test]
+    fn unavailable_locked_and_unknown_vault_results_never_insert_account() {
+        for error in [
+            VaultError::Unavailable,
+            VaultError::Locked,
+            VaultError::Missing,
+            VaultError::OperationFailed,
+            VaultError::Timeout,
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let mut store = Store::open(&root.path().join("data")).unwrap();
+            let vault = Vault {
+                error: Some(error),
+                saves: Cell::new(0),
+                deletes: Cell::new(0),
+            };
+            assert!(
+                persist_account(
+                    &mut store,
+                    &vault,
+                    &settings(),
+                    &Credentials::new("synthetic-imap".into(), "synthetic-smtp".into()).unwrap()
+                )
+                .is_err()
+            );
+            assert!(store.accounts().unwrap().is_empty());
+            assert_eq!(vault.saves.get(), 1);
+            assert_eq!(vault.deletes.get(), 0);
+        }
+    }
+    #[test]
+    fn confirmed_vault_save_precedes_account_and_second_account_is_rejected() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&root.path().join("data")).unwrap();
+        let vault = Vault {
+            error: None,
+            saves: Cell::new(0),
+            deletes: Cell::new(0),
+        };
+        let c = Credentials::new("synthetic-imap".into(), "synthetic-smtp".into()).unwrap();
+        let id = persist_account(&mut store, &vault, &settings(), &c).unwrap();
+        assert_eq!(store.account(&id).unwrap(), Some(settings()));
+        assert!(persist_account(&mut store, &vault, &settings(), &c).is_err());
+        assert_eq!(vault.saves.get(), 1);
+        drop(store);
+        let store = Store::open(&root.path().join("data")).unwrap();
+        assert_eq!(store.accounts().unwrap().len(), 1);
+        // 真实 SQLite 字节不能含任何密码。
+        let bytes = std::fs::read(root.path().join("data/state.sqlite3")).unwrap();
+        assert!(!bytes.windows(c.imap.len()).any(|w| w == c.imap.as_bytes()));
+        assert!(!bytes.windows(c.smtp.len()).any(|w| w == c.smtp.as_bytes()));
+    }
+    #[test]
+    fn failed_database_insert_cleans_only_confirmed_absent_remote_account() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&root.path().join("data")).unwrap();
+        let id = store.local_draft_account().unwrap();
+        let vault = Vault {
+            error: None,
+            saves: Cell::new(0),
+            deletes: Cell::new(0),
+        };
+        assert!(
+            persist_account_with_id(
+                &mut store,
+                &vault,
+                &settings(),
+                &Credentials::new("imap".into(), "smtp".into()).unwrap(),
+                id
+            )
+            .is_err()
+        );
+        assert!(store.accounts().unwrap().is_empty());
+        assert_eq!(vault.saves.get(), 1);
+        assert_eq!(vault.deletes.get(), 1);
     }
 }

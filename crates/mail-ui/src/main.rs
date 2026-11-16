@@ -11,6 +11,7 @@ use gpui_kit_material::icons::Assets;
 use gpui_kit_material::prelude::*;
 use gpui_kit_material::theme;
 
+mod accounts;
 mod composer;
 mod lifecycle;
 mod perf_probe;
@@ -198,6 +199,11 @@ impl Render for Home {
                     .flex()
                     .gap_2()
                     .child(
+                        MaterialButton::new("account-settings")
+                            .child("添加邮箱")
+                            .on_click(|_, _, cx| accounts::open(cx)),
+                    )
+                    .child(
                         MaterialButton::new("reading-demo")
                             .variant(ButtonVariant::Tonal)
                             .child("阅读验证")
@@ -317,6 +323,11 @@ fn main() {
         )
     }) {
         Command::Editor
+    } else if args
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "--accounts" | "--accounts-probe"))
+    {
+        Command::Accounts
     } else if args.iter().any(|arg| arg == "--content-demo") {
         Command::Reader
     } else {
@@ -335,6 +346,13 @@ fn main() {
         || std::env::var_os("QINGMAIL_P0_DRAFT_ROOT").is_none())
     {
         eprintln!("生命周期探针需要独立运行目录和草稿目录，未启动。");
+        std::process::exit(1);
+    }
+    if args.iter().any(|arg| arg == "--accounts-probe")
+        && (std::env::var_os("QINGMAIL_P0_RUNTIME_ROOT").is_none()
+            || std::env::var_os("QINGMAIL_P0_DRAFT_ROOT").is_none())
+    {
+        eprintln!("账号探针需要独立运行与数据目录");
         std::process::exit(1);
     }
     let instance = if isolated_probe {
@@ -372,6 +390,12 @@ fn main() {
                 return;
             }
             lifecycle::open_main(cx);
+            if args
+                .iter()
+                .any(|arg| matches!(arg.as_str(), "--accounts" | "--accounts-probe"))
+            {
+                accounts::open(cx);
+            }
             cx.activate(true);
             if command == Command::Reader {
                 reader::open(cx);
