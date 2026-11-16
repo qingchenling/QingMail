@@ -1,7 +1,8 @@
 //! 复用安全阅读组件：合成验证与按需下载的邮件均使用同一受控文档。
+use crate::reply::ReplyMode;
 use gpui_kit::{
-    App, Bounds, Context, Entity, Image, ImageFormat, Render, TitlebarOptions, Window,
-    WindowBounds, WindowOptions,
+    App, Bounds, Context, Entity, Image, ImageFormat, KeyDownEvent, Render, TitlebarOptions,
+    Window, WindowBounds, WindowOptions,
     base::{TextSelectionLayer, TextView, TextViewState},
     div, img,
     prelude::*,
@@ -9,6 +10,7 @@ use gpui_kit::{
 };
 use gpui_kit_material::{prelude::*, theme};
 use mail_content::{CopyStore, MailContent};
+use mail_core::AccountId;
 use std::{
     fs,
     io::Write,
@@ -83,7 +85,11 @@ pub(super) fn open(cx: &mut App) {
     }
 }
 
-pub(super) fn open_content(content: MailContent, cx: &mut App) {
+pub(super) fn open_content(
+    content: MailContent,
+    account: Option<(AccountId, String)>,
+    cx: &mut App,
+) {
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
             None,
@@ -97,7 +103,7 @@ pub(super) fn open_content(content: MailContent, cx: &mut App) {
         ..Default::default()
     };
     if gpui_kit::open_window(options, cx, |_, cx| {
-        cx.new(|cx| Reader::from_content(content, true, cx))
+        cx.new(|cx| Reader::from_content(content, true, account, cx))
     })
     .is_err()
     {
@@ -107,6 +113,7 @@ pub(super) fn open_content(content: MailContent, cx: &mut App) {
 
 struct Reader {
     external: bool,
+    account: Option<(AccountId, String)>,
     selected: usize,
     content: MailContent,
     text: Entity<TextViewState>,
@@ -120,12 +127,18 @@ struct Reader {
 impl Reader {
     fn new(cx: &mut Context<Self>) -> Self {
         let content = mail_content::parse(SAMPLES[0].1).expect("bounded synthetic sample");
-        Self::from_content(content, false, cx)
+        Self::from_content(content, false, None, cx)
     }
-    fn from_content(content: MailContent, external: bool, cx: &mut Context<Self>) -> Self {
+    fn from_content(
+        content: MailContent,
+        external: bool,
+        account: Option<(AccountId, String)>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let text = cx.new(|cx| TextViewState::html(&content.document.native_html(), cx));
         let mut this = Self {
             external,
+            account,
             selected: 0,
             content,
             text,
@@ -332,12 +345,66 @@ impl Reader {
     }
 }
 
+impl Reader {
+    fn compose(&mut self, mode: ReplyMode, cx: &mut Context<Self>) {
+        let Some((account, address)) = self.account.clone() else {
+            return;
+        };
+        let document = crate::reply::document(&self.content, &address, mode);
+        self.status = match mode {
+            ReplyMode::Forward => "已创建转发草稿，请在写信窗口确认收件人".into(),
+            ReplyMode::Reply => "已创建回复草稿".into(),
+            ReplyMode::ReplyAll => "已创建全部回复草稿".into(),
+        };
+        cx.defer(move |cx| {
+            crate::composer::open_document(account, address, document, cx);
+        });
+        cx.notify();
+    }
+    fn reply_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        let key = &event.keystroke;
+        if !key.modifiers.control || key.modifiers.alt || self.account.is_none() {
+            return false;
+        }
+        let mode = match key.key.as_str() {
+            "r" if key.modifiers.shift => ReplyMode::ReplyAll,
+            "r" => ReplyMode::Reply,
+            "f" if key.modifiers.shift => ReplyMode::Forward,
+            _ => return false,
+        };
+        self.compose(mode, cx);
+        true
+    }
+}
+
 impl Render for Reader {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let toolbar = div()
-            .flex()
-            .flex_wrap()
-            .gap_2()
+        let mut toolbar = div().flex().flex_wrap().gap_2();
+        if self.account.is_some() {
+            toolbar = toolbar
+                .child(
+                    MaterialButton::new("reply")
+                        .child("回复")
+                        .on_click(cx.listener(|this, _, _, cx| this.compose(ReplyMode::Reply, cx))),
+                )
+                .child(
+                    MaterialButton::new("reply-all")
+                        .variant(ButtonVariant::Tonal)
+                        .child("全部回复")
+                        .on_click(
+                            cx.listener(|this, _, _, cx| this.compose(ReplyMode::ReplyAll, cx)),
+                        ),
+                )
+                .child(
+                    MaterialButton::new("forward")
+                        .variant(ButtonVariant::Tonal)
+                        .child("转发")
+                        .on_click(
+                            cx.listener(|this, _, _, cx| this.compose(ReplyMode::Forward, cx)),
+                        ),
+                );
+        }
+        toolbar = toolbar
             .child(
                 MaterialButton::new("browser-copy")
                     .child("在浏览器中打开")
@@ -479,6 +546,12 @@ impl Render for Reader {
             .flex_col()
             .bg(theme::color(ColorRole::SURFACE))
             .text_color(theme::color(ColorRole::ON_SURFACE))
+            .capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if this.reply_key(event, cx) {
+                    cx.stop_propagation();
+                    window.prevent_default();
+                }
+            }))
             .child(TextSelectionLayer)
             .child(div().p_3().text_size(px(18.0)).child(if self.external {
                 "QingMail · 简化阅读"

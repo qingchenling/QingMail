@@ -221,6 +221,31 @@ impl Draft {
             .collect::<Vec<_>>()
             .join("\n")
     }
+
+    /// 把另一份草稿插入当前字节选区；用于清理后的 HTML 粘贴，属性随文本一起搬运。
+    pub fn splice(&mut self, bytes: Range<usize>, other: &Draft) -> Result<(), String> {
+        let range = self.scalar_range(bytes.clone())?;
+        let inserted_chars = other.text.chars().count();
+        if self.text.len() - bytes.len() + other.text.len() > MAX_TEXT {
+            return Err("草稿超过正文上限".into());
+        }
+        self.attributes
+            .splice(range, other.attributes.iter().take(inserted_chars).cloned());
+        self.text.replace_range(bytes, &other.text);
+        self.validate()
+    }
+
+    /// 清理后的基础 HTML 粘贴：只接受受控标签，导出为段落/强调/链接/列表/引用。
+    pub fn from_html(source: &str) -> Result<Self, String> {
+        if source.trim().is_empty() {
+            return Err("HTML 为空".into());
+        }
+        let sanitized =
+            crate::sanitize::sanitize(source, &[]).map_err(|error| error.to_string())?;
+        let mut builder = HtmlDraft::default();
+        builder.nodes(&sanitized.document.nodes, &HtmlStyle::default());
+        builder.finish()
+    }
 }
 
 fn append_run(html: &mut String, text: &str, attr: &Attributes) {
@@ -254,6 +279,142 @@ fn escape(value: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&#39;")
+}
+
+#[derive(Default)]
+struct HtmlDraft {
+    text: String,
+    attributes: Vec<Attributes>,
+    overflow: bool,
+}
+#[derive(Clone, Default)]
+struct HtmlStyle {
+    bold: bool,
+    italic: bool,
+    link: Option<String>,
+    block: Block,
+}
+impl HtmlDraft {
+    fn push(&mut self, value: &str, style: &HtmlStyle) {
+        for ch in value.chars() {
+            if self.text.len() + ch.len_utf8() > MAX_TEXT {
+                self.overflow = true;
+                return;
+            }
+            self.text.push(ch);
+            self.attributes.push(Attributes {
+                bold: style.bold,
+                italic: style.italic,
+                link: style.link.clone(),
+                block: style.block,
+            });
+        }
+    }
+    fn newline(&mut self, style: &HtmlStyle) {
+        if !self.text.ends_with('\n') {
+            self.push("\n", style);
+        }
+    }
+    fn ensure_line(&mut self) {
+        if !self.text.is_empty() && !self.text.ends_with('\n') {
+            self.push("\n", &HtmlStyle::default());
+        }
+    }
+    fn nodes(&mut self, nodes: &[crate::Node], style: &HtmlStyle) {
+        for node in nodes {
+            match node {
+                crate::Node::Text(value) => self.push(value, style),
+                crate::Node::Element { kind, children } => match kind {
+                    crate::Element::Container => self.nodes(children, style),
+                    crate::Element::Paragraph => {
+                        self.ensure_line();
+                        self.nodes(children, style);
+                        self.newline(style);
+                    }
+                    crate::Element::Heading(_) => {
+                        self.ensure_line();
+                        let mut heading = style.clone();
+                        heading.bold = true;
+                        self.nodes(children, &heading);
+                        self.newline(style);
+                    }
+                    crate::Element::Strong => {
+                        let mut strong = style.clone();
+                        strong.bold = true;
+                        self.nodes(children, &strong);
+                    }
+                    crate::Element::Emphasis => {
+                        let mut emphasis = style.clone();
+                        emphasis.italic = true;
+                        self.nodes(children, &emphasis);
+                    }
+                    crate::Element::Quote => {
+                        self.ensure_line();
+                        let mut quote = style.clone();
+                        quote.block = Block::Quote;
+                        self.nodes(children, &quote);
+                        self.newline(&quote);
+                    }
+                    crate::Element::List { .. } => {
+                        self.ensure_line();
+                        self.nodes(children, style);
+                    }
+                    crate::Element::ListItem => {
+                        self.ensure_line();
+                        let mut item = style.clone();
+                        item.block = Block::Bullet;
+                        self.nodes(children, &item);
+                        self.newline(&item);
+                    }
+                    crate::Element::Link(url) => {
+                        let mut link = style.clone();
+                        if link.link.is_none() {
+                            link.link = crate::safe_link(url);
+                        }
+                        self.nodes(children, &link);
+                    }
+                    crate::Element::Break => self.newline(style),
+                    crate::Element::Rule => {
+                        self.ensure_line();
+                        self.push("————", style);
+                        self.newline(style);
+                    }
+                    crate::Element::Pre | crate::Element::Code => self.nodes(children, style),
+                    crate::Element::Image { alt, .. } => {
+                        if !alt.is_empty() {
+                            self.push(alt, style);
+                        }
+                    }
+                    crate::Element::Table => self.nodes(children, style),
+                    crate::Element::TableHead | crate::Element::TableBody => {
+                        self.nodes(children, style)
+                    }
+                    crate::Element::TableRow => {
+                        self.ensure_line();
+                        self.nodes(children, style);
+                        self.newline(style);
+                    }
+                    crate::Element::TableCell { .. } => {
+                        self.nodes(children, style);
+                        self.push(" ", style);
+                    }
+                },
+            }
+        }
+    }
+    fn finish(mut self) -> Result<Draft, String> {
+        if self.overflow {
+            return Err("HTML 粘贴超过正文上限".into());
+        }
+        self.attributes.push(Attributes::default());
+        let draft = Draft {
+            version: 1,
+            text: self.text,
+            attributes: self.attributes,
+        };
+        draft.validate()?;
+        Ok(draft)
+    }
 }
 
 #[cfg(test)]
@@ -296,5 +457,57 @@ mod tests {
         );
         assert!(Draft::from_json(b"{}").is_err());
         assert!(Draft::plain(&"x".repeat(MAX_TEXT + 1)).is_err());
+    }
+}
+
+#[cfg(test)]
+mod html_tests {
+    use super::*;
+
+    #[test]
+    fn html_paste_is_cleaned_and_keeps_basic_attributes() {
+        let draft = Draft::from_html(
+            "<p>你好 <b>世界</b> <a href=\"https://example.org/?a=1&amp;b=2\">链接</a></p>\
+             <script>alert(1)</script><ul><li>条目</li></ul>",
+        )
+        .unwrap();
+        assert!(draft.text().contains("你好 世界 链接"));
+        assert!(!draft.text().contains("alert"));
+        let scalar =
+            |text: &str, needle: &str| draft.text()[..text.find(needle).unwrap()].chars().count();
+        let world = scalar(draft.text(), "世界");
+        assert!(draft.attributes()[world].bold);
+        let link = scalar(draft.text(), "链接");
+        assert_eq!(
+            draft.attributes()[link].link.as_deref(),
+            Some("https://example.org/?a=1&b=2")
+        );
+        let bullet = scalar(draft.text(), "条目");
+        assert_eq!(draft.attributes()[bullet].block, Block::Bullet);
+        assert!(
+            Draft::from_html("<script>alert(1)</script>")
+                .unwrap()
+                .text()
+                .is_empty()
+        );
+        assert!(Draft::from_html("   ").is_err());
+    }
+
+    #[test]
+    fn splice_inserts_text_and_attributes_at_a_byte_range() {
+        let mut base = Draft::plain("A C").unwrap();
+        let insertion = Draft::from_html("<b>B</b>").unwrap();
+        base.splice(2..2, &insertion).unwrap();
+        // 字节 2 位于空格与 C 之间：插入结果紧邻 C。
+        assert_eq!(base.text(), "A BC");
+        let index = base.text()[..base.text().find('B').unwrap()]
+            .chars()
+            .count();
+        assert!(base.attributes()[index].bold);
+        assert!(!base.attributes()[0].bold);
+        // 越界或超限必须拒绝，保留原正文。
+        let before = base.text().to_owned();
+        assert!(base.splice(0..99, &insertion).is_err());
+        assert_eq!(base.text(), before);
     }
 }

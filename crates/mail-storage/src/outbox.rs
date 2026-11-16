@@ -266,6 +266,44 @@ impl Store {
         })
     }
 
+    /// 当前编辑上下文中选中的草稿正文原始字节；坏草稿也能取出，供明确另存恢复。
+    pub fn selected_draft_body(&self, account: &AccountId) -> Result<Option<Vec<u8>>> {
+        let Some(id) = self.selected_local_draft(account)? else {
+            return Ok(None);
+        };
+        let body: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT body_id FROM drafts WHERE id=?1 AND account_id=?2",
+                params![id.0, account.0],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(body) = body else {
+            return Ok(None);
+        };
+        Ok(Some(objects::read(
+            &self.objects,
+            &self.connection,
+            account,
+            &body,
+            "body",
+            MAX_JSON as u64,
+        )?))
+    }
+
+    /// 只删除草稿行与关联，保留对象文件；用于坏草稿的明确放弃，不自动覆盖。
+    pub fn discard_selected_draft(&mut self, account: &AccountId) -> Result<()> {
+        let Some(id) = self.selected_local_draft(account)? else {
+            return Ok(());
+        };
+        self.connection.execute(
+            "DELETE FROM drafts WHERE id=?1 AND account_id=?2",
+            params![id.0, account.0],
+        )?;
+        Ok(())
+    }
+
     pub fn draft_ids(&self, account: &AccountId) -> Result<Vec<DraftId>> {
         let mut query = self
             .connection

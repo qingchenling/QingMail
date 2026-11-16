@@ -188,6 +188,10 @@ impl SendTasks {
         let settings = self.settings.clone();
         self.busy = true;
         self.status = "正在准备发送内容…".into();
+        let reader_account = self
+            .account
+            .clone()
+            .map(|account| (account, self.address.clone()));
         let job = cx.background_executor().spawn(async move {
             // 已保存副本优先从服务器读取；失败或没有 UID 时退回冻结快照，
             // 两者是同一份 MIME（APPEND 的字节由同一快照确定性重建）。
@@ -238,7 +242,9 @@ impl SendTasks {
                 match result {
                     Ok((content, note)) => {
                         this.status = note;
-                        cx.defer(move |cx| crate::reader::open_content(content, cx));
+                        cx.defer(move |cx| {
+                            crate::reader::open_content(content, reader_account, cx)
+                        });
                     }
                     Err(e) => this.status = format!("无法打开发送内容：{e}"),
                 }

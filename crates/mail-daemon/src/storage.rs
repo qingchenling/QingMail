@@ -53,6 +53,19 @@ enum Request {
         body: Draft,
         reply: SyncSender<StorageResult<StoredDraft>>,
     },
+    NewDocument {
+        account: AccountId,
+        document: Box<mail_storage::DraftDocument>,
+        reply: SyncSender<StorageResult<StoredDraft>>,
+    },
+    SelectedDraftBody {
+        account: Option<AccountId>,
+        reply: SyncSender<StorageResult<Option<Vec<u8>>>>,
+    },
+    DiscardSelectedDraft {
+        account: Option<AccountId>,
+        reply: SyncSender<StorageResult<()>>,
+    },
     List {
         account: Option<AccountId>,
         reply: SyncSender<StorageResult<Vec<StoredDraft>>>,
@@ -478,6 +491,32 @@ impl StorageClient {
             reply,
         })
     }
+    /// 坏草稿恢复：读取选中草稿的原始正文字节，不要求正文可解析。
+    pub fn selected_draft_body(
+        &self,
+        account: Option<AccountId>,
+    ) -> StorageResult<Receiver<StorageResult<Option<Vec<u8>>>>> {
+        self.request(|reply| Request::SelectedDraftBody { account, reply })
+    }
+    /// 坏草稿明确放弃：只删草稿行，保留对象文件。
+    pub fn discard_selected_draft(
+        &self,
+        account: Option<AccountId>,
+    ) -> StorageResult<Receiver<StorageResult<()>>> {
+        self.request(|reply| Request::DiscardSelectedDraft { account, reply })
+    }
+    /// 回复/转发入口：以预填的收件人、主题与清理后的正文创建新草稿并选中。
+    pub fn new_account_draft_document(
+        &self,
+        account: AccountId,
+        document: mail_storage::DraftDocument,
+    ) -> StorageResult<Receiver<StorageResult<StoredDraft>>> {
+        self.request(|reply| Request::NewDocument {
+            account,
+            document: Box::new(document),
+            reply,
+        })
+    }
     pub fn select_account_draft(
         &self,
         account: AccountId,
@@ -642,6 +681,31 @@ fn run(path: Option<PathBuf>, receiver: Receiver<Request>) {
                     ids.iter()
                         .map(|id| s.attachment(&account, id).map_err(|e| e.to_string()))
                         .collect()
+                }));
+            }
+            Request::NewDocument {
+                account,
+                document,
+                reply,
+            } => {
+                let _ = reply.send(opened.and_then(|s| {
+                    s.account(&account)
+                        .map_err(|e| e.to_string())?
+                        .ok_or("发件账号不存在或不是远端账号")?;
+                    create_document(s, &account, *document)
+                }));
+            }
+            Request::SelectedDraftBody { account, reply } => {
+                let _ = reply.send(opened.and_then(|s| {
+                    let account = editor_account(s, account)?;
+                    s.selected_draft_body(&account).map_err(|e| e.to_string())
+                }));
+            }
+            Request::DiscardSelectedDraft { account, reply } => {
+                let _ = reply.send(opened.and_then(|s| {
+                    let account = editor_account(s, account)?;
+                    s.discard_selected_draft(&account)
+                        .map_err(|e| e.to_string())
                 }));
             }
             Request::New {
@@ -957,15 +1021,23 @@ fn new(store: &mut Store, body: Draft) -> StorageResult<StoredDraft> {
     create(store, &account, body)
 }
 fn create(store: &mut Store, account: &AccountId, body: Draft) -> StorageResult<StoredDraft> {
+    create_document(
+        store,
+        account,
+        DraftDocument {
+            headers: DraftHeaders::default(),
+            body,
+            attachments: vec![],
+        },
+    )
+}
+fn create_document(
+    store: &mut Store,
+    account: &AccountId,
+    document: DraftDocument,
+) -> StorageResult<StoredDraft> {
     let draft = store
-        .create_draft(
-            account,
-            &DraftDocument {
-                headers: DraftHeaders::default(),
-                body,
-                attachments: vec![],
-            },
-        )
+        .create_draft(account, &document)
         .map_err(|e| e.to_string())?;
     store
         .select_editor_draft(account, &draft.id)
@@ -1078,6 +1150,57 @@ mod tests {
         assert_eq!(
             receive(worker.client().message_body(location)).unwrap(),
             Some(raw)
+        );
+        worker.stop();
+    }
+
+    #[test]
+    fn reply_document_creates_draft_and_raw_body_can_be_saved_or_discarded() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("data");
+        let account = {
+            let mut store = Store::open(&path).unwrap();
+            let server = mail_core::ServerSettings {
+                host: "example.invalid".into(),
+                port: 993,
+                username: "synthetic".into(),
+                security: mail_core::ConnectionSecurity::Tls,
+            };
+            store
+                .create_account(&mail_core::AccountSettings {
+                    display_name: "synthetic".into(),
+                    address: "sender@example.invalid".into(),
+                    imap: server.clone(),
+                    smtp: server,
+                })
+                .unwrap()
+        };
+        let mut worker = StorageWorker::start(Some(path)).unwrap();
+        let client = worker.client();
+        let document = DraftDocument {
+            headers: DraftHeaders {
+                subject: "Re: original".into(),
+                to: vec!["alice@example.invalid".into()],
+                ..Default::default()
+            },
+            body: Draft::plain("引用的正文").unwrap(),
+            attachments: vec![],
+        };
+        let draft =
+            receive(client.new_account_draft_document(account.clone(), document.clone())).unwrap();
+        assert_eq!(draft.document, document);
+        let raw = receive(client.selected_draft_body(Some(account.clone())))
+            .unwrap()
+            .expect("raw body");
+        assert_eq!(
+            Draft::from_json(&raw).unwrap().text(),
+            "引用的正文".to_string()
+        );
+        receive(client.discard_selected_draft(Some(account.clone()))).unwrap();
+        assert!(
+            receive(client.account_drafts(account.clone()))
+                .unwrap()
+                .is_empty()
         );
         worker.stop();
     }

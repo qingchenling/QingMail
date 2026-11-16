@@ -16,6 +16,7 @@ mod lifecycle;
 mod mailbox;
 mod perf_probe;
 mod reader;
+mod reply;
 mod send_labels;
 mod send_tasks;
 

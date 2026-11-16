@@ -13,6 +13,7 @@ pub use copies::CopyStore;
 pub use document::{Document, Element, Node};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use draft::{Block, Draft, MAX_TEXT};
 use image::{ImageFormat, ImageReader, Limits};
 use mail_parser::{MessageParser, PartKind};
 use std::{collections::BTreeMap, fmt, io::Cursor, sync::Arc};
@@ -57,6 +58,13 @@ pub struct MailContent {
     pub raw: Arc<[u8]>,
     pub subject: String,
     pub sender: String,
+    /// 解析出的独立邮箱地址；回复/转发只用地址，不把显示名拼进字段。
+    pub from: Vec<String>,
+    pub to: Vec<String>,
+    pub cc: Vec<String>,
+    pub reply_to: Vec<String>,
+    pub date_unix: i64,
+    pub date_text: String,
     pub plain: String,
     pub document: Document,
     pub attachments: Vec<Attachment>,
@@ -77,6 +85,12 @@ pub fn parse(raw: &[u8]) -> Result<MailContent, ContentError> {
         raw: Arc::from(raw),
         subject: "（无主题）".into(),
         sender: "（未知发件人）".into(),
+        from: vec![],
+        to: vec![],
+        cc: vec![],
+        reply_to: vec![],
+        date_unix: 0,
+        date_text: String::new(),
         plain: String::new(),
         document: Document::default(),
         attachments: Vec::new(),
@@ -112,6 +126,14 @@ pub fn parse(raw: &[u8]) -> Result<MailContent, ContentError> {
             1024,
         )
         .to_owned();
+    }
+    result.from = address_list(message.from());
+    result.to = address_list(message.to());
+    result.cc = address_list(message.cc());
+    result.reply_to = address_list(message.reply_to());
+    if let Some(date) = message.date() {
+        result.date_unix = date.to_timestamp();
+        result.date_text = date.to_rfc3339();
     }
     if message.parts().any(|part| part.has_problems()) {
         result
@@ -365,4 +387,146 @@ pub(crate) fn escape(value: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&#39;")
+}
+
+fn address_list(list: Option<mail_parser::AddressList<'_>>) -> Vec<String> {
+    let mut addresses = Vec::new();
+    let Some(list) = list else {
+        return addresses;
+    };
+    let mut push = |mailbox: mail_parser::Mailbox<'_>| {
+        if let Some(address) = mailbox.address() {
+            let address = address.trim();
+            if !address.is_empty() && address.len() <= 320 && !address.chars().any(char::is_control)
+            {
+                let address = address.to_owned();
+                if !addresses.contains(&address) {
+                    addresses.push(address);
+                }
+            }
+        }
+    };
+    for entry in list.iter() {
+        match entry {
+            mail_parser::Address::Mailbox(mailbox) => push(mailbox),
+            mail_parser::Address::Group(group) => {
+                for mailbox in group.mailboxes() {
+                    push(mailbox);
+                }
+            }
+        }
+    }
+    addresses
+}
+
+fn bounded_draft(mut text: String) -> Draft {
+    const NOTE: &str = "\n…（引用过长，已截断）";
+    let limit = MAX_TEXT.saturating_sub(NOTE.len());
+    if text.len() > limit {
+        let mut end = limit;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+        text.push_str(NOTE);
+    }
+    Draft::plain(&text).unwrap_or_else(|_| Draft::plain("").expect("empty"))
+}
+
+impl MailContent {
+    /// 回复正文只用清理后的纯文本；引用行标记为 Quote，由受控模型导出。
+    pub fn reply_draft(&self) -> Draft {
+        let date = if self.date_text.is_empty() {
+            "（未知时间）"
+        } else {
+            &self.date_text
+        };
+        let sender = if self.sender.trim().is_empty() {
+            "（未知发件人）"
+        } else {
+            &self.sender
+        };
+        let attribution = format!("\n\n在 {date}，{sender} 写道：\n");
+        let body_start = attribution.len();
+        let text = format!("{attribution}{}", self.plain);
+        let mut draft = bounded_draft(text);
+        if body_start < draft.text().len() {
+            let _ = draft.set_block(body_start..draft.text().len(), Block::Quote);
+        }
+        draft
+    }
+
+    /// 转发正文带最小头部块；原始正文同样走纯文本与 Quote，不引入原始 HTML。
+    pub fn forward_draft(&self) -> Draft {
+        let date = if self.date_text.is_empty() {
+            "（未知时间）"
+        } else {
+            &self.date_text
+        };
+        let mut text = String::from("\n\n---------- 转发邮件 ----------\n");
+        text.push_str(&format!("发件人：{}\n", self.sender));
+        text.push_str(&format!("日期：{date}\n"));
+        text.push_str(&format!("主题：{}\n", self.subject));
+        text.push_str(&format!("收件人：{}\n\n", self.to.join(", ")));
+        let body_start = text.len();
+        text.push_str(&self.plain);
+        let mut draft = bounded_draft(text);
+        if body_start < draft.text().len() {
+            let _ = draft.set_block(body_start..draft.text().len(), Block::Quote);
+        }
+        draft
+    }
+}
+
+#[cfg(test)]
+mod reply_tests {
+    use super::*;
+
+    fn parsed() -> MailContent {
+        parse(
+            b"From: Alice <alice@example.org>\r\n\
+              To: Bob <bob@example.org>, me@example.org\r\n\
+              Cc: Carol <carol@example.org>\r\n\
+              Reply-To: reply@example.org\r\n\
+              Subject: Original subject\r\n\
+              Date: Mon, 16 Nov 2026 08:00:00 +0000\r\n\
+              \r\n\
+              hello\r\nworld\r\n",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn reply_data_uses_independent_addresses_and_clean_plain_text() {
+        let content = parsed();
+        assert_eq!(content.from, vec!["alice@example.org"]);
+        assert_eq!(
+            content.to,
+            vec!["bob@example.org".to_string(), "me@example.org".to_string()]
+        );
+        assert_eq!(content.cc, vec!["carol@example.org"]);
+        assert_eq!(content.reply_to, vec!["reply@example.org"]);
+        assert!(content.date_unix > 0);
+        assert!(!content.date_text.is_empty());
+        let reply = content.reply_draft();
+        assert!(reply.text().contains("写道"));
+        assert!(reply.text().contains("hello"));
+        let body_start = reply.text().find("hello").unwrap();
+        let scalar = reply.text()[..body_start].chars().count();
+        assert_eq!(reply.attributes()[scalar].block, Block::Quote);
+        let forward = content.forward_draft();
+        assert!(forward.text().contains("转发邮件"));
+        assert!(forward.text().contains("Original subject"));
+        assert!(forward.text().contains("hello"));
+        assert!(!forward.html().contains("<script"));
+    }
+
+    #[test]
+    fn reply_quote_is_truncated_instead_of_rejecting_the_draft() {
+        let mut content = parsed();
+        content.plain = "x".repeat(MAX_TEXT + 1024);
+        let reply = content.reply_draft();
+        assert!(reply.text().len() <= MAX_TEXT);
+        assert!(reply.text().contains("已截断"));
+    }
 }
