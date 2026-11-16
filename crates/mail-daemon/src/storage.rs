@@ -24,6 +24,7 @@ pub struct StorageWorker {
 
 enum Request {
     Open {
+        account: Option<AccountId>,
         initial: Draft,
         reply: SyncSender<StorageResult<StoredDraft>>,
     },
@@ -48,13 +49,16 @@ enum Request {
         reply: SyncSender<StorageResult<Vec<mail_storage::AttachmentInfo>>>,
     },
     New {
+        account: Option<AccountId>,
         body: Draft,
         reply: SyncSender<StorageResult<StoredDraft>>,
     },
     List {
+        account: Option<AccountId>,
         reply: SyncSender<StorageResult<Vec<StoredDraft>>>,
     },
     Select {
+        account: Option<AccountId>,
         id: mail_core::DraftId,
         reply: SyncSender<StorageResult<StoredDraft>>,
     },
@@ -219,7 +223,11 @@ impl StorageClient {
         &self,
         initial: Draft,
     ) -> StorageResult<Receiver<StorageResult<StoredDraft>>> {
-        self.request(|reply| Request::Open { initial, reply })
+        self.request(|reply| Request::Open {
+            account: None,
+            initial,
+            reply,
+        })
     }
     pub fn save(
         &self,
@@ -229,6 +237,46 @@ impl StorageClient {
         self.request(|reply| Request::Save {
             previous: Box::new(previous),
             body,
+            reply,
+        })
+    }
+    pub fn open_account_editor(
+        &self,
+        account: AccountId,
+    ) -> StorageResult<Receiver<StorageResult<StoredDraft>>> {
+        self.request(|reply| Request::Open {
+            account: Some(account),
+            initial: Draft::plain("").expect("empty"),
+            reply,
+        })
+    }
+    pub fn account_drafts(
+        &self,
+        account: AccountId,
+    ) -> StorageResult<Receiver<StorageResult<Vec<StoredDraft>>>> {
+        self.request(|reply| Request::List {
+            account: Some(account),
+            reply,
+        })
+    }
+    pub fn new_account_draft(
+        &self,
+        account: AccountId,
+    ) -> StorageResult<Receiver<StorageResult<StoredDraft>>> {
+        self.request(|reply| Request::New {
+            account: Some(account),
+            body: Draft::plain("").expect("empty"),
+            reply,
+        })
+    }
+    pub fn select_account_draft(
+        &self,
+        account: AccountId,
+        id: mail_core::DraftId,
+    ) -> StorageResult<Receiver<StorageResult<StoredDraft>>> {
+        self.request(|reply| Request::Select {
+            account: Some(account),
+            id,
             reply,
         })
     }
@@ -267,16 +315,27 @@ impl StorageClient {
         })
     }
     pub fn new_draft(&self, body: Draft) -> StorageResult<Receiver<StorageResult<StoredDraft>>> {
-        self.request(|reply| Request::New { body, reply })
+        self.request(|reply| Request::New {
+            account: None,
+            body,
+            reply,
+        })
     }
     pub fn list(&self) -> StorageResult<Receiver<StorageResult<Vec<StoredDraft>>>> {
-        self.request(|reply| Request::List { reply })
+        self.request(|reply| Request::List {
+            account: None,
+            reply,
+        })
     }
     pub fn select(
         &self,
         id: mail_core::DraftId,
     ) -> StorageResult<Receiver<StorageResult<StoredDraft>>> {
-        self.request(|reply| Request::Select { id, reply })
+        self.request(|reply| Request::Select {
+            account: None,
+            id,
+            reply,
+        })
     }
 }
 
@@ -307,8 +366,21 @@ fn run(path: Option<PathBuf>, receiver: Receiver<Request>) {
         })();
         let opened = opened.map(|()| store.as_mut().expect("opened"));
         match request {
-            Request::Open { initial, reply } => {
-                let _ = reply.send(opened.and_then(|s| open(s, initial)));
+            Request::Open {
+                account,
+                initial,
+                reply,
+            } => {
+                let _ = reply.send(opened.and_then(|s| {
+                    if let Some(account) = account {
+                        s.account(&account)
+                            .map_err(|e| e.to_string())?
+                            .ok_or("发件账号不存在或不是远端账号")?;
+                        open_for(s, &account, initial)
+                    } else {
+                        open(s, initial)
+                    }
+                }));
             }
             Request::Save {
                 previous,
@@ -363,12 +435,25 @@ fn run(path: Option<PathBuf>, receiver: Receiver<Request>) {
                         .collect()
                 }));
             }
-            Request::New { body, reply } => {
-                let _ = reply.send(opened.and_then(|s| new(s, body)));
-            }
-            Request::List { reply } => {
+            Request::New {
+                account,
+                body,
+                reply,
+            } => {
                 let _ = reply.send(opened.and_then(|s| {
-                    let account = s.local_draft_account().map_err(|e| e.to_string())?;
+                    if let Some(account) = account {
+                        s.account(&account)
+                            .map_err(|e| e.to_string())?
+                            .ok_or("发件账号不存在或不是远端账号")?;
+                        create(s, &account, body)
+                    } else {
+                        new(s, body)
+                    }
+                }));
+            }
+            Request::List { account, reply } => {
+                let _ = reply.send(opened.and_then(|s| {
+                    let account = editor_account(s, account)?;
                     s.draft_ids(&account)
                         .map_err(|e| e.to_string())?
                         .iter()
@@ -376,11 +461,11 @@ fn run(path: Option<PathBuf>, receiver: Receiver<Request>) {
                         .collect()
                 }));
             }
-            Request::Select { id, reply } => {
+            Request::Select { account, id, reply } => {
                 let _ = reply.send(opened.and_then(|s| {
-                    let account = s.local_draft_account().map_err(|e| e.to_string())?;
+                    let account = editor_account(s, account)?;
                     let draft = s.draft(&account, &id).map_err(|e| e.to_string())?;
-                    s.select_local_draft(&account, &id)
+                    s.select_editor_draft(&account, &id)
                         .map_err(|e| e.to_string())?;
                     Ok(draft)
                 }));
@@ -492,27 +577,37 @@ fn import_attachment(
         .map_err(|e| e.to_string())
 }
 
+fn editor_account(store: &mut Store, account: Option<AccountId>) -> StorageResult<AccountId> {
+    if let Some(account) = account {
+        store
+            .account(&account)
+            .map_err(|e| e.to_string())?
+            .ok_or("发件账号不存在或不是远端账号")?;
+        Ok(account)
+    } else {
+        store.local_draft_account().map_err(|e| e.to_string())
+    }
+}
 fn open(store: &mut Store, initial: Draft) -> StorageResult<StoredDraft> {
     let account = store.local_draft_account().map_err(|e| e.to_string())?;
+    open_for(store, &account, initial)
+}
+fn open_for(store: &mut Store, account: &AccountId, initial: Draft) -> StorageResult<StoredDraft> {
     if let Some(id) = store
-        .selected_local_draft(&account)
+        .selected_local_draft(account)
         .map_err(|e| e.to_string())?
     {
-        return store.draft(&account, &id).map_err(|e| e.to_string());
+        return store.draft(account, &id).map_err(|e| e.to_string());
     }
     // 上次可能在创建草稿后、选中前退出；优先恢复已存在草稿，不反复创建。
-    if let Some(id) = store
-        .draft_ids(&account)
-        .map_err(|e| e.to_string())?
-        .first()
-    {
-        let draft = store.draft(&account, id).map_err(|e| e.to_string())?;
+    if let Some(id) = store.draft_ids(account).map_err(|e| e.to_string())?.first() {
+        let draft = store.draft(account, id).map_err(|e| e.to_string())?;
         store
-            .select_local_draft(&account, id)
+            .select_editor_draft(account, id)
             .map_err(|e| e.to_string())?;
         return Ok(draft);
     }
-    create(store, &account, initial)
+    create(store, account, initial)
 }
 fn new(store: &mut Store, body: Draft) -> StorageResult<StoredDraft> {
     let account = store.local_draft_account().map_err(|e| e.to_string())?;
@@ -530,7 +625,7 @@ fn create(store: &mut Store, account: &AccountId, body: Draft) -> StorageResult<
         )
         .map_err(|e| e.to_string())?;
     store
-        .select_local_draft(account, &draft.id)
+        .select_editor_draft(account, &draft.id)
         .map_err(|e| e.to_string())?;
     Ok(draft)
 }
@@ -642,6 +737,77 @@ mod tests {
             Some(raw)
         );
         worker.stop();
+    }
+
+    #[test]
+    fn account_drafts_keep_sender_identity_and_do_not_adopt_local_or_other_drafts() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("data");
+        let (account, other) = {
+            let mut store = Store::open(&path).unwrap();
+            let server = mail_core::ServerSettings {
+                host: "example.invalid".into(),
+                port: 993,
+                username: "synthetic".into(),
+                security: mail_core::ConnectionSecurity::Tls,
+            };
+            let settings = mail_core::AccountSettings {
+                display_name: "synthetic".into(),
+                address: "sender@example.invalid".into(),
+                imap: server.clone(),
+                smtp: server,
+            };
+            (
+                store.create_account(&settings).unwrap(),
+                store.create_account(&settings).unwrap(),
+            )
+        };
+        let mut worker = StorageWorker::start(Some(path.clone())).unwrap();
+        let c = worker.client();
+        let local = receive(c.open_editor(Draft::plain("local preserved").unwrap())).unwrap();
+        let remote = receive(c.open_account_editor(account.clone())).unwrap();
+        assert_eq!(remote.account, account);
+        assert!(remote.document.body.text().is_empty());
+        assert_eq!(
+            receive(c.account_drafts(account.clone())).unwrap(),
+            vec![remote.clone()]
+        );
+        assert_eq!(receive(c.list()).unwrap(), vec![local.clone()]);
+        assert!(receive(c.select_account_draft(account.clone(), local.id.clone())).is_err());
+        assert!(receive(c.select_account_draft(other.clone(), remote.id.clone())).is_err());
+        assert!(receive(c.open_account_editor(local.account.clone())).is_err());
+        assert!(receive(c.open_account_editor(AccountId("missing".into()))).is_err());
+        let mut document = remote.document.clone();
+        document.headers.subject = "账号草稿".into();
+        document.body = Draft::plain("remote preserved").unwrap();
+        let saved = receive(c.save_document(remote, document)).unwrap();
+        let second = receive(c.new_account_draft(account.clone())).unwrap();
+        assert_ne!(second.id, saved.id);
+        assert_eq!(second.account, account);
+        receive(c.select_account_draft(account.clone(), saved.id.clone())).unwrap();
+        worker.stop();
+        let mut worker = StorageWorker::start(Some(path.clone())).unwrap();
+        let c = worker.client();
+        assert_eq!(
+            receive(c.open_account_editor(account.clone())).unwrap(),
+            saved
+        );
+        assert_eq!(
+            receive(c.open_editor(Draft::plain("").unwrap())).unwrap(),
+            local
+        );
+        // 仅记忆最近一个编辑上下文；切回账号时回退到已有草稿，不创建或跨账号搬迁。
+        let reopened = receive(c.open_account_editor(account.clone())).unwrap();
+        assert_eq!(reopened.account, account);
+        assert!(reopened.id == saved.id || reopened.id == second.id);
+        assert_eq!(
+            receive(c.select_account_draft(account.clone(), saved.id.clone())).unwrap(),
+            saved
+        );
+        assert!(receive(c.account_drafts(other)).unwrap().is_empty());
+        worker.stop();
+        let store = Store::open(&path).unwrap();
+        assert!(store.task_ids(&account).unwrap().is_empty());
     }
 
     #[test]
