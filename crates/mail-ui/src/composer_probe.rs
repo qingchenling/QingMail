@@ -7,6 +7,9 @@ pub(super) fn enabled() -> bool {
 }
 impl Composer {
     pub(super) fn probe(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.importing {
+            return;
+        }
         let step = self.probe_step;
         match step {
             0 => {
@@ -30,6 +33,32 @@ impl Composer {
                     }
                 }
                 assert!(self.store.is_some(), "probe store must open");
+                if std::env::args().any(|a| a == "--compose-restore-probe") {
+                    if self.attachment_infos.len() != self.attachment_ids.len() {
+                        return;
+                    }
+                    assert_eq!(
+                        self.header_values[0],
+                        "to@example.invalid, second@example.invalid"
+                    );
+                    assert_eq!(self.header_values[1], "cc@example.invalid");
+                    assert_eq!(self.header_values[2], "bcc@example.invalid");
+                    assert_eq!(self.header_values[3], "中文主题🙂（保存中修改）");
+                    assert_eq!(self.attachment_infos.len(), 1);
+                    assert_eq!(self.attachment_infos[0].name, "中文附件.txt");
+                    assert!(
+                        self.session
+                            .borrow()
+                            .draft
+                            .text()
+                            .ends_with("后台保存期间输入")
+                    );
+                    assert_eq!(self.saved, Some(self.session.borrow().revision));
+                    eprintln!("QINGMAIL_COMPOSE_RESTORE_PROBE: PASS");
+                    cx.quit();
+                    return;
+                }
+
                 if std::env::args().any(|arg| arg == "--editor-style-demo") {
                     let text = "Regular: QingMail ABC 123 中文正常\nBold: QingMail ABC 123 中文粗体\nItalic: QingMail ABC 123 中文斜体\nBoth: QingMail ABC 123 中文粗斜体";
                     let mut draft = Draft::plain(text).unwrap();
@@ -58,6 +87,42 @@ impl Composer {
                     .unwrap();
                 self.saved = None;
                 self.sync_input(window, cx);
+                if std::env::args().any(|a| a == "--compose-fields-probe") {
+                    for (index, value) in [
+                        "to@example.invalid; second@example.invalid",
+                        "cc@example.invalid",
+                        "bcc@example.invalid",
+                        "中文主题🙂",
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        self.header_inputs[index].update(cx, |input, cx| {
+                            input.replace_text_in_range(None, value, window, cx)
+                        });
+                    }
+                    self.importing = true;
+                    let source = std::env::var_os("QINGMAIL_COMPOSE_PROBE_SOURCE")
+                        .expect("isolated attachment fixture");
+                    let request = self.store.as_ref().unwrap().import_attachment(
+                        self.stored.as_ref().unwrap().account.clone(),
+                        source.into(),
+                    );
+                    let task = cx
+                        .background_executor()
+                        .spawn(async move { receive(request) });
+                    cx.spawn(async move |entity, cx| {
+                        let info = task.await.expect("probe attachment import");
+                        entity
+                            .update(cx, |this, cx| {
+                                this.importing = false;
+                                this.accept_attachment(info, cx);
+                            })
+                            .unwrap();
+                    })
+                    .detach();
+                }
+
                 self.input.update(cx, |input, cx| {
                     input.focus(window, cx);
                     input.set_selected_range(0..6, cx);
@@ -142,6 +207,18 @@ impl Composer {
             }
             11 => {
                 assert!(self.saving, "slow save must still be in background");
+                if std::env::args().any(|a| a == "--compose-fields-probe") {
+                    self.header_inputs[3].update(cx, |input, cx| {
+                        let end = input.value().encode_utf16().count();
+                        input.replace_text_in_range(
+                            Some(0..end),
+                            "中文主题🙂（保存中修改）",
+                            window,
+                            cx,
+                        );
+                    });
+                }
+
                 let end = self.session.borrow().draft.text().encode_utf16().count();
                 self.input.update(cx, |input, cx| {
                     input.replace_text_in_range(Some(end..end), "后台保存期间输入", window, cx)
@@ -167,8 +244,13 @@ impl Composer {
                 let store = self.store.clone().unwrap();
                 let request = store.open_editor(self.session.borrow().draft.clone());
                 let draft = self.session.borrow().draft.clone();
+                let expected_headers = fields::headers(&self.header_values);
+                let expected_attachments = self.attachment_ids.clone();
                 let task = cx.background_executor().spawn(async move {
-                    assert_eq!(receive(request).unwrap().document.body, draft);
+                    let restored = receive(request).unwrap();
+                    assert_eq!(restored.document.body, draft);
+                    assert_eq!(restored.document.headers, expected_headers);
+                    assert_eq!(restored.document.attachments, expected_attachments);
                     let evidence = "PASS native layout; UTF-8 selection; UTF-16 emoji replacement; marked preedit/commit; composition undo/redo; keyboard format undo/redo; inline bold/italic/link; controlled list export; background save/load equality; input accepted during 900ms simulated slow save; old save acknowledgement does not mark new edits saved\n";
                     std::fs::write("target/p0-editor-probe-result.txt", evidence).unwrap();
                     eprintln!("QINGMAIL_EDITOR_PROBE: {evidence}");

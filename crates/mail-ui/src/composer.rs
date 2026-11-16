@@ -1,4 +1,4 @@
-//! ADR-0006 原生受限富文本验证；不连接邮箱，不发送邮件。
+//! 原生本地写信草稿；不连接邮箱，不发送邮件。
 use gpui_kit::{
     App, Bounds, Context, Entity, EntityInputHandler, FontStyle, FontWeight, HighlightStyle,
     KeyDownEvent, Render, SharedString, Subscription, TitlebarOptions, UnderlineStyle, Window,
@@ -25,6 +25,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "composer_fields.rs"]
+mod fields;
 #[path = "composer_probe.rs"]
 mod probe;
 
@@ -228,7 +230,7 @@ pub(super) fn open(cx: &mut App) {
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(TitlebarOptions {
-                title: Some("QingMail — P0 富文本编辑验证".into()),
+                title: Some("QingMail — 本地写信草稿".into()),
                 ..Default::default()
             }),
             ..Default::default()
@@ -243,6 +245,12 @@ pub(super) fn open(cx: &mut App) {
 }
 
 pub(super) struct Composer {
+    header_inputs: Vec<Entity<InputState>>,
+    header_values: [String; 4],
+    header_subscriptions: Vec<Subscription>,
+    attachment_ids: Vec<mail_core::AttachmentId>,
+    attachment_infos: Vec<mail_storage::AttachmentInfo>,
+    importing: bool,
     closing: bool,
     close_error: Option<String>,
     font_family: SharedString,
@@ -317,7 +325,16 @@ impl Composer {
                 cx.notify();
             },
         );
+        let header_inputs = (0..4)
+            .map(|_| cx.new(|cx| InputState::new(window, cx)))
+            .collect();
         let mut this = Self {
+            header_inputs,
+            header_values: Default::default(),
+            header_subscriptions: vec![],
+            attachment_ids: vec![],
+            attachment_infos: vec![],
+            importing: false,
             closing: false,
             close_error: None,
             font_family,
@@ -337,6 +354,7 @@ impl Composer {
             _subscription: subscription,
             probe_step: 0,
         };
+        this.subscribe_headers(cx);
         this.input
             .update(cx, |input, cx| input.set_readonly(true, cx));
         this.load_store(window, cx);
@@ -382,6 +400,7 @@ impl Composer {
                         this.store = Some(store);
                         *this.session.borrow_mut() = Session::new(draft.document.body.clone());
                         this.stored = Some(draft);
+                        this.restore_fields(window, cx);
                         this.saved = Some(0);
                         this.sync_input(window, cx);
                         this.status = "已恢复本地草稿 · 不关联真实邮箱".into();
@@ -414,7 +433,12 @@ impl Composer {
     }
 
     fn switch_draft(&mut self, index: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
-        if self.loading || self.saving || self.closing || self.composing(window, cx) {
+        if self.loading
+            || self.saving
+            || self.closing
+            || self.importing
+            || self.composing(window, cx)
+        {
             return;
         }
         if self.saved != Some(self.session.borrow().revision) {
@@ -442,6 +466,7 @@ impl Composer {
                     Ok(draft) => {
                         *this.session.borrow_mut() = Session::new(draft.document.body.clone());
                         this.stored = Some(draft);
+                        this.restore_fields(window, cx);
                         this.saved = Some(0);
                         this.close_error = None;
                         this.sync_input(window, cx);
@@ -466,7 +491,7 @@ impl Composer {
             .child(
                 MaterialButton::new("new-local-draft")
                     .child("新建本地草稿")
-                    .disabled(self.loading || self.saving || self.closing)
+                    .disabled(self.loading || self.saving || self.closing || self.importing)
                     .on_click(cx.listener(|this, _, w, cx| this.switch_draft(None, w, cx))),
             )
             .child(
@@ -495,7 +520,7 @@ impl Composer {
             row = row.child(
                 MaterialButton::new(("local-draft", index))
                     .child(label)
-                    .disabled(self.loading || self.saving || self.closing)
+                    .disabled(self.loading || self.saving || self.closing || self.importing)
                     .on_click(
                         cx.listener(move |this, _, w, cx| this.switch_draft(Some(index), w, cx)),
                     ),
@@ -507,6 +532,10 @@ impl Composer {
     fn composing(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         self.input.update(cx, |input, cx| {
             input.marked_text_range(window, cx).is_some()
+        }) || self.header_inputs.iter().any(|input| {
+            input.update(cx, |input, cx| {
+                input.marked_text_range(window, cx).is_some()
+            })
         })
     }
     fn refresh_preview(&mut self, cx: &mut Context<Self>) {
@@ -589,6 +618,11 @@ impl Composer {
         if let Some(error) = self.close_error.take() {
             return Err(error);
         }
+        if self.importing {
+            self.status = "请先完成或取消附件选择，等待附件导入结束后再关闭".into();
+            cx.notify();
+            return Err(self.status.clone());
+        }
         if self.loading {
             self.status = "正在恢复草稿，请稍后关闭".into();
             return Ok(());
@@ -658,7 +692,12 @@ impl Composer {
         self.saving = true;
         self.auto_save_blocked = false;
         self.close_error = None;
-        let request = store.save(previous, draft);
+        let document = mail_storage::DraftDocument {
+            headers: fields::headers(&self.header_values),
+            body: draft,
+            attachments: self.attachment_ids.clone(),
+        };
+        let request = store.save_document(previous, document);
         let task = cx.background_executor().spawn(async move {
             let started = Instant::now();
             if probe::enabled() {
@@ -855,12 +894,19 @@ impl Render for Composer {
         } else {
             "有未保存修改"
         };
-        div().size_full().child(TextSelectionLayer).flex().flex_col().gap_3().p_4()
+        div().capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+            if event.keystroke.modifiers.control && !event.keystroke.modifiers.alt && event.keystroke.key == "s" {
+                if !this.composing(window, cx) { this.save(cx); }
+                cx.stop_propagation();
+                window.prevent_default();
+            }
+        })).size_full().child(TextSelectionLayer).flex().flex_col().gap_3().p_4()
             .bg(theme::color(ColorRole::SURFACE)).text_color(theme::color(ColorRole::ON_SURFACE))
-            .child(div().text_size(px(22.)).child("QingMail · 原生富文本编辑验证"))
-            .child(div().text_size(px(13.)).child("选中后设置格式；Ctrl+B / I、Ctrl+Z / Shift+Z、Ctrl+S。仅使用合成内容。"))
+            .child(div().text_size(px(22.)).child("QingMail · 本地写信草稿"))
+            .child(div().text_size(px(13.)).child("选中后设置格式；Ctrl+B / I、Ctrl+Z / Shift+Z、Ctrl+S。收件人填写独立邮箱地址，以逗号或分号分隔。"))
             .child(toolbar)
             .child(self.draft_toolbar(cx))
+            .child(self.fields_toolbar(cx))
             .child(TextField::new("link-url", &self.link))
             .child(div().flex().gap_4().flex_1().min_h_0()
                 .child(div().flex().flex_col().gap_2().flex_1().min_w_0()
@@ -876,7 +922,7 @@ impl Render for Composer {
                     .child(div().id("draft-preview").flex_1().min_h_0().overflow_y_scroll().p_3()
                         .child(TextView::new(&self.preview).font_family(self.font_family.clone()).on_link_click(|_, _, _, _| {})))))
             .child(div().text_size(px(13.)).child(format!("{state} · {}", self.status)))
-            .child(div().text_size(px(12.)).child("本地草稿保存在 XDG 数据目录；未配置邮箱，不会发送。关闭重开恢复最后确认版本。粘贴仅纯文本。"))
+            .child(div().text_size(px(12.)).child("本地草稿尚未关联发件账号，不会发送。附件最多32个，总计25MiB。关闭重开恢复最后确认版本。粘贴仅纯文本。"))
     }
 }
 

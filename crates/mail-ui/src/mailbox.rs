@@ -548,6 +548,11 @@ impl Render for Mailbox {
             .gap_1()
             .child(div().p_3().child("QingMail"));
         tree = tree.child(
+            MaterialButton::new("mailbox-compose")
+                .child("写信 / 本地草稿")
+                .on_click(|_, _, cx| cx.defer(crate::composer::open)),
+        );
+        tree = tree.child(
             MaterialButton::new("mailbox-account-settings")
                 .child("添加邮箱")
                 .on_click(|_, _, cx| crate::accounts::open(cx)),

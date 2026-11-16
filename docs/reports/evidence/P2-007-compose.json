@@ -1,0 +1,15 @@
+{
+  "passed": true,
+  "synthetic_only": true,
+  "process_runs": 2,
+  "sends": 0,
+  "attachment_sha256": "7866af8246aae217122677c6d86b13f2af73e9bcc0129a6f796df81c4b591e36",
+  "checks": [
+    "native To/Cc/Bcc/subject inputs",
+    "rich body and header save",
+    "attachment copied through worker",
+    "source deletion leaves attachment intact",
+    "cross-process field/body/attachment restore",
+    "900ms slow save acknowledgement preserves subsequent input"
+  ]
+}
