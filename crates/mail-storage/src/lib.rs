@@ -1,6 +1,12 @@
 //! P2 本地索引：后台单写者、XDG 路径、事务迁移和 IMAP 定位隔离。
-//! 不保存密码/令牌；正文、附件、草稿与发送任务尚不在本迭代接口中。
+//! 不保存密码/令牌；草稿与发送快照使用不可变对象和事务关联。
+mod objects;
+mod outbox;
 mod paths;
+pub use outbox::{
+    AttachmentInfo, DraftDocument, OutgoingAttachment, OutgoingSnapshot, SendTask, SmtpAttempt,
+    StoredDraft,
+};
 mod private_dir;
 
 pub use paths::AppPaths;
@@ -13,9 +19,10 @@ use private_dir::PrivateDir;
 use rusqlite::{Connection, MAIN_DB, OpenFlags, OptionalExtension, params};
 use std::{fmt, fs::File, io, path::Path, time::Duration};
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 const APPLICATION_ID: u32 = 0x514d4149;
 const SCHEMA: &str = include_str!("schema.sql");
+const SCHEMA_V2: &str = include_str!("schema-v2.sql");
 
 #[derive(Debug)]
 pub enum Error {
@@ -23,6 +30,7 @@ pub enum Error {
     Sql(rusqlite::Error),
     Invalid(&'static str),
     FutureSchema(u32),
+    Conflict,
 }
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -32,6 +40,7 @@ impl fmt::Display for Error {
             Self::Io(e) => write!(f, "本地存储 I/O 失败：{e}"),
             Self::Sql(e) => write!(f, "本地数据库失败：{e}"),
             Self::Invalid(message) => f.write_str(message),
+            Self::Conflict => f.write_str("版本或任务状态已变化，请重新加载"),
             Self::FutureSchema(version) => {
                 write!(f, "数据库版本 {version} 较新，请使用新版 QingMail")
             }
@@ -61,6 +70,7 @@ pub struct Store {
     connection: Connection,
     _writer: File,
     _directory: PrivateDir,
+    objects: PrivateDir,
 }
 
 impl Store {
@@ -88,7 +98,7 @@ impl Store {
         connection.execute_batch(
             "PRAGMA foreign_keys=ON; PRAGMA journal_mode=DELETE; PRAGMA synchronous=EXTRA; PRAGMA trusted_schema=OFF;",
         )?;
-        migrate(&mut connection, &directory, existed, SCHEMA)?;
+        migrate(&mut connection, &directory, existed, SCHEMA, SCHEMA_V2)?;
         let mut foreign_keys = connection.prepare("PRAGMA foreign_key_check")?;
         if foreign_keys.query([])?.next()?.is_some() {
             return Err(Error::Invalid("数据库关联检查失败，已保留原文件"));
@@ -96,7 +106,10 @@ impl Store {
         drop(foreign_keys);
         file.sync_all()?;
         directory.0.sync_all()?;
+        let objects = directory.child("objects")?;
+        outbox::recover_interrupted(&mut connection)?;
         Ok(Self {
+            objects,
             connection,
             _writer: writer,
             _directory: directory,
@@ -325,12 +338,13 @@ fn migrate(
     directory: &PrivateDir,
     existed: bool,
     schema: &str,
+    upgrade: &str,
 ) -> Result<()> {
     let version = validate_schema(connection)?;
     if version == SCHEMA_VERSION {
         return Ok(());
     }
-    // 所有已有数据库的迁移先备份；当前 v1 只允许从空 v0 初始化。
+    // 已有库在升级前备份；所有步骤和版本号在一个事务中提交。
     if existed {
         let name = format!("migration-v{version}-{}.sqlite3", new_id()?);
         let backup = directory.file(&name, true)?;
@@ -343,7 +357,10 @@ fn migrate(
         directory.0.sync_all()?;
     }
     let tx = connection.transaction()?;
-    tx.execute_batch(schema)?;
+    if version == 0 {
+        tx.execute_batch(schema)?;
+    }
+    tx.execute_batch(upgrade)?;
     tx.pragma_update(None, "application_id", APPLICATION_ID)?;
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.commit()?;

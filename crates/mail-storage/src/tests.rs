@@ -5,7 +5,7 @@ use std::{
     process::Command,
 };
 
-fn settings() -> AccountSettings {
+pub(super) fn settings() -> AccountSettings {
     AccountSettings {
         display_name: "个人邮箱".into(),
         address: "tester@example.org".into(),
@@ -240,7 +240,8 @@ fn migration_failure_rolls_back_and_keeps_private_backup() {
             &mut conn,
             &directory,
             true,
-            "CREATE TABLE half_done(id INTEGER); INVALID SQL;"
+            "CREATE TABLE half_done(id INTEGER); INVALID SQL;",
+            SCHEMA_V2
         )
         .is_err()
     );
@@ -259,8 +260,8 @@ fn migration_failure_rolls_back_and_keeps_private_backup() {
     assert_eq!(fs::metadata(&backups[0]).unwrap().mode() & 0o777, 0o600);
     let backup = Connection::open(&backups[0]).unwrap();
     assert_eq!(validate_schema(&backup).unwrap(), 0);
-    migrate(&mut conn, &directory, true, SCHEMA).unwrap();
-    assert_eq!(validate_schema(&conn).unwrap(), 1);
+    migrate(&mut conn, &directory, true, SCHEMA, SCHEMA_V2).unwrap();
+    assert_eq!(validate_schema(&conn).unwrap(), SCHEMA_VERSION);
 }
 
 #[test]

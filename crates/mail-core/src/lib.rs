@@ -70,6 +70,44 @@ pub struct CachedMessage {
     pub envelope: MessageEnvelope,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DraftId(pub String);
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AttachmentId(pub String);
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SendTaskId(pub String);
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DraftHeaders {
+    pub subject: String,
+    pub to: Vec<String>,
+    pub cc: Vec<String>,
+    pub bcc: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendState {
+    Pending,
+    Sending,
+    Sent,
+    Failed,
+    Uncertain,
+    CopyPending,
+}
+
+/// 调用方须先取得明确的用户决定，不能把普通自动重试包装成重发。
+#[derive(Debug, Clone, Copy)]
+pub enum ResendAuthorization {
+    UserConfirmed,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum SmtpOutcome {
+    Accepted,
+    DefinitelyRejected,
+    Uncertain,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

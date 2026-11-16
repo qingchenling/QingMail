@@ -3915,9 +3915,12 @@ name = "mail-storage"
 version = "0.1.0"
 dependencies = [
  "getrandom 0.4.3",
+ "mail-content",
  "mail-core",
  "rusqlite",
  "rustix",
+ "serde_json",
+ "sha2 0.10.9",
  "tempfile",
 ]
 
