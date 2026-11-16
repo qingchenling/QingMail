@@ -361,6 +361,7 @@ fn main() {
         eprintln!("写信探针需要编辑探针模式和隔离数据目录");
         std::process::exit(1);
     }
+    let home_demo = args.iter().any(|arg| arg == "--home-demo");
     let isolated_probe = args
         .iter()
         .any(|arg| matches!(arg.as_str(), "--editor-probe" | "--editor-style-demo"))
@@ -421,7 +422,14 @@ fn main() {
                 cx.quit();
                 return;
             }
-            lifecycle::open_main(cx);
+            let show_workspace = !matches!(command, Command::Editor | Command::Reader);
+            if home_demo {
+                if let Err(error) = open_home(cx) {
+                    eprintln!("无法打开 P0 合成首页：{error}");
+                }
+            } else if show_workspace {
+                lifecycle::open_main(cx);
+            }
             if command == Command::Mailbox {
                 mailbox::open(cx);
             }

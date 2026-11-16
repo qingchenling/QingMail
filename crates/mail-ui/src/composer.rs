@@ -306,6 +306,7 @@ pub(super) struct Composer {
     status: String,
     _subscription: Subscription,
     probe_step: usize,
+    show_cc_bcc: bool,
 }
 
 impl Composer {
@@ -419,6 +420,7 @@ impl Composer {
             status: "正在检查本地验证草稿…".into(),
             _subscription: subscription,
             probe_step: 0,
+            show_cc_bcc: false,
         };
         this.subscribe_headers(cx);
         this.input

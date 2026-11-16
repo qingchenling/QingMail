@@ -137,18 +137,9 @@ fn activate(window: AnyWindowHandle, cx: &mut App) -> bool {
         })
         .is_ok()
 }
+/// 正式入口是邮件主界面；P0 合成首页只保留为显式 `--home-demo` 诊断窗口。
 pub(super) fn open_main(cx: &mut App) {
-    let existing = cx.global::<Lifecycle>().main;
-    if existing.is_some_and(|window| activate(window, cx)) {
-        return;
-    }
-    match crate::open_home(cx) {
-        Ok(window) => cx.global_mut::<Lifecycle>().main = Some(window),
-        Err(e) => {
-            eprintln!("无法打开主窗口：{e}");
-            cx.global_mut::<Lifecycle>().error = Some(e.to_string());
-        }
-    }
+    crate::mailbox::open(cx);
 }
 pub(super) fn reuse_editor(account: Option<&mail_core::AccountId>, cx: &mut App) -> bool {
     let existing = cx

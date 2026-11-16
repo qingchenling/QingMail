@@ -358,3 +358,120 @@ fn update_impact_and_remove_only_touch_the_selected_local_account() {
     assert_eq!(store.accounts().unwrap().len(), 1);
     assert_eq!(store.accounts().unwrap()[0].0, b);
 }
+
+#[test]
+fn local_search_filters_cached_text_sender_folder_and_known_attachments() {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = Store::open(&root.path().join("data")).unwrap();
+    let account = store.create_account(&settings()).unwrap();
+    let inbox = store.upsert_folder(&account, "INBOX", 42).unwrap();
+    let archive = store.upsert_folder(&account, "Archive", 42).unwrap();
+    let first = MailUid {
+        account: account.clone(),
+        folder_id: inbox.id.0.clone(),
+        uidvalidity: 42,
+        uid: 1,
+    };
+    let second = MailUid {
+        account: account.clone(),
+        folder_id: inbox.id.0.clone(),
+        uidvalidity: 42,
+        uid: 2,
+    };
+    let archived = MailUid {
+        account: account.clone(),
+        folder_id: archive.id.0.clone(),
+        uidvalidity: 42,
+        uid: 9,
+    };
+    store
+        .cache_message(
+            &first,
+            &MessageEnvelope {
+                subject: "项目 报告".into(),
+                sender: "王工 <wang@example.org>".into(),
+                received_at: 3,
+            },
+        )
+        .unwrap();
+    store
+        .cache_message(
+            &second,
+            &MessageEnvelope {
+                subject: "发票通知".into(),
+                sender: "财务 <billing@example.org>".into(),
+                received_at: 2,
+            },
+        )
+        .unwrap();
+    store
+        .cache_message(
+            &archived,
+            &MessageEnvelope {
+                subject: "归档项目".into(),
+                sender: "王工 <wang@example.org>".into(),
+                received_at: 1,
+            },
+        )
+        .unwrap();
+    store.mark_attachments(&first, 2).unwrap();
+
+    let by_text = store
+        .search(
+            &account,
+            &SearchQuery {
+                text: "项目".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(by_text.len(), 2);
+    let by_sender = store
+        .search(
+            &account,
+            &SearchQuery {
+                sender: "billing".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(by_sender.len(), 1);
+    assert_eq!(by_sender[0].message.location.uid, 2);
+    let with_files = store
+        .search(
+            &account,
+            &SearchQuery {
+                has_attachments: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(with_files.len(), 1);
+    assert_eq!(with_files[0].message.location.uid, 1);
+    let scoped = store
+        .search(
+            &account,
+            &SearchQuery {
+                text: "项目".into(),
+                folder: Some("Archive".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(scoped.len(), 1);
+    assert_eq!(scoped[0].folder, "Archive");
+    assert_eq!(scoped[0].message.location.uid, 9);
+    // LIKE 通配符按字面处理，不会把 % 当“全部”。
+    assert!(
+        store
+            .search(
+                &account,
+                &SearchQuery {
+                    text: "%".into(),
+                    ..Default::default()
+                }
+            )
+            .unwrap()
+            .is_empty()
+    );
+}

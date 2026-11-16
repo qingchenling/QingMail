@@ -13,6 +13,21 @@ mod private_dir;
 
 pub use paths::AppPaths;
 
+/// 本地搜索条件；只查询已缓存索引，不访问网络。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SearchQuery {
+    pub text: String,
+    pub sender: String,
+    pub has_attachments: bool,
+    /// None 表示整个账号范围；Some 限定一个远端文件夹名。
+    pub folder: Option<String>,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchHit {
+    pub message: CachedMessage,
+    pub folder: String,
+}
+
 /// 本地移除账号前的影响统计；不含远端邮件。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AccountImpact {
@@ -31,7 +46,7 @@ use private_dir::PrivateDir;
 use rusqlite::{Connection, MAIN_DB, OpenFlags, OptionalExtension, params};
 use std::{fmt, fs::File, io, path::Path, time::Duration};
 
-const SCHEMA_VERSION: u32 = 7;
+const SCHEMA_VERSION: u32 = 8;
 const APPLICATION_ID: u32 = 0x514d4149;
 const SCHEMA: &str = include_str!("schema.sql");
 const SCHEMA_V2: &str = include_str!("schema-v2.sql");
@@ -420,7 +435,7 @@ impl Store {
             None => new_id()?,
         };
         tx.execute(
-            "INSERT INTO messages VALUES (?1,?2,?3,?4,?5) ON CONFLICT(id) DO UPDATE SET subject=excluded.subject,sender=excluded.sender,received_at=excluded.received_at",
+            "INSERT INTO messages(id,account_id,subject,sender,received_at) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(id) DO UPDATE SET subject=excluded.subject,sender=excluded.sender,received_at=excluded.received_at",
             params![id,location.account.0,envelope.subject,envelope.sender,envelope.received_at],
         )?;
         tx.execute(
@@ -435,6 +450,80 @@ impl Store {
         )?;
         tx.commit()?;
         Ok(MessageId(id))
+    }
+
+    /// 已下载正文的附件数量；搜索“有附件”只覆盖已标记的邮件。
+    pub fn mark_attachments(&mut self, location: &MailUid, count: u32) -> Result<()> {
+        if count > 10_000 {
+            return Err(Error::Invalid("附件数量异常"));
+        }
+        self.connection.execute(
+            "UPDATE messages SET has_attachments=?1 WHERE id=(SELECT message_id FROM folder_messages WHERE account_id=?2 AND folder_id=?3 AND uidvalidity=?4 AND uid=?5)",
+            params![
+                count,
+                location.account.0,
+                location.folder_id,
+                location.uidvalidity,
+                location.uid
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// 已缓存内容的本地搜索；不发网络请求。has_attachments 仅对有正文标记的邮件生效。
+    pub fn search(&self, account: &AccountId, query: &SearchQuery) -> Result<Vec<SearchHit>> {
+        if query.text.len() > 512 || query.sender.len() > 320 {
+            return Err(Error::Invalid("搜索条件过长"));
+        }
+        let like = |value: &str| format!("%{}%", escape_like(value));
+        let text = like(&query.text);
+        let sender = like(&query.sender);
+        let mut statement = self.connection.prepare(
+            "SELECT m.id,fm.uid,fm.uidvalidity,m.subject,m.sender,m.received_at,fm.seen,fm.flagged,f.remote_name,f.id \
+             FROM folder_messages fm \
+             JOIN messages m ON m.id=fm.message_id AND m.account_id=fm.account_id \
+             JOIN folders f ON f.id=fm.folder_id AND f.account_id=fm.account_id \
+             WHERE fm.account_id=?1 \
+               AND (?2 IS NULL OR f.remote_name=?2) \
+               AND (?3='' OR m.subject LIKE ?4 ESCAPE '\\' OR m.sender LIKE ?4 ESCAPE '\\') \
+               AND (?5='' OR m.sender LIKE ?6 ESCAPE '\\') \
+               AND (?7=0 OR COALESCE(m.has_attachments,0) > 0) \
+             ORDER BY m.received_at DESC, fm.uid DESC LIMIT 200",
+        )?;
+        Ok(statement
+            .query_map(
+                params![
+                    account.0,
+                    query.folder,
+                    query.text,
+                    text,
+                    query.sender,
+                    sender,
+                    i64::from(query.has_attachments),
+                ],
+                |row| {
+                    Ok(SearchHit {
+                        message: CachedMessage {
+                            id: MessageId(row.get(0)?),
+                            location: MailUid {
+                                account: account.clone(),
+                                folder_id: row.get(9)?,
+                                uidvalidity: row.get(2)?,
+                                uid: row.get(1)?,
+                            },
+                            envelope: MessageEnvelope {
+                                subject: row.get(3)?,
+                                sender: row.get(4)?,
+                                received_at: row.get(5)?,
+                            },
+                            seen: row.get(6)?,
+                            flagged: row.get(7)?,
+                        },
+                        folder: row.get(8)?,
+                    })
+                },
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?)
     }
 
     /// 第一版按 UID 倒序稳定游标分页；不冒充按邮件日期排序或完整历史搜索。
@@ -550,6 +639,9 @@ fn migrate(
     if version < 7 {
         tx.execute_batch(include_str!("schema-v7.sql"))?;
     }
+    if version < 8 {
+        tx.execute_batch(include_str!("schema-v8.sql"))?;
+    }
     tx.pragma_update(None, "application_id", APPLICATION_ID)?;
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.commit()?;
@@ -560,6 +652,12 @@ fn new_id() -> Result<String> {
     let mut random = [0; 16];
     getrandom::fill(&mut random).map_err(|_| Error::Invalid("无法生成稳定 ID"))?;
     Ok(format!("{:032x}", u128::from_be_bytes(random)))
+}
+fn escape_like(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
 }
 fn bounded(value: &str, max: usize) -> Result<()> {
     if value.is_empty() || value.len() > max || value.contains('\0') {
