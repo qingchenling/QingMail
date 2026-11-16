@@ -345,6 +345,17 @@ fn main() {
     } else {
         Command::Open
     };
+    if args.iter().any(|arg| {
+        matches!(
+            arg.as_str(),
+            "--compose-fields-probe" | "--compose-restore-probe"
+        )
+    }) && (!args.iter().any(|a| a == "--editor-probe")
+        || std::env::var_os("QINGMAIL_P0_DRAFT_ROOT").is_none())
+    {
+        eprintln!("写信探针需要编辑探针模式和隔离数据目录");
+        std::process::exit(1);
+    }
     let isolated_probe = args
         .iter()
         .any(|arg| matches!(arg.as_str(), "--editor-probe" | "--editor-style-demo"))

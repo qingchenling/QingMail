@@ -32,6 +32,21 @@ enum Request {
         body: Draft,
         reply: SyncSender<StorageResult<StoredDraft>>,
     },
+    SaveDocument {
+        previous: Box<StoredDraft>,
+        document: DraftDocument,
+        reply: SyncSender<StorageResult<StoredDraft>>,
+    },
+    ImportAttachment {
+        account: AccountId,
+        path: PathBuf,
+        reply: SyncSender<StorageResult<mail_storage::AttachmentInfo>>,
+    },
+    AttachmentInfos {
+        account: AccountId,
+        ids: Vec<mail_core::AttachmentId>,
+        reply: SyncSender<StorageResult<Vec<mail_storage::AttachmentInfo>>>,
+    },
     New {
         body: Draft,
         reply: SyncSender<StorageResult<StoredDraft>>,
@@ -217,6 +232,40 @@ impl StorageClient {
             reply,
         })
     }
+    pub fn save_document(
+        &self,
+        previous: StoredDraft,
+        document: DraftDocument,
+    ) -> StorageResult<Receiver<StorageResult<StoredDraft>>> {
+        self.request(|reply| Request::SaveDocument {
+            previous: Box::new(previous),
+            document,
+            reply,
+        })
+    }
+    /// 仅传入操作者在文件选择器明确选择的路径；后台只读打开，不执行文件。
+    pub fn import_attachment(
+        &self,
+        account: AccountId,
+        path: PathBuf,
+    ) -> StorageResult<Receiver<StorageResult<mail_storage::AttachmentInfo>>> {
+        self.request(|reply| Request::ImportAttachment {
+            account,
+            path,
+            reply,
+        })
+    }
+    pub fn attachment_infos(
+        &self,
+        account: AccountId,
+        ids: Vec<mail_core::AttachmentId>,
+    ) -> StorageResult<Receiver<StorageResult<Vec<mail_storage::AttachmentInfo>>>> {
+        self.request(|reply| Request::AttachmentInfos {
+            account,
+            ids,
+            reply,
+        })
+    }
     pub fn new_draft(&self, body: Draft) -> StorageResult<Receiver<StorageResult<StoredDraft>>> {
         self.request(|reply| Request::New { body, reply })
     }
@@ -276,6 +325,42 @@ fn run(path: Option<PathBuf>, receiver: Receiver<Request>) {
                         &document,
                     )
                     .map_err(|e| e.to_string())
+                }));
+            }
+            Request::SaveDocument {
+                previous,
+                document,
+                reply,
+            } => {
+                let _ = reply.send(opened.and_then(|s| {
+                    s.save_draft(
+                        &previous.account,
+                        &previous.id,
+                        previous.revision,
+                        &document,
+                    )
+                    .map_err(|e| e.to_string())
+                }));
+            }
+            Request::ImportAttachment {
+                account,
+                path,
+                reply,
+            } => {
+                let _ = reply.send(opened.and_then(|s| import_attachment(s, &account, &path)));
+            }
+            Request::AttachmentInfos {
+                account,
+                ids,
+                reply,
+            } => {
+                let _ = reply.send(opened.and_then(|s| {
+                    if ids.len() > 32 {
+                        return Err("附件数量超过上限".into());
+                    }
+                    ids.iter()
+                        .map(|id| s.attachment(&account, id).map_err(|e| e.to_string()))
+                        .collect()
                 }));
             }
             Request::New { body, reply } => {
@@ -377,6 +462,36 @@ fn run(path: Option<PathBuf>, receiver: Receiver<Request>) {
         }
     }
 }
+fn import_attachment(
+    store: &mut Store,
+    account: &AccountId,
+    path: &std::path::Path,
+) -> StorageResult<mail_storage::AttachmentInfo> {
+    use rustix::fs::{Mode, OFlags, open};
+    if !path.is_absolute() {
+        return Err("请选择绝对路径的普通文件".into());
+    }
+    let name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or("附件文件名不是有效UTF-8")?;
+    // NONBLOCK避免FIFO阻塞；打开后核对同一个句柄，不使用检查后再打开的方式。
+    let fd = open(
+        path,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
+        Mode::empty(),
+    )
+    .map_err(|_| "无法打开附件，请选择可读的普通文件")?;
+    let mut file = std::fs::File::from(fd);
+    let metadata = file.metadata().map_err(|_| "无法读取附件信息")?;
+    if !metadata.is_file() || metadata.len() > mail_storage::MAX_ATTACHMENT_BYTES {
+        return Err("附件须为不超过25MiB的普通文件".into());
+    }
+    store
+        .import_attachment(account, name, "application/octet-stream", &mut file)
+        .map_err(|e| e.to_string())
+}
+
 fn open(store: &mut Store, initial: Draft) -> StorageResult<StoredDraft> {
     let account = store.local_draft_account().map_err(|e| e.to_string())?;
     if let Some(id) = store
@@ -525,6 +640,93 @@ mod tests {
         assert_eq!(
             receive(worker.client().message_body(location)).unwrap(),
             Some(raw)
+        );
+        worker.stop();
+    }
+
+    #[test]
+    fn full_document_and_attachment_survive_source_removal_and_reopen() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("data");
+        let source = root.path().join("中文附件.txt");
+        std::fs::write(&source, "附件原文🙂").unwrap();
+        let mut worker = StorageWorker::start(Some(path.clone())).unwrap();
+        let client = worker.client();
+        let first = receive(client.open_editor(Draft::plain("正文").unwrap())).unwrap();
+        let info =
+            receive(client.import_attachment(first.account.clone(), source.clone())).unwrap();
+        let mut document = first.document.clone();
+        document.headers = DraftHeaders {
+            subject: "中文主题🙂".into(),
+            to: vec!["partial@".into()],
+            cc: vec!["cc@example.invalid".into()],
+            bcc: vec!["bcc@example.invalid".into()],
+        };
+        document.attachments = vec![info.id.clone()];
+        let saved = receive(client.save_document(first.clone(), document.clone())).unwrap();
+        assert!(receive(client.save_document(first, document.clone())).is_err());
+        std::fs::remove_file(&source).unwrap();
+        let second = receive(client.new_draft(Draft::plain("另一份").unwrap())).unwrap();
+        assert_eq!(second.document.headers, DraftHeaders::default());
+        assert!(second.document.attachments.is_empty());
+        assert_eq!(receive(client.select(saved.id.clone())).unwrap(), saved);
+        worker.stop();
+        let mut worker = StorageWorker::start(Some(path.clone())).unwrap();
+        assert_eq!(
+            receive(worker.client().open_editor(Draft::plain("").unwrap())).unwrap(),
+            saved
+        );
+        assert_eq!(
+            receive(
+                worker
+                    .client()
+                    .attachment_infos(saved.account.clone(), vec![info.id.clone()])
+            )
+            .unwrap(),
+            vec![info]
+        );
+        worker.stop();
+        let mut store = Store::open(&path).unwrap();
+        assert!(store.task_ids(&saved.account).unwrap().is_empty());
+        // 移除仅改变草稿关联；其他版本和原始文件不受影响。
+        document.attachments.clear();
+        let removed = store
+            .save_draft(&saved.account, &saved.id, saved.revision, &document)
+            .unwrap();
+        assert!(removed.document.attachments.is_empty());
+    }
+
+    #[test]
+    fn selected_attachment_refuses_links_special_files_oversize_and_missing() {
+        use rustix::fs::{CWD, Mode, mkfifoat};
+        let root = tempfile::tempdir().unwrap();
+        let mut worker = StorageWorker::start(Some(root.path().join("data"))).unwrap();
+        let client = worker.client();
+        let draft = receive(client.open_editor(Draft::plain("").unwrap())).unwrap();
+        let source = root.path().join("file");
+        std::fs::write(&source, b"safe").unwrap();
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(&source, &link).unwrap();
+        let fifo = root.path().join("fifo");
+        mkfifoat(CWD, &fifo, Mode::RUSR | Mode::WUSR).unwrap();
+        let large = root.path().join("large");
+        std::fs::File::create(&large)
+            .unwrap()
+            .set_len(mail_storage::MAX_ATTACHMENT_BYTES + 1)
+            .unwrap();
+        for path in [
+            link,
+            fifo,
+            large,
+            root.path().to_path_buf(),
+            root.path().join("missing"),
+            PathBuf::from("relative"),
+        ] {
+            assert!(receive(client.import_attachment(draft.account.clone(), path)).is_err());
+        }
+        assert_eq!(
+            receive(client.open_editor(Draft::plain("").unwrap())).unwrap(),
+            draft
         );
         worker.stop();
     }

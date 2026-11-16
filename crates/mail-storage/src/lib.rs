@@ -6,8 +6,8 @@ mod outbox;
 mod paths;
 mod sync;
 pub use outbox::{
-    AttachmentInfo, DraftDocument, OutgoingAttachment, OutgoingSnapshot, SendTask, SmtpAttempt,
-    StoredDraft,
+    AttachmentInfo, DraftDocument, MAX_ATTACHMENT_BYTES, OutgoingAttachment, OutgoingSnapshot,
+    SendTask, SmtpAttempt, StoredDraft,
 };
 mod private_dir;
 

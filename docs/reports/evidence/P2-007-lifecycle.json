@@ -1,0 +1,46 @@
+{
+  "checks": [
+    {
+      "check": "close flushes latest text and formatting; no-window background continues",
+      "passed": true,
+      "pid": 32484,
+      "ticks_before": 2,
+      "ticks_after": "5"
+    },
+    {
+      "check": "runtime directory/socket permissions",
+      "passed": true,
+      "directory": "0700",
+      "socket": "0600"
+    },
+    {
+      "check": "eight concurrent relaunches reuse one process and one editor",
+      "passed": true,
+      "pid": 32484
+    },
+    {
+      "check": "relaunch recreates main window alongside restored editor",
+      "passed": true
+    },
+    {
+      "check": "invalid oversized and stalled activation requests are bounded",
+      "passed": true
+    },
+    {
+      "check": "explicit quit drains draft and releases socket/lock",
+      "passed": true
+    },
+    {
+      "check": "crash leaves stale socket; restart recovers confirmed draft and replaces stale endpoint",
+      "passed": true
+    },
+    {
+      "check": "filesystem write failure cancels close/quit and preserves last confirmed draft",
+      "passed": true
+    },
+    {
+      "check": "restoring write permission allows retry and clean shutdown",
+      "passed": true
+    }
+  ]
+}
