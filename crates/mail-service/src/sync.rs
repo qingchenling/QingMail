@@ -1,7 +1,9 @@
 //! 首轮手动只读同步：LIST 与最近90天、每次至多200封的头部索引。
 use crate::accounts::{self, CheckError, ImapStream, authenticated, io_error, quoted, response};
 use imap_proto::{AttributeValue, MailboxDatum, MessageSection, Response, ResponseCode, Status};
-use mail_core::{FolderBatch, MessageEnvelope, RemoteFolder, ServerSettings};
+use mail_core::{
+    BatchKind, FolderBatch, MessageEnvelope, MessageFlags, RemoteFolder, ServerSettings,
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::Write,
@@ -51,6 +53,63 @@ fn folder_using(
     now: i64,
     tls: &native_tls::TlsConnector,
 ) -> Result<FolderBatch, CheckError> {
+    fetch_folder(
+        server,
+        password,
+        FolderQuery {
+            name,
+            before,
+            expected_epoch,
+            kind: BatchKind::Recent,
+        },
+        now,
+        tls,
+    )
+}
+/// 主动加载最近90天之前的历史；按 UID 游标向前取，不冒充最近窗口同步。
+pub fn history(
+    server: &ServerSettings,
+    password: &str,
+    name: &str,
+    before: Option<u32>,
+    expected_epoch: Option<u32>,
+) -> Result<FolderBatch, CheckError> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| CheckError::Invalid)?
+        .as_secs() as i64;
+    fetch_folder(
+        server,
+        password,
+        FolderQuery {
+            name,
+            before,
+            expected_epoch,
+            kind: BatchKind::History,
+        },
+        now,
+        &connector()?,
+    )
+}
+struct FolderQuery<'a> {
+    name: &'a str,
+    before: Option<u32>,
+    expected_epoch: Option<u32>,
+    kind: BatchKind,
+}
+fn fetch_folder(
+    server: &ServerSettings,
+    password: &str,
+    query: FolderQuery<'_>,
+    now: i64,
+    tls: &native_tls::TlsConnector,
+) -> Result<FolderBatch, CheckError> {
+    let FolderQuery {
+        name,
+        before,
+        expected_epoch,
+        kind,
+    } = query;
     if name.is_empty()
         || name.len() > 4096
         || name.chars().any(char::is_control)
@@ -77,14 +136,18 @@ fn folder_using(
     if before.is_some() && expected_epoch.is_some_and(|old| old != epoch) {
         return Err(CheckError::EpochChanged);
     }
-    // 手动继续加载仅在当前90天结果内分页；不冒充加载更早历史。
-    let since = now.saturating_sub(90 * 86400);
-    let date = mail_parser::DateTime::from_timestamp(since);
+    let cutoff = now.saturating_sub(90 * 86400);
+    let date = mail_parser::DateTime::from_timestamp(cutoff);
     const MONTHS: [&str; 12] = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ];
     let search = format!(
-        "QM4 UID SEARCH SINCE {}-{}-{}\r\n",
+        "QM4 UID SEARCH {}{}-{}-{}\r\n",
+        if kind == BatchKind::Recent {
+            "SINCE "
+        } else {
+            "BEFORE "
+        },
         date.day,
         MONTHS[date.month as usize - 1],
         date.year
@@ -118,6 +181,7 @@ fn folder_using(
     let has_more = eligible.len() > 200;
     let wanted = eligible.into_iter().take(200).collect::<BTreeSet<_>>();
     let mut messages = BTreeMap::new();
+    let mut flags = BTreeMap::new();
     if !wanted.is_empty() {
         let set = wanted
             .iter()
@@ -126,19 +190,32 @@ fn folder_using(
             .join(",");
         command(
             &mut stream,
-            format!("QM5 UID FETCH {set} (UID BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE)])\r\n")
-                .as_bytes(),
+            format!(
+                "QM5 UID FETCH {set} (UID FLAGS BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE)])\r\n"
+            )
+            .as_bytes(),
         )?;
         until_done(&mut stream, "QM5", |response| {
             ensure_epoch(&response, epoch)?;
             if let Response::Fetch(_, attrs) = response {
                 let mut uid = None;
                 let mut header = None;
+                let mut seen = false;
+                let mut flagged = false;
                 for attr in attrs {
                     match attr {
                         AttributeValue::Uid(value) => {
                             if uid.replace(value).is_some() {
                                 return Err(CheckError::Protocol);
+                            }
+                        }
+                        AttributeValue::Flags(values) => {
+                            for value in values {
+                                if value.eq_ignore_ascii_case("\\Seen") {
+                                    seen = true;
+                                } else if value.eq_ignore_ascii_case("\\Flagged") {
+                                    flagged = true;
+                                }
                             }
                         }
                         AttributeValue::BodySection {
@@ -150,7 +227,6 @@ fn folder_using(
                                 return Err(CheckError::Protocol);
                             }
                         }
-                        AttributeValue::Flags(_) => {} // 服务器可附带标记；本轮不写远端标记。
                         _ => return Err(CheckError::Protocol),
                     }
                 }
@@ -179,7 +255,9 @@ fn folder_using(
                         sender,
                         received_at: parsed.date().map(|date| date.to_timestamp()).unwrap_or(0),
                     };
-                    if messages.insert(uid, envelope).is_some() {
+                    if messages.insert(uid, envelope).is_some()
+                        || flags.insert(uid, MessageFlags { seen, flagged }).is_some()
+                    {
                         return Err(CheckError::Protocol);
                     }
                 }
@@ -187,16 +265,19 @@ fn folder_using(
             Ok(())
         })?;
     }
-    if messages.len() != wanted.len() {
+    if messages.len() != wanted.len() || flags.len() != wanted.len() {
         return Err(CheckError::Protocol);
     }
     logout(&mut stream);
     Ok(FolderBatch {
         remote_name: name.into(),
         uidvalidity: epoch,
-        since,
+        since: cutoff,
         has_more,
+        complete: before.is_none(),
+        kind,
         messages: messages.into_iter().collect(),
+        flags,
     })
 }
 fn ensure_epoch(response: &Response<'_>, epoch: u32) -> Result<(), CheckError> {
@@ -208,14 +289,14 @@ fn ensure_epoch(response: &Response<'_>, epoch: u32) -> Result<(), CheckError> {
     }
     Ok(())
 }
-fn command(stream: &mut ImapStream, bytes: &[u8]) -> Result<(), CheckError> {
+pub(crate) fn command(stream: &mut ImapStream, bytes: &[u8]) -> Result<(), CheckError> {
     stream.get_mut().write_all(bytes).map_err(io_error)?;
     stream.get_mut().flush().map_err(io_error)
 }
-fn logout(stream: &mut ImapStream) {
+pub(crate) fn logout(stream: &mut ImapStream) {
     let _ = command(stream, b"QM9 LOGOUT\r\n");
 }
-fn until_done(
+pub(crate) fn until_done(
     stream: &mut ImapStream,
     tag: &str,
     mut item: impl FnMut(Response<'static>) -> Result<(), CheckError>,
@@ -399,7 +480,6 @@ fn message_using(
                             index: None,
                             data: Some(value),
                         } if data.is_none() => data = Some(value),
-                        AttributeValue::Flags(_) => {}
                         _ => return Err(CheckError::Protocol),
                     }
                 }

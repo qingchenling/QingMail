@@ -151,7 +151,7 @@ fn relational_constraints_allow_multiple_folders_but_not_cross_account_links() {
     store
         .connection
         .execute(
-            "INSERT INTO folder_messages VALUES (?1,?2,2,1,?3)",
+            "INSERT INTO folder_messages(account_id,folder_id,uidvalidity,uid,message_id,seen,flagged) VALUES (?1,?2,2,1,?3,0,0)",
             params![a.0, archive.id.0, id.0],
         )
         .unwrap();
@@ -160,7 +160,7 @@ fn relational_constraints_allow_multiple_folders_but_not_cross_account_links() {
         store
             .connection
             .execute(
-                "INSERT INTO folder_messages VALUES (?1,?2,1,1,?3)",
+                "INSERT INTO folder_messages(account_id,folder_id,uidvalidity,uid,message_id,seen,flagged) VALUES (?1,?2,1,1,?3,0,0)",
                 params![b.0, foreign.id.0, id.0]
             )
             .is_err()

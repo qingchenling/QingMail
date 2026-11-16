@@ -66,6 +66,26 @@ enum Request {
         account: Option<AccountId>,
         reply: SyncSender<StorageResult<()>>,
     },
+    SetFlags {
+        account: AccountId,
+        folder: String,
+        uidvalidity: u32,
+        uids: Vec<u32>,
+        seen: Option<bool>,
+        flagged: Option<bool>,
+        reply: SyncSender<StorageResult<()>>,
+    },
+    RemoveCached {
+        account: AccountId,
+        folder: String,
+        uidvalidity: u32,
+        uids: Vec<u32>,
+        reply: SyncSender<StorageResult<()>>,
+    },
+    Folders {
+        account: AccountId,
+        reply: SyncSender<StorageResult<Vec<mail_core::Folder>>>,
+    },
     List {
         account: Option<AccountId>,
         reply: SyncSender<StorageResult<Vec<StoredDraft>>>,
@@ -491,6 +511,46 @@ impl StorageClient {
             reply,
         })
     }
+    pub fn set_flags(
+        &self,
+        account: AccountId,
+        folder: String,
+        uidvalidity: u32,
+        uids: Vec<u32>,
+        seen: Option<bool>,
+        flagged: Option<bool>,
+    ) -> StorageResult<Receiver<StorageResult<()>>> {
+        self.request(|reply| Request::SetFlags {
+            account,
+            folder,
+            uidvalidity,
+            uids,
+            seen,
+            flagged,
+            reply,
+        })
+    }
+    pub fn remove_cached(
+        &self,
+        account: AccountId,
+        folder: String,
+        uidvalidity: u32,
+        uids: Vec<u32>,
+    ) -> StorageResult<Receiver<StorageResult<()>>> {
+        self.request(|reply| Request::RemoveCached {
+            account,
+            folder,
+            uidvalidity,
+            uids,
+            reply,
+        })
+    }
+    pub fn folders(
+        &self,
+        account: AccountId,
+    ) -> StorageResult<Receiver<StorageResult<Vec<mail_core::Folder>>>> {
+        self.request(|reply| Request::Folders { account, reply })
+    }
     /// 坏草稿恢复：读取选中草稿的原始正文字节，不要求正文可解析。
     pub fn selected_draft_body(
         &self,
@@ -693,6 +753,36 @@ fn run(path: Option<PathBuf>, receiver: Receiver<Request>) {
                         .map_err(|e| e.to_string())?
                         .ok_or("发件账号不存在或不是远端账号")?;
                     create_document(s, &account, *document)
+                }));
+            }
+            Request::SetFlags {
+                account,
+                folder,
+                uidvalidity,
+                uids,
+                seen,
+                flagged,
+                reply,
+            } => {
+                let _ = reply.send(opened.and_then(|s| {
+                    s.set_flags(&account, &folder, uidvalidity, &uids, seen, flagged)
+                        .map_err(|e| e.to_string())
+                }));
+            }
+            Request::Folders { account, reply } => {
+                let _ =
+                    reply.send(opened.and_then(|s| s.folders(&account).map_err(|e| e.to_string())));
+            }
+            Request::RemoveCached {
+                account,
+                folder,
+                uidvalidity,
+                uids,
+                reply,
+            } => {
+                let _ = reply.send(opened.and_then(|s| {
+                    s.remove_cached(&account, &folder, uidvalidity, &uids)
+                        .map_err(|e| e.to_string())
                 }));
             }
             Request::SelectedDraftBody { account, reply } => {
@@ -1115,6 +1205,9 @@ mod tests {
             uidvalidity: 42,
             since: 0,
             has_more: false,
+            complete: true,
+            kind: mail_core::BatchKind::Recent,
+            flags: Default::default(),
             messages: vec![(
                 7,
                 mail_core::MessageEnvelope {

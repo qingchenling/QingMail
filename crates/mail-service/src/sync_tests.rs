@@ -43,7 +43,7 @@ fn fixture_expected(
         assert_eq!(
             fetch,
             format!(
-                "QM5 UID FETCH {expected} (UID BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE)])\r\n"
+                "QM5 UID FETCH {expected} (UID FLAGS BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE)])\r\n"
             )
         );
         for uid in if before.is_some() {
@@ -247,4 +247,70 @@ fn changed_epoch_wrong_uid_truncation_and_oversize_never_return_a_body() {
     assert_eq!(body_fixture("wrong-uid"), Err(CheckError::Protocol));
     assert_eq!(body_fixture("oversize"), Err(CheckError::Limit));
     assert!(body_fixture("partial").is_err());
+}
+
+#[test]
+fn history_search_uses_before_and_caches_remote_flags() {
+    let (cert, key) = certificate();
+    let accept = acceptor(&cert, &key);
+    let listener = listener();
+    let settings = server(&listener, ConnectionSecurity::Tls);
+    let worker = thread::spawn(move || {
+        let mut r = BufReader::new(accept.accept(socket(listener)).unwrap());
+        r.get_mut().write_all(b"* OK synthetic\r\n").unwrap();
+        assert!(line(&mut r).starts_with("QM2 LOGIN "));
+        r.get_mut().write_all(b"QM2 OK authenticated\r\n").unwrap();
+        assert_eq!(line(&mut r), "QM3 EXAMINE \"INBOX\"\r\n");
+        r.get_mut()
+            .write_all(b"* OK [UIDVALIDITY 42] stable\r\nQM3 OK examined\r\n")
+            .unwrap();
+        let search = line(&mut r);
+        assert!(search.starts_with("QM4 UID SEARCH BEFORE "), "{search}");
+        r.get_mut()
+            .write_all(b"* SEARCH 5 8\r\nQM4 OK searched\r\n")
+            .unwrap();
+        assert_eq!(
+            line(&mut r),
+            "QM5 UID FETCH 5,8 (UID FLAGS BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE)])\r\n"
+        );
+        for (uid, flags) in [(5, ""), (8, "\\Seen \\Flagged")] {
+            let header = format!(
+                "Subject: old {uid}\r\nFrom: old@example.invalid\r\nDate: Mon, 01 Jan 2024 08:00:00 +0000\r\n\r\n"
+            );
+            r.get_mut().write_all(format!("* {uid} FETCH (UID {uid} FLAGS ({flags}) BODY[HEADER.FIELDS (SUBJECT FROM DATE)] {{{}}}\r\n{header})\r\n", header.len()).as_bytes()).unwrap();
+        }
+        r.get_mut().write_all(b"QM5 OK fetched\r\n").unwrap();
+        assert_eq!(line(&mut r), "QM9 LOGOUT\r\n");
+    });
+    let tls = native_tls::TlsConnector::builder()
+        .add_root_certificate(native_tls::Certificate::from_pem(&cert).unwrap())
+        .build()
+        .unwrap();
+    let result = fetch_folder(
+        &settings,
+        "synthetic-password",
+        FolderQuery {
+            name: "INBOX",
+            before: None,
+            expected_epoch: None,
+            kind: BatchKind::History,
+        },
+        1794816000,
+        &tls,
+    )
+    .unwrap();
+    worker.join().unwrap();
+    assert_eq!(result.kind, BatchKind::History);
+    assert_eq!(
+        result
+            .messages
+            .iter()
+            .map(|(uid, _)| *uid)
+            .collect::<Vec<_>>(),
+        vec![5, 8]
+    );
+    assert!(result.flags[&8].seen);
+    assert!(result.flags[&8].flagged);
+    assert!(!result.flags[&5].seen);
+    assert!(!result.flags[&5].flagged);
 }
