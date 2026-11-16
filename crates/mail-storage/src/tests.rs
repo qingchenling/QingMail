@@ -303,3 +303,58 @@ fn failed_write_keeps_last_committed_account() {
     let store = Store::open(&path).unwrap();
     assert_eq!(store.accounts().unwrap(), vec![(account, settings())]);
 }
+
+#[test]
+fn update_impact_and_remove_only_touch_the_selected_local_account() {
+    use mail_content::draft::Draft;
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("data");
+    let mut store = Store::open(&path).unwrap();
+    let a = store.create_account(&settings()).unwrap();
+    let b = store.create_account(&settings()).unwrap();
+    let folder = store.upsert_folder(&a, "INBOX", 42).unwrap();
+    store
+        .cache_message(&location(&folder, 1), &envelope())
+        .unwrap();
+    let info = store
+        .import_attachment(&a, "a.txt", "text/plain", &mut b"x".as_slice())
+        .unwrap();
+    let document = DraftDocument {
+        headers: mail_core::DraftHeaders {
+            to: vec!["to@example.org".into()],
+            ..Default::default()
+        },
+        body: Draft::plain("hi").unwrap(),
+        attachments: vec![info.id.clone()],
+    };
+    let draft = store.create_draft(&a, &document).unwrap();
+    store.enqueue_draft(&a, &draft.id, 1).unwrap();
+
+    let impact = store.account_impact(&a).unwrap();
+    assert_eq!(impact.cached_messages, 1);
+    assert_eq!(impact.drafts, 1);
+    assert_eq!(impact.tasks, 1);
+    assert_eq!(impact.pending_tasks, 1);
+    assert!(impact.object_bytes > 0);
+
+    let mut changed = settings();
+    changed.display_name = "更新后的账号".into();
+    changed.address = "new@example.org".into();
+    store.update_account(&a, &changed).unwrap();
+    assert_eq!(store.account(&a).unwrap().unwrap(), changed);
+    assert_eq!(store.account(&b).unwrap().unwrap(), settings());
+
+    let object_path = path.join("objects").join(&info.id.0);
+    assert!(object_path.exists());
+    let removed = store.remove_account(&a).unwrap();
+    assert_eq!(removed.tasks, 1);
+    assert_eq!(removed.drafts, 1);
+    assert!(store.account(&a).unwrap().is_none());
+    assert!(store.account(&b).unwrap().is_some());
+    assert!(!object_path.exists());
+    assert!(store.remove_account(&a).is_err());
+    drop(store);
+    let store = Store::open(&path).unwrap();
+    assert_eq!(store.accounts().unwrap().len(), 1);
+    assert_eq!(store.accounts().unwrap()[0].0, b);
+}

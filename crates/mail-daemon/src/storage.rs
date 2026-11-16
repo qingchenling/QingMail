@@ -1,6 +1,7 @@
 //! 进程内事件驱动的存储线程；SQLite 连接仅在此线程建立和使用。
 use mail_content::draft::Draft;
 use mail_core::{AccountId, DraftHeaders};
+use mail_service::credentials::CredentialVault as _;
 use mail_storage::{AppPaths, DraftDocument, Store, StoredDraft};
 use std::{
     path::PathBuf,
@@ -102,6 +103,20 @@ enum Request {
     },
     Accounts {
         reply: SyncSender<StorageResult<AccountList>>,
+    },
+    UpdateAccount {
+        account: AccountId,
+        settings: Box<mail_core::AccountSettings>,
+        credentials: mail_service::credentials::Credentials,
+        reply: SyncSender<StorageResult<()>>,
+    },
+    AccountImpact {
+        account: AccountId,
+        reply: SyncSender<StorageResult<mail_storage::AccountImpact>>,
+    },
+    RemoveAccount {
+        account: AccountId,
+        reply: SyncSender<StorageResult<mail_storage::AccountImpact>>,
     },
     Catalog {
         account: AccountId,
@@ -260,6 +275,33 @@ impl StorageClient {
     }
     pub fn accounts(&self) -> StorageResult<Receiver<StorageResult<AccountList>>> {
         self.request(|reply| Request::Accounts { reply })
+    }
+    /// 修改连接配置并更新同一账号的密钥库凭据；账号 ID 与本地数据不变。
+    pub fn update_account(
+        &self,
+        account: AccountId,
+        settings: mail_core::AccountSettings,
+        credentials: mail_service::credentials::Credentials,
+    ) -> StorageResult<Receiver<StorageResult<()>>> {
+        self.request(|reply| Request::UpdateAccount {
+            account,
+            settings: Box::new(settings),
+            credentials,
+            reply,
+        })
+    }
+    pub fn account_impact(
+        &self,
+        account: AccountId,
+    ) -> StorageResult<Receiver<StorageResult<mail_storage::AccountImpact>>> {
+        self.request(|reply| Request::AccountImpact { account, reply })
+    }
+    /// 只移除本地账号与缓存；远端邮件不受影响。
+    pub fn remove_account(
+        &self,
+        account: AccountId,
+    ) -> StorageResult<Receiver<StorageResult<mail_storage::AccountImpact>>> {
+        self.request(|reply| Request::RemoveAccount { account, reply })
     }
     pub fn catalog(
         &self,
@@ -835,6 +877,42 @@ fn run(path: Option<PathBuf>, receiver: Receiver<Request>) {
             }
             Request::Accounts { reply } => {
                 let _ = reply.send(opened.and_then(|s| s.accounts().map_err(|e| e.to_string())));
+            }
+            Request::AccountImpact { account, reply } => {
+                let _ = reply.send(
+                    opened.and_then(|s| s.account_impact(&account).map_err(|e| e.to_string())),
+                );
+            }
+            Request::UpdateAccount {
+                account,
+                settings,
+                credentials,
+                reply,
+            } => {
+                let _ = reply.send(opened.and_then(|s| {
+                    if s.account(&account).map_err(|e| e.to_string())?.is_none() {
+                        return Err("账号不存在或不是远端账号".into());
+                    }
+                    mail_service::credentials::SystemVault
+                        .save(&account, &credentials)
+                        .map_err(|e| format!("凭据未更新：{e}"))?;
+                    s.update_account(&account, &settings).map_err(|e| {
+                        format!("凭据已更新，但连接配置保存失败：{e}；请重试或移除账号")
+                    })
+                }));
+            }
+            Request::RemoveAccount { account, reply } => {
+                let _ = reply.send(opened.and_then(|s| {
+                    let impact = s.remove_account(&account).map_err(|e| e.to_string())?;
+                    mail_service::credentials::SystemVault
+                        .delete(&account)
+                        .map_err(|e| {
+                            format!(
+                                "账号已从本地移除，但密钥库条目可能仍在（{e}）；不会自动全盘扫描"
+                            )
+                        })?;
+                    Ok(impact)
+                }));
             }
             Request::AddAccount {
                 settings,
