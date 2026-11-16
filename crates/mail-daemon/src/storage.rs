@@ -145,6 +145,11 @@ enum Request {
         task: mail_core::SendTaskId,
         reply: SyncSender<StorageResult<mail_storage::SendTask>>,
     },
+    TaskSnapshot {
+        account: AccountId,
+        task: mail_core::SendTaskId,
+        reply: SyncSender<StorageResult<mail_storage::OutgoingSnapshot>>,
+    },
     /// 受控重发：确认旧任务、创建一个新任务并返回冻结快照；尚未取得 Sending 许可。
     Resend {
         account: AccountId,
@@ -380,6 +385,17 @@ impl StorageClient {
         account: AccountId,
     ) -> StorageResult<Receiver<StorageResult<Vec<mail_storage::SendTask>>>> {
         self.request(|reply| Request::Tasks { account, reply })
+    }
+    pub fn task_snapshot(
+        &self,
+        account: AccountId,
+        task: mail_core::SendTaskId,
+    ) -> StorageResult<Receiver<StorageResult<mail_storage::OutgoingSnapshot>>> {
+        self.request(|reply| Request::TaskSnapshot {
+            account,
+            task,
+            reply,
+        })
     }
     pub fn stop_uncertain(
         &self,
@@ -787,6 +803,16 @@ fn run(path: Option<PathBuf>, receiver: Receiver<Request>) {
             Request::Task { account, id, reply } => {
                 let _ = reply
                     .send(opened.and_then(|s| s.task(&account, &id).map_err(|e| e.to_string())));
+            }
+            Request::TaskSnapshot {
+                account,
+                task,
+                reply,
+            } => {
+                let _ = reply.send(
+                    opened
+                        .and_then(|s| s.task_snapshot(&account, &task).map_err(|e| e.to_string())),
+                );
             }
             Request::Tasks { account, reply } => {
                 let _ = reply

@@ -228,7 +228,7 @@ pub(super) fn note(cx: &App) -> String {
         "{} · 合成后台 {} 次 · PID {} · {}",
         if state.quitting {
             if state.sending.active() {
-                "正在等待发送结果写盘后退出"
+                "正在等待发送结果写盘后退出（网络阶段已有期限）"
             } else {
                 "正在保存并退出"
             }
