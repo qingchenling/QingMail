@@ -119,6 +119,9 @@ struct Mailbox {
     search_results: Option<Vec<SearchHit>>,
     search_selected: Option<usize>,
     search_previous: Option<(Option<usize>, Option<u32>)>,
+    narrow_detail: bool,
+    positions: BTreeMap<String, (Option<u32>, Option<u32>)>,
+    restore_uid: Option<u32>,
     before: Option<u32>,
     busy: bool,
     status: String,
@@ -150,6 +153,9 @@ impl Mailbox {
             search_results: None,
             search_selected: None,
             search_previous: None,
+            narrow_detail: false,
+            positions: BTreeMap::new(),
+            restore_uid: None,
             before: None,
             busy: false,
             status: "正在读取本地账号与缓存…".into(),
@@ -281,8 +287,19 @@ impl Mailbox {
         if self.busy {
             return;
         }
+        if let Some(current) = self.selected_folder.clone() {
+            let uid = self
+                .selected
+                .and_then(|index| self.messages().get(index))
+                .map(|message| message.location.uid);
+            self.positions.insert(current, (uid, self.before));
+        }
+        let (restore_uid, restore_before) =
+            self.positions.get(&name).copied().unwrap_or((None, None));
+        self.restore_uid = restore_uid;
+        self.narrow_detail = false;
         self.selected_folder = Some(name);
-        self.before = None;
+        self.before = restore_before;
         self.search_results = None;
         self.search_previous = None;
         self.search_selected = None;
@@ -327,6 +344,11 @@ impl Mailbox {
                             if index < this.messages().len() {
                                 this.selected = Some(index);
                             }
+                        } else if let Some(uid) = std::mem::take(&mut this.restore_uid) {
+                            this.selected = this
+                                .messages()
+                                .iter()
+                                .position(|message| message.location.uid == uid);
                         } else if quiet
                             && let Some(uid) = selected_uid
                         {
@@ -1054,6 +1076,11 @@ impl Render for Mailbox {
                 MaterialButton::new("mailbox-send-tasks")
                     .child("发送任务")
                     .on_click(|_, _, cx| crate::send_tasks::open(cx)),
+            )
+            .child(
+                MaterialButton::new("mailbox-settings")
+                    .child("设置")
+                    .on_click(|_, _, cx| crate::settings::open(cx)),
             );
         if let Some((_, settings)) = &self.account {
             tree = tree.child(
@@ -1331,6 +1358,7 @@ impl Render for Mailbox {
                     .text_sm()
                     .child("最近90天 · 每页最多200封 · 按UID倒序 · 只下载邮件头"),
             );
+        let compact = crate::settings::prefs(cx).compact;
         if let Some(results) = &self.search_results {
             let mut search_view = div()
                 .id("search-results")
@@ -1391,7 +1419,7 @@ impl Render for Mailbox {
                 uniform_list(
                     "message-index",
                     self.messages().len(),
-                    cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
+                    cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
                         range
                             .map(|index| {
                                 let message = &this.messages()[index];
@@ -1405,9 +1433,9 @@ impl Render for Mailbox {
                                 );
                                 div()
                                     .id(("message", index))
-                                    .h(px(68.))
+                                    .h(px(if compact { 48. } else { 68. }))
                                     .px_2()
-                                    .py_2()
+                                    .py(px(if compact { 4. } else { 8. }))
                                     .flex()
                                     .flex_row()
                                     .items_center()
@@ -1451,6 +1479,9 @@ impl Render for Mailbox {
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.selected = Some(index);
                                         this.confirm_delete = false;
+                                        if window.bounds().size.width < px(1050.) {
+                                            this.narrow_detail = true;
+                                        }
                                         window.focus(&this.focus, cx);
                                         cx.notify();
                                     }))
@@ -1503,6 +1534,7 @@ impl Render for Mailbox {
                     ),
             );
         }
+        let wide = window.bounds().size.width >= px(1050.);
         let mut detail = div()
             .p_4()
             .flex()
@@ -1510,6 +1542,16 @@ impl Render for Mailbox {
             .gap_3()
             .min_w_0()
             .child("邮件头详情");
+        if !wide {
+            detail = detail.child(
+                MaterialButton::new("back-to-list")
+                    .child("返回列表")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.narrow_detail = false;
+                        cx.notify();
+                    })),
+            );
+        }
         if let Some((index, hit)) = self
             .search_selected
             .zip(self.search_results.as_ref())
@@ -1550,7 +1592,6 @@ impl Render for Mailbox {
         } else {
             detail = detail.child("选择邮件查看头部详情");
         }
-        let wide = window.bounds().size.width >= px(1050.);
         let body = if wide {
             div()
                 .flex()
@@ -1558,14 +1599,10 @@ impl Render for Mailbox {
                 .min_h_0()
                 .child(list)
                 .child(detail.w(px(360.)).flex_shrink_0())
+        } else if self.narrow_detail {
+            div().flex().flex_col().flex_1().min_h_0().child(detail)
         } else {
-            div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_h_0()
-                .child(list)
-                .child(detail.max_h(px(170.)).overflow_hidden())
+            div().flex().flex_col().flex_1().min_h_0().child(list)
         };
         div()
             .size_full()

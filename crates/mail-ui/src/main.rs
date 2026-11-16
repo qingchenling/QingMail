@@ -19,6 +19,7 @@ mod reader;
 mod reply;
 mod send_labels;
 mod send_tasks;
+mod settings;
 
 /// 设 QINGMAIL_FPS=1 显示性能 HUD（帧率/帧耗时/GPU/CPU/内存）。
 fn show_fps() -> bool {
@@ -59,7 +60,7 @@ impl Home {
         Self {
             input,
             menu_open: false,
-            dark: false,
+            dark: crate::settings::prefs(cx).dark,
             theme_target: None,
             theme_animating: false,
             selected: None,
@@ -69,6 +70,15 @@ impl Home {
 
     fn toggle_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.dark = !self.dark;
+        let mut preferences = crate::settings::prefs(cx);
+        preferences.dark = self.dark;
+        if preferences.reduce_motion {
+            // 减少动态：直接切换主题，不排队帧过渡。
+            crate::settings::set(cx, preferences);
+            cx.notify();
+            return;
+        }
+        crate::settings::persist(cx, preferences);
         let mode = if self.dark {
             ThemeMode::Dark
         } else {
@@ -415,8 +425,7 @@ fn main() {
         .run(move |cx: &mut App| {
             gpui_kit::init(cx);
             gpui_kit_material::init(cx);
-            let scheme = ThemeId::Baseline.scheme(ThemeMode::Light, Contrast::Standard);
-            theme::init_component_theme(scheme, 1.0, cx);
+            settings::init(cx);
             if let Err(e) = lifecycle::start(instance, cx) {
                 eprintln!("无法启动合成后台：{e}");
                 cx.quit();

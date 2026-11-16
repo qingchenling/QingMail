@@ -30,6 +30,7 @@ impl Composer {
                         let value = input.read(cx).value().to_string();
                         if this.header_values[index] != value {
                             this.header_values[index] = value;
+                            this.field_errors[index] = None;
                             this.session.borrow_mut().revision += 1;
                             this.last_edit = Instant::now();
                             cx.notify();
@@ -157,6 +158,35 @@ impl Composer {
         }
         cx.notify();
     }
+    /// 发送前在本地定位字段错误；不依赖存储层的字符串错误。
+    pub(super) fn validate_fields(&mut self, cx: &App) -> bool {
+        let mut errors = [None, None, None, None];
+        let mut total = 0usize;
+        for index in 0..3 {
+            let value = self.header_inputs[index].read(cx).value().to_string();
+            let mut position = 0;
+            for address in value.split([',', ';']).map(str::trim) {
+                if address.is_empty() {
+                    continue;
+                }
+                total += 1;
+                position += 1;
+                if !valid_address(address) {
+                    errors[index] = Some(format!("第 {position} 个地址格式不正确"));
+                    break;
+                }
+            }
+        }
+        if total == 0 {
+            errors[0] = Some("至少填写一个收件人、抄送或密送地址".into());
+        }
+        let subject = self.header_inputs[3].read(cx).value().to_string();
+        if subject.len() > 4096 || subject.chars().any(char::is_control) {
+            errors[3] = Some("主题含控制字符或超过上限".into());
+        }
+        self.field_errors = errors;
+        self.field_errors.iter().all(Option::is_none)
+    }
     fn recipient_chips(&self, index: usize, cx: &mut Context<Self>) -> impl IntoElement {
         let mut row = div().flex().flex_wrap().gap_1();
         let value = self.header_inputs[index].read(cx).value().to_string();
@@ -211,6 +241,14 @@ impl Composer {
                     .label(label)
                     .disabled(disabled),
             );
+            if let Some(error) = &self.field_errors[index] {
+                fields = fields.child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(theme::color(ColorRole::ERROR))
+                        .child(error.clone()),
+                );
+            }
             if index < 3 {
                 fields = fields.child(self.recipient_chips(index, cx));
             }
@@ -263,6 +301,17 @@ impl Composer {
         fields.child(row)
     }
 }
+
+fn valid_address(address: &str) -> bool {
+    !address.is_empty()
+        && address.len() <= 320
+        && address.matches('@').count() == 1
+        && !address.starts_with('@')
+        && !address.ends_with('@')
+        && !address.chars().any(|c| c.is_whitespace() || c.is_control())
+        && !address.contains(['<', '>', ',', ';'])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -307,6 +307,7 @@ pub(super) struct Composer {
     _subscription: Subscription,
     probe_step: usize,
     show_cc_bcc: bool,
+    field_errors: [Option<String>; 4],
 }
 
 impl Composer {
@@ -421,6 +422,7 @@ impl Composer {
             _subscription: subscription,
             probe_step: 0,
             show_cc_bcc: false,
+            field_errors: [None, None, None, None],
         };
         this.subscribe_headers(cx);
         this.input

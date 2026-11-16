@@ -49,6 +49,11 @@ impl Composer {
             cx.notify();
             return;
         }
+        if !self.validate_fields(cx) {
+            self.status = "请修正标红的收件人或主题字段".into();
+            cx.notify();
+            return;
+        }
         if self.saving || self.saved != Some(self.session.borrow().revision) {
             self.save(cx);
             self.status = "正在保存草稿，请等已保存后再检查发送".into();
