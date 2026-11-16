@@ -253,7 +253,11 @@ fn until_done(
 }
 /// 在调用通用解析器前限制协议括号深度；引号与字面量不参与深度统计。
 /// 不完整字面量留给解析器报告 Incomplete，不把正文里的括号当协议嵌套。
+#[cfg(test)]
 pub(crate) fn guard_response(bytes: &[u8]) -> Result<(), CheckError> {
+    guard_response_limit(bytes, 64 * 1024)
+}
+pub(crate) fn guard_response_limit(bytes: &[u8], literal_max: usize) -> Result<(), CheckError> {
     let mut offset = 0;
     let mut depth = 0;
     let mut quoted = false;
@@ -288,7 +292,7 @@ pub(crate) fn guard_response(bytes: &[u8]) -> Result<(), CheckError> {
                     .ok()
                     .and_then(|s| s.parse::<usize>().ok())
                     .ok_or(CheckError::Protocol)?;
-                if count > 64 * 1024 {
+                if count > literal_max {
                     return Err(CheckError::Limit);
                 }
                 let start = offset + 1 + end + 3;
@@ -318,4 +322,108 @@ pub fn display_time(timestamp: i64) -> String {
     } else {
         mail_parser::DateTime::from_timestamp(timestamp).to_rfc3339()
     }
+}
+
+/// 明确打开正文时下载完整MIME（包括其中附件）；不设置已读标记。
+pub fn message(
+    server: &ServerSettings,
+    password: &str,
+    name: &str,
+    epoch: u32,
+    uid: u32,
+) -> Result<Vec<u8>, CheckError> {
+    message_using(server, password, name, epoch, uid, &connector()?)
+}
+fn message_using(
+    server: &ServerSettings,
+    password: &str,
+    name: &str,
+    epoch: u32,
+    uid: u32,
+    tls: &native_tls::TlsConnector,
+) -> Result<Vec<u8>, CheckError> {
+    if name.is_empty()
+        || name.len() > 4096
+        || name.chars().any(char::is_control)
+        || uid == 0
+        || epoch == 0
+    {
+        return Err(CheckError::Invalid);
+    }
+    let mut stream = authenticated(server, password, tls)?;
+    let mut examine = b"QM3 EXAMINE ".to_vec();
+    quoted(&mut examine, name);
+    examine.extend_from_slice(b"\r\n");
+    command(&mut stream, &examine)?;
+    let mut seen_epoch = false;
+    until_done(&mut stream, "QM3", |response| {
+        ensure_epoch(&response, epoch)?;
+        if let Response::Data { outcome, .. } = response
+            && matches!(outcome.code, Some(ResponseCode::UidValidity(_)))
+        {
+            seen_epoch = true;
+        }
+        Ok(())
+    })?;
+    if !seen_epoch {
+        return Err(CheckError::Protocol);
+    }
+    stream.get_mut().reset_budget(9 * 1024 * 1024, 60);
+    command(
+        &mut stream,
+        format!("QM4 UID FETCH {uid} (UID BODY.PEEK[])\r\n").as_bytes(),
+    )?;
+    let mut raw = None;
+    let mut complete = false;
+    for _ in 0..64 {
+        let item = accounts::response_limited(&mut stream, true, 9 * 1024 * 1024, 8 * 1024 * 1024)?;
+        ensure_epoch(&item, epoch)?;
+        match item {
+            Response::Done { tag, status, .. } => {
+                if tag.as_bytes() != b"QM4" || status != Status::Ok {
+                    return Err(CheckError::Protocol);
+                }
+                complete = true;
+                break;
+            }
+            Response::Fetch(_, attrs) => {
+                let mut received_uid = None;
+                let mut data = None;
+                for attr in attrs {
+                    match attr {
+                        AttributeValue::Uid(value) if received_uid.is_none() => {
+                            received_uid = Some(value)
+                        }
+                        AttributeValue::BodySection {
+                            section: None,
+                            index: None,
+                            data: Some(value),
+                        } if data.is_none() => data = Some(value),
+                        AttributeValue::Flags(_) => {}
+                        _ => return Err(CheckError::Protocol),
+                    }
+                }
+                if let Some(data) = data {
+                    if received_uid != Some(uid)
+                        || raw.is_some()
+                        || data.len() > 8 * 1024 * 1024
+                        || data.is_empty()
+                    {
+                        return Err(CheckError::Protocol);
+                    }
+                    raw = Some(data.into_owned());
+                }
+            }
+            Response::Data {
+                status: Status::Ok, ..
+            } => {}
+            _ => return Err(CheckError::Protocol),
+        }
+    }
+    if !complete {
+        return Err(CheckError::Limit);
+    }
+    let raw = raw.ok_or(CheckError::Protocol)?;
+    logout(&mut stream);
+    Ok(raw)
 }

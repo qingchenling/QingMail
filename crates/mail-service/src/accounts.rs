@@ -108,6 +108,10 @@ pub(crate) struct Bounded<T> {
     deadline: Instant,
 }
 impl<T> Bounded<T> {
+    pub(crate) fn reset_budget(&mut self, bytes: usize, seconds: u64) {
+        self.remaining = bytes;
+        self.deadline = Instant::now() + Duration::from_secs(seconds);
+    }
     fn new(stream: T) -> Self {
         Self {
             stream,
@@ -246,12 +250,20 @@ pub(crate) fn response(
     stream: &mut impl BufRead,
     sync: bool,
 ) -> Result<imap_proto::Response<'static>, CheckError> {
+    response_limited(stream, sync, 1024 * 1024, 64 * 1024)
+}
+pub(crate) fn response_limited(
+    stream: &mut impl BufRead,
+    sync: bool,
+    max: usize,
+    literal_max: usize,
+) -> Result<imap_proto::Response<'static>, CheckError> {
     let mut bytes = Vec::new();
     loop {
         if stream.read_until(b'\n', &mut bytes).map_err(io_error)? == 0 {
             return Err(CheckError::Protocol);
         }
-        if bytes.len() > 1024 * 1024 {
+        if bytes.len() > max {
             return Err(CheckError::Limit);
         }
         // 接入检查不接受 FETCH 等复杂消息结构；限制解析面及嵌套风险。
@@ -272,11 +284,28 @@ pub(crate) fn response(
             return Err(CheckError::Protocol);
         }
         if sync {
-            crate::sync::guard_response(&bytes)?;
+            crate::sync::guard_response_limit(&bytes, literal_max)?;
         }
         match imap_proto::Response::parse(&bytes) {
             Ok(([], response)) => return Ok(response.into_owned()),
-            Err(nom::Err::Incomplete(_)) => continue,
+            Err(nom::Err::Incomplete(_)) => {
+                // 字面量按声明长度一次读取，不对每个正文换行反复扫描/解析。
+                if bytes.ends_with(b"}\r\n")
+                    && let Some(start) = bytes.iter().rposition(|b| *b == b'{')
+                {
+                    let count = std::str::from_utf8(&bytes[start + 1..bytes.len() - 3])
+                        .ok()
+                        .and_then(|s| s.parse::<usize>().ok())
+                        .ok_or(CheckError::Protocol)?;
+                    if count > literal_max || bytes.len().saturating_add(count) > max {
+                        return Err(CheckError::Limit);
+                    }
+                    let offset = bytes.len();
+                    bytes.resize(offset + count, 0);
+                    stream.read_exact(&mut bytes[offset..]).map_err(io_error)?;
+                }
+                continue;
+            }
             _ => return Err(CheckError::Protocol),
         }
     }

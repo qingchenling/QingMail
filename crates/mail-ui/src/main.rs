@@ -328,10 +328,12 @@ fn main() {
         )
     }) {
         Command::Editor
-    } else if args
-        .iter()
-        .any(|arg| matches!(arg.as_str(), "--mailbox" | "--mailbox-probe"))
-    {
+    } else if args.iter().any(|arg| {
+        matches!(
+            arg.as_str(),
+            "--mailbox" | "--mailbox-probe" | "--body-probe"
+        )
+    }) {
         Command::Mailbox
     } else if args
         .iter()
@@ -358,11 +360,13 @@ fn main() {
         eprintln!("生命周期探针需要独立运行目录和草稿目录，未启动。");
         std::process::exit(1);
     }
-    if args
-        .iter()
-        .any(|arg| matches!(arg.as_str(), "--accounts-probe" | "--mailbox-probe"))
-        && (std::env::var_os("QINGMAIL_P0_RUNTIME_ROOT").is_none()
-            || std::env::var_os("QINGMAIL_P0_DRAFT_ROOT").is_none())
+    if args.iter().any(|arg| {
+        matches!(
+            arg.as_str(),
+            "--accounts-probe" | "--mailbox-probe" | "--body-probe"
+        )
+    }) && (std::env::var_os("QINGMAIL_P0_RUNTIME_ROOT").is_none()
+        || std::env::var_os("QINGMAIL_P0_DRAFT_ROOT").is_none())
     {
         eprintln!("账号探针需要独立运行与数据目录");
         std::process::exit(1);

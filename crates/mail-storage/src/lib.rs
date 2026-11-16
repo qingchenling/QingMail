@@ -1,5 +1,6 @@
 //! P2 本地索引：后台单写者、XDG 路径、事务迁移和 IMAP 定位隔离。
 //! 不保存密码/令牌；草稿与发送快照使用不可变对象和事务关联。
+mod message_body;
 mod objects;
 mod outbox;
 mod paths;
@@ -20,7 +21,7 @@ use private_dir::PrivateDir;
 use rusqlite::{Connection, MAIN_DB, OpenFlags, OptionalExtension, params};
 use std::{fmt, fs::File, io, path::Path, time::Duration};
 
-const SCHEMA_VERSION: u32 = 4;
+const SCHEMA_VERSION: u32 = 5;
 const APPLICATION_ID: u32 = 0x514d4149;
 const SCHEMA: &str = include_str!("schema.sql");
 const SCHEMA_V2: &str = include_str!("schema-v2.sql");
@@ -433,6 +434,9 @@ fn migrate(
     }
     if version < 4 {
         tx.execute_batch(include_str!("schema-v4.sql"))?;
+    }
+    if version < 5 {
+        tx.execute_batch(include_str!("schema-v5.sql"))?;
     }
     tx.pragma_update(None, "application_id", APPLICATION_ID)?;
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;

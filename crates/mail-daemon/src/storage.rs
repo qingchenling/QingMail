@@ -73,6 +73,15 @@ enum Request {
         now: i64,
         reply: SyncSender<StorageResult<()>>,
     },
+    MessageBody {
+        location: mail_core::MailUid,
+        reply: SyncSender<StorageResult<Option<Vec<u8>>>>,
+    },
+    SaveMessageBody {
+        location: mail_core::MailUid,
+        raw: Vec<u8>,
+        reply: SyncSender<StorageResult<()>>,
+    },
     Stop,
 }
 
@@ -171,6 +180,23 @@ impl StorageClient {
             account,
             batch,
             now,
+            reply,
+        })
+    }
+    pub fn message_body(
+        &self,
+        location: mail_core::MailUid,
+    ) -> StorageResult<Receiver<StorageResult<Option<Vec<u8>>>>> {
+        self.request(|reply| Request::MessageBody { location, reply })
+    }
+    pub fn save_message_body(
+        &self,
+        location: mail_core::MailUid,
+        raw: Vec<u8>,
+    ) -> StorageResult<Receiver<StorageResult<()>>> {
+        self.request(|reply| Request::SaveMessageBody {
+            location,
+            raw,
             reply,
         })
     }
@@ -332,6 +358,21 @@ fn run(path: Option<PathBuf>, receiver: Receiver<Request>) {
                         .map_err(|e| e.to_string())
                 }));
             }
+            Request::MessageBody { location, reply } => {
+                let _ = reply.send(
+                    opened.and_then(|s| s.message_body(&location).map_err(|e| e.to_string())),
+                );
+            }
+            Request::SaveMessageBody {
+                location,
+                raw,
+                reply,
+            } => {
+                let _ = reply.send(opened.and_then(|s| {
+                    s.save_message_body(&location, &raw)
+                        .map_err(|e| e.to_string())
+                }));
+            }
             Request::Stop => break,
         }
     }
@@ -463,12 +504,27 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(cache.messages[0].location.uid, 7);
+        let location = cache.messages[0].location.clone();
+        let raw = b"Subject: cached\r\n\r\nbody".to_vec();
+        assert_eq!(
+            receive(client.message_body(location.clone())).unwrap(),
+            None
+        );
+        receive(client.save_message_body(location.clone(), raw.clone())).unwrap();
+        assert_eq!(
+            receive(client.message_body(location.clone())).unwrap(),
+            Some(raw.clone())
+        );
         assert!(receive(client.publish_catalog(AccountId("missing".into()), vec![], 3)).is_err());
         worker.stop();
         let mut worker = StorageWorker::start(Some(path)).unwrap();
         assert_eq!(
             receive(worker.client().folder_cache(account, "INBOX".into(), None)).unwrap(),
             Some(cache)
+        );
+        assert_eq!(
+            receive(worker.client().message_body(location)).unwrap(),
+            Some(raw)
         );
         worker.stop();
     }

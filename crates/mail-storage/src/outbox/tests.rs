@@ -583,7 +583,7 @@ fn v2_upgrade_keeps_existing_drafts_and_remote_account_identity() {
     drop(store);
     // 从当前库移除 v3/v4 的结构，恢复真实 v2 布局；正文和 v2 行保持原样。
     let conn = Connection::open(path.join("state.sqlite3")).unwrap();
-    conn.execute_batch("DROP TABLE remote_folders; DROP TABLE folder_sync; DROP TABLE catalog_sync; DROP TABLE local_editor; DROP INDEX one_local_workspace; ALTER TABLE accounts DROP COLUMN kind; PRAGMA user_version=2;").unwrap();
+    conn.execute_batch("DROP TABLE message_bodies; DROP TABLE remote_folders; DROP TABLE folder_sync; DROP TABLE catalog_sync; DROP TABLE local_editor; DROP INDEX one_local_workspace; ALTER TABLE accounts DROP COLUMN kind; PRAGMA user_version=2;").unwrap();
     drop(conn);
     let mut store = Store::open(&path).unwrap();
     assert_eq!(store.draft(&account, &draft.id).unwrap(), draft);
