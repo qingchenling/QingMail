@@ -1,3 +1,4 @@
+pub use mail_core::{AttachmentInfo, OutgoingAttachment, OutgoingSnapshot};
 use std::io::Read;
 
 use mail_content::draft::{Draft, MAX_JSON};
@@ -30,13 +31,6 @@ pub struct StoredDraft {
     pub document: DraftDocument,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AttachmentInfo {
-    pub id: AttachmentId,
-    pub name: String,
-    pub media_type: String,
-    pub size: u32,
-}
-#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SendTask {
     pub id: SendTaskId,
     pub account: AccountId,
@@ -47,22 +41,6 @@ pub struct SendTask {
     pub detail: String,
     pub resend_of: Option<SendTaskId>,
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OutgoingAttachment {
-    pub info: AttachmentInfo,
-    pub bytes: Vec<u8>,
-}
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OutgoingSnapshot {
-    pub message_id: String,
-    pub date_unix: i64,
-    pub sender: String,
-    pub headers: DraftHeaders,
-    pub plain: String,
-    pub html: String,
-    pub attachments: Vec<OutgoingAttachment>,
-}
-
 /// 只能由成功持久化 Sending 状态的 begin_smtp 返回；不可克隆或自行构造。
 #[derive(Debug)]
 pub struct SmtpAttempt {
