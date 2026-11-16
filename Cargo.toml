@@ -36,5 +36,19 @@ gpui-kit-material = { version = "=0.1.4", default-features = false, features = [
 # gpui-pre 快照一致。
 gpui-fps = "=0.9.1"
 
+# P0 内容验证：邮件/HTML/CSS 均通过解析器处理，不能使用正则承担安全边界。
+mail-parser = { version = "=1.0.1", features = ["full_encoding"] }
+ammonia = "=4.2.5"
+scraper = { version = "=0.29.0", default-features = false }
+cssparser = { version = "=0.38.0", default-features = false }
+base64 = "=0.22.1"
+image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+url = "=2.5.8"
+percent-encoding = "=2.3.2"
+getrandom = "=0.4.3"
+rustix = { version = "=1.1.6", features = ["fs", "process"] }
+tempfile = "=3.27.0"
+reqwest = { version = "=0.13.5", default-features = false, features = ["blocking", "rustls"] }
+
 [profile.release]
 lto = "thin"

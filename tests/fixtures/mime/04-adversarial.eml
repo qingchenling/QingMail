@@ -1,0 +1,16 @@
+From: QingMail Demo <demo@example.invalid>
+MIME-Version: 1.0
+Subject: 安全探针：主动资源默认阻止
+Content-Type: multipart/related; boundary="attack"
+
+--attack
+Content-Type: text/html; charset=utf-8
+
+<html><head><base href="http://127.0.0.1:18765/base/"><meta http-equiv="refresh" content="0;url=http://127.0.0.1:18765/refresh"><link rel="stylesheet" href="http://127.0.0.1:18765/linked.css"><link rel="preconnect" href="http://127.0.0.1:18765"><style>@import url(http://127.0.0.1:18765/import.css); @font-face {font-family:track;src:url(http://127.0.0.1:18765/font.woff)}.safe {color:#123456;background-color:#f3f7fb;padding:12px}.tracker {background-image:u\72l(http://127.0.0.1:18765/escaped-css)} p {background:url(http://127.0.0.1:18765/background)}</style><script>window.qingmailAttack=1;fetch('http://127.0.0.1:18765/script')</script></head><body onload="window.qingmailAttack=2;fetch('http://127.0.0.1:18765/onload')"><h2>安全探针正文仍然可读</h2><p class="safe" style="font-weight:bold;background:url(http://127.0.0.1:18765/inline);color:rgb(12,34,56)">安全文字与保留的基础样式</p><img src="cid:logo@demo" alt="valid-cid"><img src="http://127.0.0.1:18765/pixel" onerror="window.qingmailAttack=3"><img src="http://127.0.0.1:18765/redirect"><img src="//127.0.0.1:18765/protocol-relative"><img src="relative.png"><img src="file:///etc/passwd"><img src="data:image/svg+xml,&lt;svg onload='alert(1)'/&gt;"><img srcset="http://127.0.0.1:18765/srcset 1x" src="cid:missing"><iframe src="http://127.0.0.1:18765/frame"></iframe><object data="http://127.0.0.1:18765/object"></object><embed src="http://127.0.0.1:18765/embed"><video poster="http://127.0.0.1:18765/poster"><source src="http://127.0.0.1:18765/video"></video><audio src="http://127.0.0.1:18765/audio"></audio><svg><image href="http://127.0.0.1:18765/svg"></image></svg><form action="http://127.0.0.1:18765/submit"><input type="image" src="http://127.0.0.1:18765/input"><button>提交</button><p>表单说明保留</p></form><a href="jav&#x61;script:window.qingmailAttack=4">混淆脚本链接</a><a href="file:///etc/passwd">本地文件</a><a href="/relative">相对地址</a><a href="https://example.invalid/safe" ping="http://127.0.0.1:18765/ping" target="_blank">安全链接</a><a href="mailto:demo@example.invalid">邮件链接</a></body></html>
+--attack
+Content-Type: image/png
+Content-ID: <logo@demo>
+Content-Transfer-Encoding: base64
+
+iVBORw0KGgoAAAANSUhEUgAAACAAAAAUCAIAAABj86gYAAAAIElEQVR4nGMwajhAU8QwasGoBaMWjFowasGoBaMWEIMAU+SdLtwAOhcAAAAASUVORK5CYII=
+--attack--

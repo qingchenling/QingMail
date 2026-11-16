@@ -1,0 +1,113 @@
+{
+  "scope": "Firefox only; local file copies; no CSP and CSP variants; synthetic loopback resource probes",
+  "cases": [
+    {
+      "name": "sanitized-with-csp",
+      "requests": [],
+      "state": {
+        "title": "安全探针：主动资源默认阻止",
+        "attack": 0,
+        "readable": true,
+        "images": [
+          {
+            "src": "data:image/png;base64,iVBORw0KGg",
+            "width": 32,
+            "height": 20,
+            "complete": true
+          }
+        ],
+        "links": [
+          "https://example.invalid/safe",
+          "mailto:demo@example.invalid"
+        ],
+        "styles": [
+          {
+            "color": "rgb(12, 34, 56)",
+            "background": "rgb(243, 247, 251)"
+          }
+        ],
+        "activeNodes": 0
+      },
+      "passed": true
+    },
+    {
+      "name": "sanitized-without-csp",
+      "requests": [],
+      "state": {
+        "title": "安全探针：主动资源默认阻止",
+        "attack": 0,
+        "readable": true,
+        "images": [
+          {
+            "src": "data:image/png;base64,iVBORw0KGg",
+            "width": 32,
+            "height": 20,
+            "complete": true
+          }
+        ],
+        "links": [
+          "https://example.invalid/safe",
+          "mailto:demo@example.invalid"
+        ],
+        "styles": [
+          {
+            "color": "rgb(12, 34, 56)",
+            "background": "rgb(243, 247, 251)"
+          }
+        ],
+        "activeNodes": 0
+      },
+      "passed": true
+    },
+    {
+      "name": "unsafe-positive-control",
+      "requests": [
+        "/redirect",
+        "/pixel",
+        "/script",
+        "/redirect-target"
+      ],
+      "attack": 9,
+      "passed": true
+    },
+    {
+      "name": "csp-independent-defense",
+      "requests": [],
+      "attack": 0,
+      "passed": true
+    },
+    {
+      "name": "explicit-http-link",
+      "requests": [
+        "/clicked",
+        "/favicon.ico"
+      ],
+      "passed": true
+    },
+    {
+      "name": "marketing-layout",
+      "state": {
+        "text": true,
+        "tables": 2,
+        "background": "rgb(242, 246, 255)",
+        "images": [
+          32
+        ]
+      },
+      "passed": true
+    }
+  ],
+  "capabilities": {
+    "acceptInsecureCerts": false,
+    "browserName": "firefox",
+    "browserVersion": "160.0",
+    "platformName": "linux",
+    "setWindowRect": true,
+    "userAgent": "Mozilla/5.0 (X11; Linux x86_64; rv:160.0) Gecko/20100101 Firefox/160.0",
+    "moz:buildID": "20261110030740",
+    "moz:headless": true,
+    "moz:platformVersion": "7.3.4-arch1-2",
+    "moz:shutdownTimeout": 73000
+  },
+  "passed": true
+}
