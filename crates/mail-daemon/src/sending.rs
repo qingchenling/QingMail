@@ -2,7 +2,7 @@
 use crate::storage::{StorageClient, StorageResult, receive};
 use mail_core::{AccountId, DraftHeaders, DraftId, SendState, SendTaskId, ServerSettings};
 use mail_service::{
-    credentials::{CredentialVault, SystemVault},
+    credentials::{CredentialVault, Credentials, SystemVault},
     outgoing, sent,
 };
 use mail_storage::{SendTask, SmtpAttempt, Store, StoredDraft};
@@ -29,14 +29,33 @@ pub(crate) struct ReadySend {
     message: outgoing::PreparedMessage,
     server: mail_core::ServerSettings,
 }
+fn state_text(state: SendState) -> &'static str {
+    match state {
+        SendState::Pending => "待提交",
+        SendState::Sending => "正在发送",
+        SendState::Sent => "已发送",
+        SendState::Failed => "发送失败",
+        SendState::Uncertain => "结果不确定",
+        SendState::CopyPending => "已发送副本待保存",
+    }
+}
 pub(crate) fn review(store: &Store, draft: &StoredDraft) -> StorageResult<SendReview> {
-    if !store
+    let history = store
         .draft_tasks(&draft.account, &draft.id)
-        .map_err(|e| e.to_string())?
-        .is_empty()
+        .map_err(|e| e.to_string())?;
+    // 只有“明确失败”允许修改后重新提交；不确定/已发送/副本待保存必须先处理原任务。
+    if let Some(task) = history.iter().find(|task| task.state != SendState::Failed) {
+        return Err(format!(
+            "此草稿已有发送记录（{}），请先处理原任务；不会重复提交。需要另一封邮件时请新建草稿",
+            state_text(task.state)
+        ));
+    }
+    if history
+        .iter()
+        .any(|task| task.source_revision == draft.revision)
     {
         return Err(
-            "此草稿已有发送记录，请查看任务状态；不会重复提交。需要另一封邮件时请新建草稿".into(),
+            "这个草稿版本已提交并失败；请修改内容后重新检查，或到“发送任务”中重发原任务".into(),
         );
     }
     let snapshot = store
@@ -161,6 +180,32 @@ fn save_copy(
     receive(store.task(account.clone(), task.clone()))
 }
 
+/// 一次提交及其副本：调用前必须已持久化 Sending 许可；不重连、不自动重发。
+fn run_submission(
+    store: &StorageClient,
+    credentials: &Credentials,
+    server: &ServerSettings,
+    attempt: SmtpAttempt,
+    message: outgoing::PreparedMessage,
+    transmit: impl FnOnce(&ServerSettings, &str, outgoing::PreparedMessage) -> outgoing::Delivery,
+    copy: impl FnOnce(&ServerSettings, &str, &str, &[u8], Option<&str>) -> sent::CopyResult,
+) -> StorageResult<SendTask> {
+    let result = transmit(server, credentials.smtp.as_str(), message);
+    let task = receive(store.finish_send(attempt, result.outcome))
+        .map_err(|e| format!("发送结果尚未确认写盘，请勿重复发送：{e}"))?;
+    if task.state != SendState::CopyPending {
+        return Ok(task);
+    }
+    // SMTP 已接受；保存副本失败不推翻发送结论，也不自动重发。
+    save_copy(
+        store,
+        &task.account,
+        &task.id,
+        credentials.imap.as_str(),
+        copy,
+    )
+}
+
 fn dispatch(
     store: StorageClient,
     review: SendReview,
@@ -176,18 +221,13 @@ fn dispatch(
     // 取密钥先于建立任务；密钥库不可用时草稿仍可编辑且无未提交任务。
     let credentials = vault.load(&review.account).map_err(|e| e.to_string())?;
     let ready = receive(store.begin_send(review, allow_empty_subject))?;
-    let result = transmit(&ready.server, &credentials.smtp, ready.message);
-    let task = receive(store.finish_send(ready.attempt, result.outcome))
-        .map_err(|e| format!("发送结果尚未确认写盘，请勿重复发送：{e}"))?;
-    if task.state != SendState::CopyPending {
-        return Ok(task);
-    }
-    // SMTP 已接受；保存副本失败不推翻发送结论，也不自动重发。
-    save_copy(
+    run_submission(
         &store,
-        &task.account,
-        &task.id,
-        credentials.imap.as_str(),
+        &credentials,
+        &ready.server,
+        ready.attempt,
+        ready.message,
+        transmit,
         copy,
     )
 }
@@ -201,6 +241,41 @@ fn retry_copy_once(
 ) -> StorageResult<SendTask> {
     let credentials = vault.load(&account).map_err(|e| e.to_string())?;
     save_copy(&store, &account, &task, credentials.imap.as_str(), copy)
+}
+
+/// 只由用户在任务入口明确确认后调用；旧任务保留，存储层保证同一旧任务只生成一个新任务。
+fn resend_once(
+    store: StorageClient,
+    vault: &impl CredentialVault,
+    account: AccountId,
+    previous: SendTaskId,
+    transmit: impl FnOnce(
+        &mail_core::ServerSettings,
+        &str,
+        outgoing::PreparedMessage,
+    ) -> outgoing::Delivery,
+    copy: impl FnOnce(&ServerSettings, &str, &str, &[u8], Option<&str>) -> sent::CopyResult,
+) -> StorageResult<SendTask> {
+    // 先取密钥：密钥库不可用时连新任务都不创建。
+    let credentials = vault.load(&account).map_err(|e| e.to_string())?;
+    let (next, snapshot, server) = receive(store.resend(account.clone(), previous))?;
+    let message = match outgoing::prepare(&snapshot, true) {
+        Ok(message) => message,
+        Err(e) => {
+            let _ = receive(store.cancel_pending(account.clone(), next));
+            return Err(e.to_string());
+        }
+    };
+    let attempt = receive(store.begin_task(account.clone(), next))?;
+    run_submission(
+        &store,
+        &credentials,
+        &server,
+        attempt,
+        message,
+        transmit,
+        copy,
+    )
 }
 
 #[derive(Clone, Default)]
@@ -230,6 +305,25 @@ impl SendCoordinator {
                 review,
                 allow_empty_subject,
                 &SystemVault,
+                outgoing::deliver,
+                sent::save_copy,
+            )
+        })
+    }
+
+    /// 只允许 Failed/Uncertain 任务；必须由任务入口的显式确认触发，旧记录保留。
+    pub fn resend(
+        &self,
+        store: StorageClient,
+        account: AccountId,
+        task: SendTaskId,
+    ) -> StorageResult<Receiver<StorageResult<SendTask>>> {
+        self.start(move || {
+            resend_once(
+                store,
+                &SystemVault,
+                account,
+                task,
                 outgoing::deliver,
                 sent::save_copy,
             )

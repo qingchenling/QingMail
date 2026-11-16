@@ -17,6 +17,7 @@ pub enum Command {
     Reader,
     Accounts,
     Mailbox,
+    SendTasks,
     Quit,
     Status,
 }
@@ -28,6 +29,7 @@ impl Command {
             Self::Reader => "READER",
             Self::Accounts => "ACCOUNTS",
             Self::Mailbox => "MAILBOX",
+            Self::SendTasks => "SENDTASKS",
             Self::Quit => "QUIT",
             Self::Status => "STATUS",
         }
@@ -39,6 +41,7 @@ impl Command {
             b"QMP0 READER\n" => Ok(Self::Reader),
             b"QMP0 ACCOUNTS\n" => Ok(Self::Accounts),
             b"QMP0 MAILBOX\n" => Ok(Self::Mailbox),
+            b"QMP0 SENDTASKS\n" => Ok(Self::SendTasks),
             b"QMP0 QUIT\n" => Ok(Self::Quit),
             b"QMP0 STATUS\n" => Ok(Self::Status),
             _ => Err(io::Error::other("不支持的 P0 控制命令")),

@@ -136,6 +136,37 @@ enum Request {
         id: mail_core::DraftId,
         reply: SyncSender<StorageResult<Vec<mail_storage::SendTask>>>,
     },
+    Tasks {
+        account: AccountId,
+        reply: SyncSender<StorageResult<Vec<mail_storage::SendTask>>>,
+    },
+    StopUncertain {
+        account: AccountId,
+        task: mail_core::SendTaskId,
+        reply: SyncSender<StorageResult<mail_storage::SendTask>>,
+    },
+    /// 受控重发：确认旧任务、创建一个新任务并返回冻结快照；尚未取得 Sending 许可。
+    Resend {
+        account: AccountId,
+        previous: mail_core::SendTaskId,
+        reply: SyncSender<
+            StorageResult<(
+                mail_core::SendTaskId,
+                mail_storage::OutgoingSnapshot,
+                mail_core::ServerSettings,
+            )>,
+        >,
+    },
+    BeginTask {
+        account: AccountId,
+        task: mail_core::SendTaskId,
+        reply: SyncSender<StorageResult<mail_storage::SmtpAttempt>>,
+    },
+    CancelPending {
+        account: AccountId,
+        task: mail_core::SendTaskId,
+        reply: SyncSender<StorageResult<()>>,
+    },
     Stop,
 }
 
@@ -343,6 +374,64 @@ impl StorageClient {
         id: mail_core::DraftId,
     ) -> StorageResult<Receiver<StorageResult<Vec<mail_storage::SendTask>>>> {
         self.request(|reply| Request::DraftTasks { account, id, reply })
+    }
+    pub fn tasks(
+        &self,
+        account: AccountId,
+    ) -> StorageResult<Receiver<StorageResult<Vec<mail_storage::SendTask>>>> {
+        self.request(|reply| Request::Tasks { account, reply })
+    }
+    pub fn stop_uncertain(
+        &self,
+        account: AccountId,
+        task: mail_core::SendTaskId,
+    ) -> StorageResult<Receiver<StorageResult<mail_storage::SendTask>>> {
+        self.request(|reply| Request::StopUncertain {
+            account,
+            task,
+            reply,
+        })
+    }
+    pub(crate) fn resend(
+        &self,
+        account: AccountId,
+        previous: mail_core::SendTaskId,
+    ) -> StorageResult<
+        Receiver<
+            StorageResult<(
+                mail_core::SendTaskId,
+                mail_storage::OutgoingSnapshot,
+                mail_core::ServerSettings,
+            )>,
+        >,
+    > {
+        self.request(|reply| Request::Resend {
+            account,
+            previous,
+            reply,
+        })
+    }
+    pub(crate) fn begin_task(
+        &self,
+        account: AccountId,
+        task: mail_core::SendTaskId,
+    ) -> StorageResult<Receiver<StorageResult<mail_storage::SmtpAttempt>>> {
+        self.request(|reply| Request::BeginTask {
+            account,
+            task,
+            reply,
+        })
+    }
+    pub(crate) fn cancel_pending(
+        &self,
+        account: AccountId,
+        task: mail_core::SendTaskId,
+    ) -> StorageResult<Receiver<StorageResult<()>>> {
+        self.request(|reply| Request::CancelPending {
+            account,
+            task,
+            reply,
+        })
     }
     pub fn open_account_editor(
         &self,
@@ -698,6 +787,73 @@ fn run(path: Option<PathBuf>, receiver: Receiver<Request>) {
             Request::Task { account, id, reply } => {
                 let _ = reply
                     .send(opened.and_then(|s| s.task(&account, &id).map_err(|e| e.to_string())));
+            }
+            Request::Tasks { account, reply } => {
+                let _ = reply
+                    .send(opened.and_then(|s| s.task_list(&account).map_err(|e| e.to_string())));
+            }
+            Request::StopUncertain {
+                account,
+                task,
+                reply,
+            } => {
+                let _ = reply.send(opened.and_then(|s| {
+                    s.stop_uncertain(&account, &task)
+                        .map_err(|e| e.to_string())?;
+                    s.task(&account, &task).map_err(|e| e.to_string())
+                }));
+            }
+            Request::Resend {
+                account,
+                previous,
+                reply,
+            } => {
+                let _ = reply.send(opened.and_then(|s| {
+                    let next = s
+                        .resend_task(
+                            &account,
+                            &previous,
+                            mail_core::ResendAuthorization::UserConfirmed,
+                        )
+                        .map_err(|e| e.to_string())?;
+                    let result = (|| {
+                        let snapshot = s
+                            .task_snapshot(&account, &next)
+                            .map_err(|e| e.to_string())?;
+                        let smtp = s
+                            .account(&account)
+                            .map_err(|e| e.to_string())?
+                            .ok_or("发件账号不存在")?
+                            .smtp;
+                        Ok((next.clone(), snapshot, smtp))
+                    })();
+                    if result.is_err() {
+                        // 快照不可用时不留一个永远 Pending 的新任务。
+                        let _ = s.cancel_pending(&account, &next);
+                    }
+                    result
+                }));
+            }
+            Request::BeginTask {
+                account,
+                task,
+                reply,
+            } => {
+                let _ =
+                    reply
+                        .send(opened.and_then(|s| {
+                            s.begin_smtp(&account, &task).map_err(|e| e.to_string())
+                        }));
+            }
+            Request::CancelPending {
+                account,
+                task,
+                reply,
+            } => {
+                let _ = reply
+                    .send(opened.and_then(|s| {
+                        s.cancel_pending(&account, &task).map_err(|e| e.to_string())
+                    }));
             }
             Request::DraftTasks { account, id, reply } => {
                 let _ = reply.send(

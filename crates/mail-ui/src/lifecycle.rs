@@ -21,6 +21,7 @@ pub(super) struct Lifecycle {
     main: Option<AnyWindowHandle>,
     reader: Option<AnyWindowHandle>,
     mailbox: Option<AnyWindowHandle>,
+    send_tasks: Option<AnyWindowHandle>,
     accounts: Option<(AnyWindowHandle, WeakEntity<crate::accounts::Accounts>)>,
     editors: Vec<Editor>,
     worker: Background,
@@ -69,6 +70,7 @@ pub(super) fn start(instance: Option<Instance>, cx: &mut App) -> Result<(), Stri
         main: None,
         reader: None,
         mailbox: None,
+        send_tasks: None,
         accounts: None,
         editors: vec![],
         worker,
@@ -196,6 +198,14 @@ pub(super) fn register_mailbox(window: AnyWindowHandle, cx: &mut App) {
     cx.global_mut::<Lifecycle>().mailbox = Some(window);
 }
 
+pub(super) fn reuse_send_tasks(cx: &mut App) -> bool {
+    let window = cx.global::<Lifecycle>().send_tasks;
+    window.is_some_and(|window| activate(window, cx))
+}
+pub(super) fn register_send_tasks(window: AnyWindowHandle, cx: &mut App) {
+    cx.global_mut::<Lifecycle>().send_tasks = Some(window);
+}
+
 pub(super) fn storage(cx: &App) -> mail_daemon::storage::StorageClient {
     cx.global::<Lifecycle>().storage.client()
 }
@@ -249,6 +259,7 @@ fn tick(cx: &mut App) {
                         Command::Reader => reader::open(cx),
                         Command::Accounts => crate::accounts::open(cx),
                         Command::Mailbox => crate::mailbox::open(cx),
+                        Command::SendTasks => crate::send_tasks::open(cx),
                         _ => {
                             let _ = queue;
                         }
