@@ -15,6 +15,7 @@ pub enum Command {
     Open,
     Editor,
     Reader,
+    Accounts,
     Quit,
     Status,
 }
@@ -24,6 +25,7 @@ impl Command {
             Self::Open => "OPEN",
             Self::Editor => "EDITOR",
             Self::Reader => "READER",
+            Self::Accounts => "ACCOUNTS",
             Self::Quit => "QUIT",
             Self::Status => "STATUS",
         }
@@ -33,6 +35,7 @@ impl Command {
             b"QMP0 OPEN\n" => Ok(Self::Open),
             b"QMP0 EDITOR\n" => Ok(Self::Editor),
             b"QMP0 READER\n" => Ok(Self::Reader),
+            b"QMP0 ACCOUNTS\n" => Ok(Self::Accounts),
             b"QMP0 QUIT\n" => Ok(Self::Quit),
             b"QMP0 STATUS\n" => Ok(Self::Status),
             _ => Err(io::Error::other("不支持的 P0 控制命令")),

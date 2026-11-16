@@ -172,8 +172,16 @@ impl Store {
     }
 
     pub fn create_account(&mut self, settings: &AccountSettings) -> Result<AccountId> {
-        validate_settings(settings)?;
         let id = AccountId(new_id()?);
+        self.insert_account(&id, settings)?;
+        Ok(id)
+    }
+
+    pub fn insert_account(&mut self, id: &AccountId, settings: &AccountSettings) -> Result<()> {
+        validate_settings(settings)?;
+        if id.0.len() != 32 || !id.0.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(Error::Invalid("无效账号 ID"));
+        }
         self.connection.execute(
             "INSERT INTO accounts(id,display_name,address,imap_host,imap_port,imap_username,imap_security,smtp_host,smtp_port,smtp_username,smtp_security) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
             params![
@@ -190,7 +198,7 @@ impl Store {
                 security_name(settings.smtp.security),
             ],
         )?;
-        Ok(id)
+        Ok(())
     }
 
     pub fn account(&self, id: &AccountId) -> Result<Option<AccountSettings>> {
