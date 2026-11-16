@@ -1,4 +1,4 @@
-//! 通用账号、同步、单次提交与已发送副本适配；网络发送尚未接入UI。
+//! 通用账号、只读同步、发送校验/提交与已发送副本适配；UI 通过 mail-daemon 协调器调用。
 pub mod accounts;
 pub mod credentials;
 pub mod sent;

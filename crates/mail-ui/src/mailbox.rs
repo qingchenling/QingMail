@@ -1,4 +1,4 @@
-//! 原生只读索引窗口。邮件正文、远端标记与发送操作尚未接入。
+//! 原生只读索引窗口：目录/头部同步、按需正文下载与阅读；远端标记与发送操作尚未接入。
 use gpui_kit::{
     App, Bounds, Context, FocusHandle, KeyDownEvent, Render, ScrollStrategy, TitlebarOptions,
     UniformListScrollHandle, Window, WindowBounds, WindowOptions, div, prelude::*, px, size,
