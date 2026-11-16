@@ -5,3 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+mail-core = { workspace = true }
+rusqlite = { workspace = true }
+rustix = { workspace = true }
+getrandom = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
