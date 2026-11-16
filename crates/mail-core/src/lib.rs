@@ -150,3 +150,27 @@ mod tests {
         assert_eq!(a, b);
     }
 }
+
+/// 供存储与协议层共享的持久发送快照数据；不含凭据。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachmentInfo {
+    pub id: AttachmentId,
+    pub name: String,
+    pub media_type: String,
+    pub size: u32,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutgoingAttachment {
+    pub info: AttachmentInfo,
+    pub bytes: Vec<u8>,
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutgoingSnapshot {
+    pub message_id: String,
+    pub date_unix: i64,
+    pub sender: String,
+    pub headers: DraftHeaders,
+    pub plain: String,
+    pub html: String,
+    pub attachments: Vec<OutgoingAttachment>,
+}

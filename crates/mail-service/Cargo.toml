@@ -21,3 +21,6 @@ futures-lite = "=2.6.1"
 
 [dev-dependencies]
 openssl = "=0.10.82"
+mail-storage = { workspace = true }
+mail-content = { workspace = true }
+tempfile = { workspace = true }
