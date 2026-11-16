@@ -143,7 +143,7 @@ impl Reader {
             content,
             text,
             plain: false,
-            font_size: 16.0,
+            font_size: crate::settings::prefs(cx).reader_font,
             busy: false,
             status: if external {
                 "已打开缓存邮件 · 简化阅读 · 远程图片默认阻止".into()
@@ -429,6 +429,9 @@ impl Render for Reader {
                     .child("字号 −")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.font_size = (this.font_size - 2.0).max(12.0);
+                        let mut preferences = crate::settings::prefs(cx);
+                        preferences.reader_font = this.font_size;
+                        crate::settings::set(cx, preferences);
                         cx.notify();
                     })),
             )
@@ -437,6 +440,9 @@ impl Render for Reader {
                     .child("字号 ＋")
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.font_size = (this.font_size + 2.0).min(28.0);
+                        let mut preferences = crate::settings::prefs(cx);
+                        preferences.reader_font = this.font_size;
+                        crate::settings::set(cx, preferences);
                         cx.notify();
                     })),
             )

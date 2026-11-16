@@ -22,6 +22,7 @@ pub(super) struct Lifecycle {
     reader: Option<AnyWindowHandle>,
     mailbox: Option<AnyWindowHandle>,
     send_tasks: Option<AnyWindowHandle>,
+    settings: Option<AnyWindowHandle>,
     accounts: Option<(AnyWindowHandle, WeakEntity<crate::accounts::Accounts>)>,
     editors: Vec<Editor>,
     worker: Background,
@@ -73,6 +74,7 @@ pub(super) fn start(instance: Option<Instance>, cx: &mut App) -> Result<(), Stri
         reader: None,
         mailbox: None,
         send_tasks: None,
+        settings: None,
         accounts: None,
         editors: vec![],
         worker,
@@ -192,6 +194,13 @@ pub(super) fn register_mailbox(window: AnyWindowHandle, cx: &mut App) {
     cx.global_mut::<Lifecycle>().mailbox = Some(window);
 }
 
+pub(super) fn reuse_settings(cx: &mut App) -> bool {
+    let window = cx.global::<Lifecycle>().settings;
+    window.is_some_and(|window| activate(window, cx))
+}
+pub(super) fn register_settings(window: AnyWindowHandle, cx: &mut App) {
+    cx.global_mut::<Lifecycle>().settings = Some(window);
+}
 pub(super) fn reuse_send_tasks(cx: &mut App) -> bool {
     let window = cx.global::<Lifecycle>().send_tasks;
     window.is_some_and(|window| activate(window, cx))
