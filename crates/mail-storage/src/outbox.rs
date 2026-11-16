@@ -52,6 +52,9 @@ impl SmtpAttempt {
     pub fn snapshot(&self) -> &OutgoingSnapshot {
         &self.snapshot
     }
+    pub fn account(&self) -> &AccountId {
+        &self.account
+    }
     pub fn task(&self) -> &SendTaskId {
         &self.task
     }
@@ -248,6 +251,39 @@ impl Store {
             return Err(Error::Conflict);
         }
         Ok(())
+    }
+
+    /// 发送预览不创建任务；校验当前持久草稿、附件副本和账号。
+    pub fn draft_send_snapshot(
+        &self,
+        account: &AccountId,
+        id: &DraftId,
+        revision: u32,
+    ) -> Result<OutgoingSnapshot> {
+        let draft = self.draft(account, id)?;
+        if draft.revision != revision {
+            return Err(Error::Conflict);
+        }
+        let sender = self
+            .account(account)?
+            .ok_or(Error::Invalid("请先关联发件账号"))?
+            .address;
+        Ok(OutgoingSnapshot {
+            message_id: format!("<{}@qingmail.invalid>", id.0),
+            date_unix: unix_now()?,
+            sender,
+            headers: draft.document.headers,
+            plain: draft.document.body.plain_export(),
+            html: draft.document.body.html(),
+            attachments: self.read_attachments(account, &draft.document.attachments)?,
+        })
+    }
+    pub fn draft_tasks(&self, account: &AccountId, id: &DraftId) -> Result<Vec<SendTask>> {
+        let mut query=self.connection.prepare("SELECT id FROM send_tasks WHERE account_id=?1 AND source_draft=?2 ORDER BY created_at DESC,rowid DESC LIMIT 50")?;
+        let ids = query
+            .query_map(params![account.0, id.0], |r| Ok(SendTaskId(r.get(0)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        ids.iter().map(|id| self.task(account, id)).collect()
     }
 
     /// 仅由用户明确发送动作调用。双击同一草稿版本返回同一个任务，不重复提交。

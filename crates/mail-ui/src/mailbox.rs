@@ -165,6 +165,33 @@ impl Mailbox {
             })
             .detach();
         }
+        if std::env::args().any(|a| a == "--send-review-probe") {
+            cx.spawn_in(window, async move |entity, cx| {
+                for _ in 0..50 {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(200))
+                        .await;
+                    let ready = entity
+                        .update_in(cx, |this, _, cx| {
+                            if this.busy {
+                                return false;
+                            }
+                            let (id, settings) =
+                                this.account.clone().expect("probe synthetic account");
+                            cx.defer(move |cx| {
+                                crate::composer::open_account(id, settings.address, cx)
+                            });
+                            true
+                        })
+                        .unwrap();
+                    if ready {
+                        return;
+                    }
+                }
+                panic!("send review probe mailbox timeout");
+            })
+            .detach();
+        }
         this
     }
     fn reload(&mut self, cx: &mut Context<Self>) {

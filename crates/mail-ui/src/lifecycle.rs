@@ -25,6 +25,7 @@ pub(super) struct Lifecycle {
     editors: Vec<Editor>,
     worker: Background,
     storage: mail_daemon::storage::StorageWorker,
+    sending: mail_daemon::sending::SendCoordinator,
     _control: Option<ControlServer>,
     tray: Option<Tray>,
     queue: SyncSender<Command>,
@@ -72,6 +73,7 @@ pub(super) fn start(instance: Option<Instance>, cx: &mut App) -> Result<(), Stri
         editors: vec![],
         worker,
         storage,
+        sending: Default::default(),
         _control: control,
         tray: None,
         queue: queue.clone(),
@@ -198,6 +200,9 @@ pub(super) fn storage(cx: &App) -> mail_daemon::storage::StorageClient {
     cx.global::<Lifecycle>().storage.client()
 }
 
+pub(super) fn sending(cx: &App) -> mail_daemon::sending::SendCoordinator {
+    cx.global::<Lifecycle>().sending.clone()
+}
 pub(super) fn quit(cx: &mut App) {
     let queue = &cx.global::<Lifecycle>().queue;
     if let Err(e) = queue.try_send(Command::Quit) {
@@ -212,7 +217,11 @@ pub(super) fn note(cx: &App) -> String {
     format!(
         "{} · 合成后台 {} 次 · PID {} · {}",
         if state.quitting {
-            "正在保存并退出"
+            if state.sending.active() {
+                "正在等待发送结果写盘后退出"
+            } else {
+                "正在保存并退出"
+            }
         } else {
             "关窗后后台继续运行，再次启动可重开"
         },
@@ -290,7 +299,11 @@ fn tick(cx: &mut App) {
                     .upgrade()
                     .is_some_and(|entity| entity.read(cx).saving)
             });
-            if state.quitting && state.editors.is_empty() && !account_saving {
+            if state.quitting
+                && state.editors.is_empty()
+                && !account_saving
+                && !state.sending.active()
+            {
                 cx.quit();
             }
         }
