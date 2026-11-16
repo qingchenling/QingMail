@@ -222,8 +222,11 @@ impl InputHighlighter for RichStyles {
 }
 
 pub(super) fn open(cx: &mut App) {
+    if crate::lifecycle::reuse_editor(cx) {
+        return;
+    }
     let bounds = Bounds::centered(None, size(px(1180.), px(820.)), cx);
-    if let Err(e) = gpui_kit::open_window(
+    let result = gpui_kit::open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(TitlebarOptions {
@@ -234,12 +237,16 @@ pub(super) fn open(cx: &mut App) {
         },
         cx,
         |window, cx| cx.new(|cx| Composer::new(window, cx)),
-    ) {
-        eprintln!("无法打开编辑验证窗口：{e}");
+    );
+    match result {
+        Ok((window, entity)) => crate::lifecycle::register_editor(window, entity.downgrade(), cx),
+        Err(e) => eprintln!("无法打开编辑验证窗口：{e}"),
     }
 }
 
-struct Composer {
+pub(super) struct Composer {
+    closing: bool,
+    close_error: Option<String>,
     font_family: SharedString,
     input: Entity<EditorState>,
     link: Entity<InputState>,
@@ -310,6 +317,8 @@ impl Composer {
             },
         );
         let mut this = Self {
+            closing: false,
+            close_error: None,
             font_family,
             input,
             link,
@@ -327,6 +336,13 @@ impl Composer {
         this.input
             .update(cx, |input, cx| input.set_readonly(true, cx));
         this.load_store(window, cx);
+        let entity = cx.weak_entity();
+        window.on_window_should_close(cx, move |window, cx| {
+            let _ = entity.update(cx, |this, cx| {
+                let _ = this.prepare_close(window, cx);
+            });
+            false
+        });
         cx.spawn_in(window, async move |entity, cx| {
             loop {
                 cx.background_executor()
@@ -346,7 +362,9 @@ impl Composer {
 
     fn load_store(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let task = cx.background_executor().spawn(async {
-            let mut parent = std::env::current_dir()?.join("target");
+            let mut parent = std::env::var_os("QINGMAIL_P0_DRAFT_ROOT")
+                .map(std::path::PathBuf::from)
+                .unwrap_or(std::env::current_dir()?.join("target"));
             if probe::enabled() {
                 parent = parent.join("p0-editor-probe");
                 std::fs::create_dir_all(&parent)?;
@@ -400,14 +418,110 @@ impl Composer {
         });
         self.refresh_preview(cx);
     }
+    pub(super) fn lifecycle_probe(
+        &mut self,
+        step: u8,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.loading {
+            return false;
+        }
+        match step {
+            0 => {
+                if std::env::args().any(|arg| arg == "--lifecycle-failure-probe") {
+                    let root = std::env::var_os("QINGMAIL_P0_DRAFT_ROOT").unwrap();
+                    if !std::path::Path::new(&root).join("trigger").exists() {
+                        return false;
+                    }
+                }
+                let length = self.input.read(cx).value().encode_utf16().count();
+                self.input.update(cx, |input, cx| {
+                    input.replace_text_in_range(
+                        Some(0..length),
+                        "生命周期验证🙂\n关闭前最新草稿",
+                        window,
+                        cx,
+                    )
+                });
+            }
+            1 => {
+                let utf16 = self.input.read(cx).value().encode_utf16().count();
+                self.input.update(cx, |input, cx| {
+                    input.replace_and_mark_text_in_range(
+                        Some(utf16..utf16),
+                        "ni",
+                        Some(2..2),
+                        window,
+                        cx,
+                    )
+                });
+                assert!(
+                    self.prepare_close(window, cx).is_err(),
+                    "active preedit must veto close"
+                );
+                assert!(!self.closing);
+                self.input.update(cx, |input, cx| {
+                    input.replace_text_in_range(None, "", window, cx)
+                });
+                eprintln!("P0_PROBE: marked preedit vetoed close; cancel restored document");
+                let length = self.session.borrow().draft.text().len();
+                self.input
+                    .update(cx, |input, cx| input.set_selected_range(0..length, cx));
+                self.format("bold", window, cx);
+            }
+            2 => {
+                let _ = self.prepare_close(window, cx);
+            }
+            _ => return false,
+        }
+        true
+    }
+    pub(super) fn prepare_close(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        if let Some(error) = self.close_error.take() {
+            return Err(error);
+        }
+        if self.loading {
+            self.status = "正在恢复草稿，请稍后关闭".into();
+            return Ok(());
+        }
+        if self.composing(window, cx) {
+            self.status = "请先完成或取消中文候选词，再关闭窗口".into();
+            cx.notify();
+            return Err(self.status.clone());
+        }
+        if self.store.is_none() && self.saved != Some(self.session.borrow().revision) {
+            self.status = "关闭已取消：草稿存储不可用，请复制保留内容并排除问题".into();
+            cx.notify();
+            return Err(self.status.clone());
+        }
+        self.closing = true;
+        self.input
+            .update(cx, |input, cx| input.set_readonly(true, cx));
+        self.save(cx);
+        cx.notify();
+        Ok(())
+    }
     fn tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.loading {
             return;
+        }
+        if !self.closing {
+            self.input
+                .update(cx, |input, cx| input.set_readonly(false, cx));
         }
         if probe::enabled() {
             self.probe(window, cx);
         }
         if self.composing(window, cx) {
+            return;
+        }
+        if self.closing && !self.saving && self.saved == Some(self.session.borrow().revision) {
+            window.remove_window();
             return;
         }
         self.session.borrow_mut().finish_composition();
@@ -442,12 +556,17 @@ impl Composer {
                 match result {
                     Ok(()) => {
                         this.saved = Some(revision);
+                        this.close_error = None;
                         this.status = format!(
                             "已保存版本 {revision}（后台 {:.1} ms）",
                             elapsed.as_secs_f64() * 1000.
                         );
                     }
-                    Err(e) => this.status = format!("保存失败，保留上次确认版本：{e}"),
+                    Err(e) => {
+                        this.closing = false;
+                        this.status = format!("保存失败，关闭已取消，保留上次确认版本：{e}");
+                        this.close_error = Some(this.status.clone());
+                    }
                 }
                 cx.notify();
             });
@@ -456,7 +575,7 @@ impl Composer {
     }
 
     fn format(&mut self, command: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if self.loading || self.composing(window, cx) {
+        if self.loading || self.closing || self.composing(window, cx) {
             self.status = "请先完成中文候选词输入".into();
             cx.notify();
             return;
@@ -518,7 +637,7 @@ impl Composer {
         cx.notify();
     }
     fn history(&mut self, redo: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.loading || self.composing(window, cx) {
+        if self.loading || self.closing || self.composing(window, cx) {
             return;
         }
         let current = self.input.read(cx).selected_range();
