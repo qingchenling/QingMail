@@ -15,15 +15,13 @@ use gpui_kit::{
     px, size,
 };
 use gpui_kit_material::{prelude::*, theme};
-use mail_content::{
-    DraftStore,
-    draft::{Attributes, Block, Draft},
-};
+use mail_content::draft::{Attributes, Block, Draft};
+use mail_daemon::storage::{StorageClient, receive};
+use mail_storage::StoredDraft;
 use std::{
     cell::RefCell,
     ops::Range,
     rc::Rc,
-    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -252,9 +250,12 @@ pub(super) struct Composer {
     link: Entity<InputState>,
     preview: Entity<TextViewState>,
     session: Rc<RefCell<Session>>,
-    store: Option<Arc<DraftStore>>,
+    store: Option<StorageClient>,
+    stored: Option<StoredDraft>,
+    drafts: Vec<StoredDraft>,
     saved: Option<u64>,
     saving: bool,
+    auto_save_blocked: bool,
     loading: bool,
     last_edit: Instant,
     status: String,
@@ -325,8 +326,11 @@ impl Composer {
             preview,
             session,
             store: None,
+            stored: None,
+            drafts: vec![],
             saved: None,
             saving: false,
+            auto_save_blocked: false,
             loading: true,
             last_edit: Instant::now(),
             status: "正在检查本地验证草稿…".into(),
@@ -361,36 +365,27 @@ impl Composer {
     }
 
     fn load_store(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let task = cx.background_executor().spawn(async {
-            let mut parent = std::env::var_os("QINGMAIL_P0_DRAFT_ROOT")
-                .map(std::path::PathBuf::from)
-                .unwrap_or(std::env::current_dir()?.join("target"));
-            if probe::enabled() {
-                parent = parent.join("p0-editor-probe");
-                std::fs::create_dir_all(&parent)?;
-            }
-            let store = Arc::new(DraftStore::open(&parent)?);
-            let draft = store.load()?;
-            Ok::<_, std::io::Error>((store, draft))
-        });
+        let store = crate::lifecycle::storage(cx);
+        let request = store.open_editor(self.session.borrow().draft.clone());
+        let task = cx
+            .background_executor()
+            .spawn(async move { receive(request).map(|draft| (store, draft)) });
         cx.spawn_in(window, async move |entity, cx| {
             let result = task.await;
             let _ = entity.update_in(cx, |this, window, cx| {
                 this.loading = false;
                 window.activate_window();
-                this.input
-                    .update(cx, |input, cx| input.set_readonly(false, cx));
                 match result {
                     Ok((store, draft)) => {
+                        this.input
+                            .update(cx, |input, cx| input.set_readonly(false, cx));
                         this.store = Some(store);
-                        if let Some(draft) = draft {
-                            *this.session.borrow_mut() = Session::new(draft);
-                            this.saved = Some(0);
-                            this.sync_input(window, cx);
-                            this.status = "已恢复上次确认保存的草稿".into();
-                        } else {
-                            this.status = "合成草稿 · 停止输入后自动保存".into();
-                        }
+                        *this.session.borrow_mut() = Session::new(draft.document.body.clone());
+                        this.stored = Some(draft);
+                        this.saved = Some(0);
+                        this.sync_input(window, cx);
+                        this.status = "已恢复本地草稿 · 不关联真实邮箱".into();
+                        this.refresh_drafts(cx);
                     }
                     Err(e) => this.status = format!("自动保存不可用，原文件未改动：{e}"),
                 }
@@ -398,6 +393,115 @@ impl Composer {
             });
         })
         .detach();
+    }
+
+    fn refresh_drafts(&mut self, cx: &mut Context<Self>) {
+        let request = crate::lifecycle::storage(cx).list();
+        let task = cx
+            .background_executor()
+            .spawn(async move { receive(request) });
+        cx.spawn(async move |entity, cx| {
+            let result = task.await;
+            let _ = entity.update(cx, |this, cx| {
+                match result {
+                    Ok(drafts) => this.drafts = drafts,
+                    Err(e) => this.status = e,
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn switch_draft(&mut self, index: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.loading || self.saving || self.closing || self.composing(window, cx) {
+            return;
+        }
+        if self.saved != Some(self.session.borrow().revision) {
+            self.status = "请先保存当前修改，再切换草稿".into();
+            self.save(cx);
+            return;
+        }
+        let client = crate::lifecycle::storage(cx);
+        let request = if let Some(index) = index {
+            client.select(self.drafts[index].id.clone())
+        } else {
+            client.new_draft(Draft::plain("").expect("empty draft"))
+        };
+        self.loading = true;
+        self.input
+            .update(cx, |input, cx| input.set_readonly(true, cx));
+        let task = cx
+            .background_executor()
+            .spawn(async move { receive(request) });
+        cx.spawn_in(window, async move |entity, cx| {
+            let result = task.await;
+            let _ = entity.update_in(cx, |this, window, cx| {
+                this.loading = false;
+                match result {
+                    Ok(draft) => {
+                        *this.session.borrow_mut() = Session::new(draft.document.body.clone());
+                        this.stored = Some(draft);
+                        this.saved = Some(0);
+                        this.close_error = None;
+                        this.sync_input(window, cx);
+                        this.status = "已打开本地草稿".into();
+                        this.refresh_drafts(cx);
+                    }
+                    Err(e) => this.status = format!("切换失败，当前内容保留：{e}"),
+                }
+                this.input
+                    .update(cx, |input, cx| input.set_readonly(false, cx));
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn draft_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut row = div()
+            .flex()
+            .flex_wrap()
+            .gap_2()
+            .child(
+                MaterialButton::new("new-local-draft")
+                    .child("新建本地草稿")
+                    .disabled(self.loading || self.saving || self.closing)
+                    .on_click(cx.listener(|this, _, w, cx| this.switch_draft(None, w, cx))),
+            )
+            .child(
+                MaterialButton::new("retry-local-save")
+                    .child("重试 / 立即保存")
+                    .disabled(self.loading || self.saving)
+                    .on_click(cx.listener(|this, _, w, cx| {
+                        if this.store.is_none() {
+                            this.loading = true;
+                            this.load_store(w, cx);
+                        } else {
+                            this.save(cx);
+                        }
+                    })),
+            );
+        for (index, draft) in self.drafts.iter().enumerate() {
+            let label = format!(
+                "{}草稿 {}",
+                if self.stored.as_ref().is_some_and(|d| d.id == draft.id) {
+                    "● "
+                } else {
+                    ""
+                },
+                &draft.id.0[..8]
+            );
+            row = row.child(
+                MaterialButton::new(("local-draft", index))
+                    .child(label)
+                    .disabled(self.loading || self.saving || self.closing)
+                    .on_click(
+                        cx.listener(move |this, _, w, cx| this.switch_draft(Some(index), w, cx)),
+                    ),
+            );
+        }
+        row
     }
 
     fn composing(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
@@ -494,6 +598,11 @@ impl Composer {
             cx.notify();
             return Err(self.status.clone());
         }
+        if self.store.is_none() && self.session.borrow().revision == 0 {
+            // 初始加载失败时输入保持只读；未产生用户改动，可以关闭。
+            window.remove_window();
+            return Ok(());
+        }
         if self.store.is_none() && self.saved != Some(self.session.borrow().revision) {
             self.status = "关闭已取消：草稿存储不可用，请复制保留内容并排除问题".into();
             cx.notify();
@@ -510,7 +619,7 @@ impl Composer {
         if self.loading {
             return;
         }
-        if !self.closing {
+        if !self.closing && self.store.is_some() {
             self.input
                 .update(cx, |input, cx| input.set_readonly(false, cx));
         }
@@ -525,7 +634,10 @@ impl Composer {
             return;
         }
         self.session.borrow_mut().finish_composition();
-        if !self.saving && self.last_edit.elapsed() >= Duration::from_millis(750) {
+        if !self.saving
+            && !self.auto_save_blocked
+            && self.last_edit.elapsed() >= Duration::from_millis(750)
+        {
             self.save(cx);
         }
     }
@@ -539,14 +651,20 @@ impl Composer {
         }
         let revision = session.revision;
         let draft = session.draft.clone();
+        let Some(previous) = self.stored.clone() else {
+            return;
+        };
         drop(session);
         self.saving = true;
+        self.auto_save_blocked = false;
+        self.close_error = None;
+        let request = store.save(previous, draft);
         let task = cx.background_executor().spawn(async move {
             let started = Instant::now();
             if probe::enabled() {
                 std::thread::sleep(Duration::from_millis(900));
             }
-            let result = store.save(&draft);
+            let result = receive(request);
             (result, started.elapsed())
         });
         cx.spawn(async move |entity, cx| {
@@ -554,7 +672,8 @@ impl Composer {
             let _ = entity.update(cx, |this, cx| {
                 this.saving = false;
                 match result {
-                    Ok(()) => {
+                    Ok(stored) => {
+                        this.stored = Some(stored);
                         this.saved = Some(revision);
                         this.close_error = None;
                         this.status = format!(
@@ -563,6 +682,7 @@ impl Composer {
                         );
                     }
                     Err(e) => {
+                        this.auto_save_blocked = true;
                         this.closing = false;
                         this.status = format!("保存失败，关闭已取消，保留上次确认版本：{e}");
                         this.close_error = Some(this.status.clone());
@@ -575,7 +695,7 @@ impl Composer {
     }
 
     fn format(&mut self, command: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if self.loading || self.closing || self.composing(window, cx) {
+        if self.loading || self.closing || self.store.is_none() || self.composing(window, cx) {
             self.status = "请先完成中文候选词输入".into();
             cx.notify();
             return;
@@ -637,7 +757,7 @@ impl Composer {
         cx.notify();
     }
     fn history(&mut self, redo: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.loading || self.closing || self.composing(window, cx) {
+        if self.loading || self.closing || self.store.is_none() || self.composing(window, cx) {
             return;
         }
         let current = self.input.read(cx).selected_range();
@@ -740,6 +860,7 @@ impl Render for Composer {
             .child(div().text_size(px(22.)).child("QingMail · 原生富文本编辑验证"))
             .child(div().text_size(px(13.)).child("选中后设置格式；Ctrl+B / I、Ctrl+Z / Shift+Z、Ctrl+S。仅使用合成内容。"))
             .child(toolbar)
+            .child(self.draft_toolbar(cx))
             .child(TextField::new("link-url", &self.link))
             .child(div().flex().gap_4().flex_1().min_h_0()
                 .child(div().flex().flex_col().gap_2().flex_1().min_w_0()
@@ -755,7 +876,7 @@ impl Render for Composer {
                     .child(div().id("draft-preview").flex_1().min_h_0().overflow_y_scroll().p_3()
                         .child(TextView::new(&self.preview).font_family(self.font_family.clone()).on_link_click(|_, _, _, _| {})))))
             .child(div().text_size(px(13.)).child(format!("{state} · {}", self.status)))
-            .child(div().text_size(px(12.)).child("P0 草稿保存在当前工作区 target/p0-editor；关闭重开可恢复最后确认保存的版本。粘贴只接收纯文本。"))
+            .child(div().text_size(px(12.)).child("本地草稿保存在 XDG 数据目录；未配置邮箱，不会发送。关闭重开恢复最后确认版本。粘贴仅纯文本。"))
     }
 }
 

@@ -3933,6 +3933,7 @@ dependencies = [
  "gpui-kit-material",
  "mail-content",
  "mail-daemon",
+ "mail-storage",
  "ropey",
  "url",
 ]

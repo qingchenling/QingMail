@@ -13,6 +13,7 @@ gpui-kit = { workspace = true }
 gpui-kit-material = { workspace = true }
 gpui-fps = { workspace = true }
 mail-content = { workspace = true }
+mail-storage = { workspace = true }
 url = { workspace = true }
 ropey = { workspace = true }
 mail-daemon = { path = "../mail-daemon" }

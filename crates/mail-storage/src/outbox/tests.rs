@@ -1,6 +1,7 @@
 use super::*;
 use crate::{
-    APPLICATION_ID, PrivateDir, SCHEMA, SCHEMA_V2, SCHEMA_VERSION, migrate, tests::settings,
+    APPLICATION_ID, PrivateDir, SCHEMA, SCHEMA_V2, SCHEMA_V3, SCHEMA_VERSION, migrate,
+    tests::settings,
 };
 use std::{
     fs,
@@ -328,7 +329,8 @@ fn v1_upgrade_backs_up_and_preserves_accounts_and_failed_upgrade_rolls_back() {
             &directory,
             true,
             SCHEMA,
-            "CREATE TABLE temporary_upgrade(id TEXT); INVALID SQL;"
+            "CREATE TABLE temporary_upgrade(id TEXT); INVALID SQL;",
+            SCHEMA_V3
         )
         .is_err()
     );
@@ -548,4 +550,51 @@ fn process_exit_during_smtp_recovers_uncertain_and_rejects_submit() {
         SendState::Uncertain
     );
     assert!(store.begin_smtp(&account, &ids[0]).is_err());
+}
+
+#[test]
+fn local_workspace_is_not_remote_account_and_cannot_enqueue() {
+    let (root, mut store, remote) = setup();
+    let local = store.local_draft_account().unwrap();
+    assert_eq!(store.local_draft_account().unwrap(), local);
+    assert!(store.account(&local).unwrap().is_none());
+    assert_eq!(store.accounts().unwrap().len(), 1);
+    let draft = store.create_draft(&local, &document("本地草稿")).unwrap();
+    store.select_local_draft(&local, &draft.id).unwrap();
+    assert!(store.select_local_draft(&remote, &draft.id).is_err());
+    assert!(store.enqueue_draft(&local, &draft.id, 1).is_err());
+    assert!(store.task_ids(&local).unwrap().is_empty());
+    drop(store);
+    let store = Store::open(&root.path().join("qingmail")).unwrap();
+    assert_eq!(
+        store.selected_local_draft(&local).unwrap(),
+        Some(draft.id.clone())
+    );
+    assert_eq!(store.draft(&local, &draft.id).unwrap(), draft);
+}
+
+#[test]
+fn v2_upgrade_keeps_existing_drafts_and_remote_account_identity() {
+    let (root, mut store, account) = setup();
+    let draft = store
+        .create_draft(&account, &document("v2 草稿🙂"))
+        .unwrap();
+    let path = root.path().join("qingmail");
+    drop(store);
+    // 从当前库移除仅 v3 的结构，恢复真实 v2 布局；正文和 v2 行保持原样。
+    let conn = Connection::open(path.join("state.sqlite3")).unwrap();
+    conn.execute_batch("DROP TABLE local_editor; DROP INDEX one_local_workspace; ALTER TABLE accounts DROP COLUMN kind; PRAGMA user_version=2;").unwrap();
+    drop(conn);
+    let mut store = Store::open(&path).unwrap();
+    assert_eq!(store.draft(&account, &draft.id).unwrap(), draft);
+    assert_eq!(store.accounts().unwrap().len(), 1);
+    let local = store.local_draft_account().unwrap();
+    assert_ne!(local, account);
+    assert_eq!(store.accounts().unwrap().len(), 1);
+    assert!(fs::read_dir(&path).unwrap().any(|e| {
+        e.unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("migration-v2-")
+    }));
 }

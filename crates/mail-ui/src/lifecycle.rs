@@ -22,6 +22,7 @@ pub(super) struct Lifecycle {
     reader: Option<AnyWindowHandle>,
     editors: Vec<Editor>,
     worker: Background,
+    storage: mail_daemon::storage::StorageWorker,
     _control: Option<ControlServer>,
     tray: Option<Tray>,
     queue: SyncSender<Command>,
@@ -41,6 +42,19 @@ pub(super) fn start(instance: Option<Instance>, cx: &mut App) -> Result<(), Stri
         .map(|instance| ControlServer::start(instance, queue.clone(), status.clone()))
         .transpose()
         .map_err(|e| e.to_string())?;
+    let storage_path = std::env::var_os("QINGMAIL_P0_DRAFT_ROOT").map(|p| {
+        std::path::PathBuf::from(p).join(
+            if std::env::args()
+                .any(|a| matches!(a.as_str(), "--editor-probe" | "--editor-style-demo"))
+            {
+                "p2-editor-probe"
+            } else {
+                "p2-data"
+            },
+        )
+    });
+    let storage =
+        mail_daemon::storage::StorageWorker::start(storage_path).map_err(|e| e.to_string())?;
     let worker = Background::start().map_err(|e| e.to_string())?;
     let tray_enabled = !std::env::args().any(|arg| {
         matches!(
@@ -53,6 +67,7 @@ pub(super) fn start(instance: Option<Instance>, cx: &mut App) -> Result<(), Stri
         reader: None,
         editors: vec![],
         worker,
+        storage,
         _control: control,
         tray: None,
         queue: queue.clone(),
@@ -149,6 +164,10 @@ pub(super) fn reuse_reader(cx: &mut App) -> bool {
 }
 pub(super) fn register_reader(window: AnyWindowHandle, cx: &mut App) {
     cx.global_mut::<Lifecycle>().reader = Some(window);
+}
+
+pub(super) fn storage(cx: &App) -> mail_daemon::storage::StorageClient {
+    cx.global::<Lifecycle>().storage.client()
 }
 
 pub(super) fn quit(cx: &mut App) {

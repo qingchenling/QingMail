@@ -1,5 +1,6 @@
 //! P0–P2 进程内后台入口。激活通道仅为 P0 私有控制，不冻结 P3 IPC。
 mod instance;
+pub mod storage;
 mod tray;
 
 pub use instance::{Command, Instance, Launch, control};

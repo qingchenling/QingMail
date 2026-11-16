@@ -1,0 +1,12 @@
+{
+  "passed": true,
+  "schema": 3,
+  "revision": 3,
+  "local_only": true,
+  "sends": 0,
+  "checks": [
+    "native IME/emoji/format/history probe",
+    "input remains usable before delayed save acknowledgement",
+    "SQLite-backed body equals latest native editor document"
+  ]
+}
