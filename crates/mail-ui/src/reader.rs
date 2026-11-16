@@ -111,7 +111,7 @@ pub(super) fn open_content(
     }
 }
 
-struct Reader {
+pub(super) struct Reader {
     external: bool,
     account: Option<(AccountId, String)>,
     selected: usize,
@@ -129,7 +129,7 @@ impl Reader {
         let content = mail_content::parse(SAMPLES[0].1).expect("bounded synthetic sample");
         Self::from_content(content, false, None, cx)
     }
-    fn from_content(
+    pub(super) fn from_content(
         content: MailContent,
         external: bool,
         account: Option<(AccountId, String)>,

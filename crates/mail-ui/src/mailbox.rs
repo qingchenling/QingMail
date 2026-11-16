@@ -1,7 +1,7 @@
 //! 原生只读索引窗口：目录/头部同步、按需正文下载与阅读；远端标记与发送操作尚未接入。
 use gpui_kit::{
-    App, Bounds, Context, Entity, FocusHandle, KeyDownEvent, Render, ScrollStrategy,
-    TitlebarOptions, UniformListScrollHandle, Window, WindowBounds, WindowOptions,
+    App, Bounds, Context, Entity, FocusHandle, KeyDownEvent, MouseButton, MouseDownEvent, Render,
+    ScrollStrategy, TitlebarOptions, UniformListScrollHandle, Window, WindowBounds, WindowOptions,
     base::input::InputState, div, prelude::*, px, size, uniform_list,
 };
 use gpui_kit_material::{prelude::*, theme};
@@ -96,6 +96,11 @@ pub(super) fn open(cx: &mut App) {
         Err(_) => eprintln!("无法打开邮件窗口"),
     }
 }
+struct InlineReading {
+    location: mail_core::MailUid,
+    content: mail_content::MailContent,
+    view: Entity<crate::reader::Reader>,
+}
 struct Mailbox {
     store: StorageClient,
     account: Option<(AccountId, AccountSettings)>,
@@ -122,6 +127,9 @@ struct Mailbox {
     narrow_detail: bool,
     positions: BTreeMap<String, (Option<u32>, Option<u32>)>,
     restore_uid: Option<u32>,
+    inline: Option<InlineReading>,
+    list_width: f32,
+    resize_start: Option<(f32, f32)>,
     before: Option<u32>,
     busy: bool,
     status: String,
@@ -156,6 +164,9 @@ impl Mailbox {
             narrow_detail: false,
             positions: BTreeMap::new(),
             restore_uid: None,
+            inline: None,
+            list_width: 420.0,
+            resize_start: None,
             before: None,
             busy: false,
             status: "正在读取本地账号与缓存…".into(),
@@ -554,6 +565,7 @@ impl Mailbox {
             return;
         };
         self.search_selected = Some(index);
+        self.narrow_detail = true;
         self.read_location(hit.message.location, hit.folder, cx);
     }
     fn read_location(
@@ -571,6 +583,7 @@ impl Mailbox {
         self.busy = true;
         self.status = "正在读取缓存；未缓存时将只读下载完整邮件（含内含附件，最多8MiB）…".into();
         let reader_account = Some((account.clone(), settings.address.clone()));
+        let inline_location = location.clone();
         let store = self.store.clone();
         let task = cx.background_executor().spawn(async move {
             let raw = match receive(store.message_body(location.clone()))? {
@@ -605,10 +618,20 @@ impl Mailbox {
                 this.busy = false;
                 match result {
                     Ok((content, _, reader_account)) => {
-                        this.status = "邮件已缓存并交给简化阅读，远端已读状态未改变".into();
-                        cx.defer(move |cx| {
-                            crate::reader::open_content(content, reader_account, cx)
+                        let view = cx.new(|cx| {
+                            crate::reader::Reader::from_content(
+                                content.clone(),
+                                true,
+                                reader_account,
+                                cx,
+                            )
                         });
+                        this.inline = Some(InlineReading {
+                            location: inline_location,
+                            content,
+                            view,
+                        });
+                        this.status = "邮件已在主窗口内打开；可在上方切换纯文本/字号".into();
                     }
                     Err(e) => {
                         this.status = format!("无法打开邮件：{e}。索引与原缓存已保留，可重试")
@@ -1535,6 +1558,22 @@ impl Render for Mailbox {
             );
         }
         let wide = window.bounds().size.width >= px(1050.);
+        let selected_location = if let Some(hit) = self
+            .search_selected
+            .zip(self.search_results.as_ref())
+            .and_then(|(index, results)| results.get(index))
+        {
+            Some(&hit.message.location)
+        } else {
+            self.selected
+                .and_then(|index| self.messages().get(index))
+                .map(|message| &message.location)
+        };
+        let inline = selected_location.and_then(|location| {
+            self.inline
+                .as_ref()
+                .filter(|inline| &inline.location == location)
+        });
         let mut detail = div()
             .p_4()
             .flex()
@@ -1552,7 +1591,33 @@ impl Render for Mailbox {
                     })),
             );
         }
-        if let Some((index, hit)) = self
+        if let Some(inline) = inline {
+            let content = inline.content.clone();
+            let reader_account = self
+                .account
+                .as_ref()
+                .map(|(account, settings)| (account.clone(), settings.address.clone()));
+            detail = detail
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(div().text_size(px(12.)).child("邮件阅读"))
+                        .child(
+                            MaterialButton::new("open-in-reader")
+                                .variant(ButtonVariant::Text)
+                                .child("在独立窗口打开")
+                                .on_click(cx.listener(move |_, _, _, cx| {
+                                    let content = content.clone();
+                                    let reader_account = reader_account.clone();
+                                    cx.defer(move |cx| {
+                                        crate::reader::open_content(content, reader_account, cx)
+                                    });
+                                })),
+                        ),
+                )
+                .child(inline.view.clone());
+        } else if let Some((index, hit)) = self
             .search_selected
             .zip(self.search_results.as_ref())
             .and_then(|(index, results)| results.get(index).map(|hit| (index, hit)))
@@ -1597,8 +1662,25 @@ impl Render for Mailbox {
                 .flex()
                 .flex_1()
                 .min_h_0()
-                .child(list)
-                .child(detail.w(px(360.)).flex_shrink_0())
+                .child(list.w(px(self.list_width)).flex_none())
+                .child(
+                    div()
+                        .id("mail-pane-divider")
+                        .w(px(6.))
+                        .h_full()
+                        .flex_none()
+                        .cursor_col_resize()
+                        .bg(theme::color(ColorRole::OUTLINE_VARIANT))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                                this.resize_start =
+                                    Some((event.position.x.as_f32(), this.list_width));
+                                cx.notify();
+                            }),
+                        ),
+                )
+                .child(detail.flex_1().min_w_0())
         } else if self.narrow_detail {
             div().flex().flex_col().flex_1().min_h_0().child(detail)
         } else {
