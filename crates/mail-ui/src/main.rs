@@ -330,6 +330,10 @@ fn open_home(cx: &mut App) -> Result<gpui_kit::AnyWindowHandle, String> {
 fn main() {
     use mail_daemon::{Command, Instance, Launch};
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if args.iter().any(|arg| arg == "--version") {
+        println!("QingMail {} (P2 test build)", env!("CARGO_PKG_VERSION"));
+        return;
+    }
     let command = if args.iter().any(|arg| arg == "--quit") {
         Command::Quit
     } else if args.iter().any(|arg| arg == "--status") {
