@@ -1,6 +1,9 @@
 //! 不可信 MIME → 受控原生阅读树 / 单文件浏览器阅读副本。
 //! 原始字节保留，输出均为可重建的派生结果。
 mod copies;
+pub mod draft;
+mod draft_store;
+pub use draft_store::DraftStore;
 mod css;
 mod document;
 mod remote;

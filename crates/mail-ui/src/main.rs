@@ -11,6 +11,7 @@ use gpui_kit_material::icons::Assets;
 use gpui_kit_material::prelude::*;
 use gpui_kit_material::theme;
 
+mod composer;
 mod perf_probe;
 mod reader;
 
@@ -201,6 +202,12 @@ impl Render for Home {
                             .child("阅读验证")
                             .on_click(|_, _, cx| reader::open(cx)),
                     )
+                    .child(
+                        MaterialButton::new("composer-demo")
+                            .variant(ButtonVariant::Tonal)
+                            .child("编辑验证")
+                            .on_click(|_, _, cx| composer::open(cx)),
+                    )
                     .child(menu_popup)
                     .child(theme_button),
             );
@@ -298,6 +305,14 @@ fn main() {
             cx.activate(true);
             if std::env::args().any(|argument| argument == "--content-demo") {
                 reader::open(cx);
+            }
+            if std::env::args().any(|argument| {
+                matches!(
+                    argument.as_str(),
+                    "--editor-demo" | "--editor-probe" | "--editor-style-demo"
+                )
+            }) {
+                composer::open(cx);
             }
         });
 }

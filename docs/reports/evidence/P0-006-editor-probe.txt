@@ -1,0 +1,3 @@
+PASS native layout; UTF-8 selection; UTF-16 emoji replacement; marked preedit/commit; composition undo/redo; keyboard format undo/redo; inline bold/italic/link; controlled list export; background save/load equality; input accepted during 900ms simulated slow save; old save acknowledgement does not mark new edits saved
+FONT CHECK (native window): sans-serif regular/bold/italic resolved to the same FontId; explicit Noto Sans resolved to three distinct FontIds (regular/bold/italic).
+Operator retest: English/digits bold+italic, Chinese bold, preview and undo/redo normal. Chinese italic remains a recorded gap.
