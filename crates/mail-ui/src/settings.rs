@@ -36,6 +36,9 @@ impl Preferences {
         let Ok(text) = fs::read_to_string(path) else {
             return Self::default();
         };
+        Self::parse(&text)
+    }
+    fn parse(text: &str) -> Self {
         let mut preferences = Self::default();
         for line in text.lines() {
             let Some((key, value)) = line.split_once('=') else {
@@ -267,5 +270,24 @@ impl Render for Settings {
                 .child("减少动态用于关闭主题过渡；产品窗口本身没有持续动画。"),
         );
         column
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preferences_parse_defaults_clamp_and_ignore_garbage() {
+        let preferences = Preferences::parse(
+            "theme=dark\nreader_font=99\ncompact=1\nreduce_motion=1\nunknown=x\n",
+        );
+        assert!(preferences.dark);
+        assert_eq!(preferences.reader_font, 28.0);
+        assert!(preferences.compact);
+        assert!(preferences.reduce_motion);
+        let defaults = Preferences::parse("theme=light\nreader_font=abc\n");
+        assert!(!defaults.dark);
+        assert_eq!(defaults.reader_font, 16.0);
     }
 }
