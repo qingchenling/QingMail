@@ -13,6 +13,16 @@ mod private_dir;
 
 pub use paths::AppPaths;
 
+/// 本地移除账号前的影响统计；不含远端邮件。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AccountImpact {
+    pub cached_messages: u64,
+    pub drafts: u64,
+    pub tasks: u64,
+    pub pending_tasks: u64,
+    pub object_bytes: u64,
+}
+
 use mail_core::{
     AccountId, AccountSettings, CachedMessage, ConnectionSecurity, Folder, FolderId, MailUid,
     MessageEnvelope, MessageId, ServerSettings,
@@ -222,6 +232,91 @@ impl Store {
                 smtp: ServerSettings { host:r.get(6)?, port:r.get(7)?, username:r.get(8)?, security:read_security(r.get(9)?)? },
             }),
         ).optional()?)
+    }
+
+    /// 修改同一账号的连接配置；账号 ID 与本地数据保持不变。
+    pub fn update_account(&mut self, id: &AccountId, settings: &AccountSettings) -> Result<()> {
+        validate_settings(settings)?;
+        let changed = self.connection.execute(
+            "UPDATE accounts SET display_name=?1,address=?2,imap_host=?3,imap_port=?4,imap_username=?5,imap_security=?6,smtp_host=?7,smtp_port=?8,smtp_username=?9,smtp_security=?10 WHERE id=?11 AND kind='remote'",
+            params![
+                settings.display_name,
+                settings.address,
+                settings.imap.host,
+                settings.imap.port,
+                settings.imap.username,
+                security_name(settings.imap.security),
+                settings.smtp.host,
+                settings.smtp.port,
+                settings.smtp.username,
+                security_name(settings.smtp.security),
+                id.0,
+            ],
+        )?;
+        if changed != 1 {
+            return Err(Error::Invalid("账号不存在或不是远端账号"));
+        }
+        Ok(())
+    }
+
+    /// 统计本地移除会影响的数据；远端邮件不在统计内。
+    pub fn account_impact(&self, id: &AccountId) -> Result<AccountImpact> {
+        let count = |sql: &str| -> Result<i64> {
+            Ok(self.connection.query_row(sql, [&id.0], |row| row.get(0))?)
+        };
+        Ok(AccountImpact {
+            cached_messages: count("SELECT COUNT(*) FROM folder_messages WHERE account_id=?1")?
+                as u64,
+            drafts: count("SELECT COUNT(*) FROM drafts WHERE account_id=?1")? as u64,
+            tasks: count("SELECT COUNT(*) FROM send_tasks WHERE account_id=?1")? as u64,
+            pending_tasks: count(
+                "SELECT COUNT(*) FROM send_tasks WHERE account_id=?1 AND state IN ('pending','sending','copy_pending')",
+            )? as u64,
+            object_bytes: count("SELECT COALESCE(SUM(size),0) FROM objects WHERE account_id=?1")?
+                as u64,
+        })
+    }
+
+    /// 只移除本地账号、缓存、草稿与任务；不连接远端、不删除远端邮件。
+    /// 对象文件在事务提交后删除，提交失败不会先丢文件。
+    pub fn remove_account(&mut self, id: &AccountId) -> Result<AccountImpact> {
+        if self.account(id)?.is_none() {
+            return Err(Error::Invalid("账号不存在或不是远端账号"));
+        }
+        let impact = self.account_impact(id)?;
+        let objects = {
+            let mut query = self
+                .connection
+                .prepare("SELECT id FROM objects WHERE account_id=?1")?;
+            query
+                .query_map([&id.0], |row| row.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        let tx = self.connection.transaction()?;
+        for sql in [
+            "DELETE FROM task_attachments WHERE account_id=?1",
+            "DELETE FROM send_tasks WHERE account_id=?1",
+            "DELETE FROM draft_attachments WHERE account_id=?1",
+            "DELETE FROM local_editor WHERE account_id=?1",
+            "DELETE FROM drafts WHERE account_id=?1",
+            "DELETE FROM message_bodies WHERE account_id=?1",
+            "DELETE FROM folder_messages WHERE account_id=?1",
+            "DELETE FROM folder_sync WHERE folder_id IN (SELECT id FROM folders WHERE account_id=?1)",
+            "DELETE FROM folders WHERE account_id=?1",
+            "DELETE FROM messages WHERE account_id=?1",
+            "DELETE FROM attachments WHERE account_id=?1",
+            "DELETE FROM objects WHERE account_id=?1",
+            "DELETE FROM remote_folders WHERE account_id=?1",
+            "DELETE FROM catalog_sync WHERE account_id=?1",
+            "DELETE FROM accounts WHERE id=?1",
+        ] {
+            tx.execute(sql, [&id.0])?;
+        }
+        tx.commit()?;
+        for object in objects {
+            self.objects.remove(&object);
+        }
+        Ok(impact)
     }
 
     /// 启动时枚举持久化账号，不依赖调用者记住上次进程中的 ID。

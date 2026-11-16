@@ -45,6 +45,8 @@ pub(super) struct Accounts {
     folders: Vec<RemoteFolder>,
     saved: Vec<(AccountId, AccountSettings)>,
     expanded: Option<AccountId>,
+    editing: Option<AccountId>,
+    impact: Option<(AccountId, mail_storage::AccountImpact)>,
 }
 pub(super) fn open(cx: &mut App) {
     if crate::lifecycle::reuse_accounts(cx) {
@@ -98,6 +100,8 @@ impl Accounts {
             folders: vec![],
             saved: vec![],
             expanded: None,
+            editing: None,
+            impact: None,
         };
         this._subscriptions = this
             .inputs
@@ -253,7 +257,16 @@ impl Accounts {
             let result = task.await;
             let _ = entity.update(cx, |this, cx| {
                 match result {
-                    Ok(saved) => this.saved = saved,
+                    Ok(saved) => {
+                        this.saved = saved;
+                        if this.saved.is_empty() {
+                            this.editing = None;
+                            this.impact = None;
+                            this.expanded = None;
+                        } else if this.expanded.is_none() && this.saved.len() == 1 {
+                            this.expanded = Some(this.saved[0].0.clone());
+                        }
+                    }
                     Err(_) => this.status = "账号列表读取失败，请重试".into(),
                 };
                 cx.notify();
@@ -284,11 +297,6 @@ impl Accounts {
         cx.notify();
     }
     fn check(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.saved.is_empty() {
-            self.status = "本阶段支持一个邮箱，账号编辑与多账号接入将在后续提供".into();
-            cx.notify();
-            return;
-        }
         if self.busy {
             return;
         }
@@ -361,21 +369,141 @@ impl Accounts {
         let checked = self.checked.take().expect("checked");
         self.busy = true;
         self.saving = true;
+        let editing = self.editing.clone();
         self.status = "正在保存到系统密钥库与本地账号目录…".into();
-        let request =
-            crate::lifecycle::storage(cx).add_account(checked.settings, checked.credentials);
+        let storage = crate::lifecycle::storage(cx);
+        if let Some(account) = editing {
+            let reply = storage.update_account(account, checked.settings, checked.credentials);
+            let task = cx
+                .background_executor()
+                .spawn(async move { receive(reply) });
+            cx.spawn(async move |entity, cx| {
+                let result = task.await;
+                let _ = entity.update(cx, |this, cx| this.finish_save(result, true, cx));
+            })
+            .detach();
+        } else {
+            let reply = storage.add_account(checked.settings, checked.credentials);
+            let task = cx
+                .background_executor()
+                .spawn(async move { receive(reply).map(|_| ()) });
+            cx.spawn(async move |entity, cx| {
+                let result = task.await;
+                let _ = entity.update(cx, |this, cx| this.finish_save(result, false, cx));
+            })
+            .detach();
+        }
+        cx.notify();
+    }
+    fn finish_save(&mut self, result: Result<(), String>, updated: bool, cx: &mut Context<Self>) {
+        self.busy = false;
+        self.saving = false;
+        self.status = match (result, updated) {
+            (Ok(()), true) => "账号配置与凭据已更新；本地缓存未改动".into(),
+            (Ok(()), false) => "账号已保存，尚未同步邮件。可在左侧展开账号查看状态".into(),
+            (Err(e), _) => format!("保存未确认：{e}。重试前请刷新账号列表"),
+        };
+        self.refresh(cx);
+        cx.notify();
+    }
+    fn begin_edit(
+        &mut self,
+        account: AccountId,
+        settings: &AccountSettings,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.editing = Some(account.clone());
+        self.impact = None;
+        self.checked = None;
+        let values = [
+            settings.display_name.clone(),
+            settings.address.clone(),
+            settings.imap.host.clone(),
+            settings.imap.port.to_string(),
+            settings.imap.username.clone(),
+            String::new(),
+            settings.smtp.host.clone(),
+            settings.smtp.port.to_string(),
+            settings.smtp.username.clone(),
+            String::new(),
+        ];
+        for (input, value) in self.inputs.iter().zip(values) {
+            input.update(cx, |input, cx| input.set_value(value, window, cx));
+        }
+        self.security = [settings.imap.security, settings.smtp.security];
+        self.folders.clear();
+        self.imap = "待重新检查".into();
+        self.smtp = "待重新检查".into();
+        self.status = "编辑账号：请输入密码并重新检查连接后才可更新".into();
+        cx.notify();
+    }
+    fn request_remove(&mut self, account: AccountId, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        if crate::lifecycle::sending(cx).active() {
+            self.status = "发送任务仍在处理；请等待结果写盘后再移除账号".into();
+            cx.notify();
+            return;
+        }
+        self.busy = true;
+        self.status = "正在统计本地移除影响…".into();
+        let reply = crate::lifecycle::storage(cx).account_impact(account.clone());
         let task = cx
             .background_executor()
-            .spawn(async move { receive(request) });
+            .spawn(async move { receive(reply) });
+        cx.spawn(async move |entity, cx| {
+            let result = task.await;
+            let _ = entity.update(cx, |this, cx| {
+                this.busy = false;
+                match result {
+                    Ok(impact) => {
+                        this.impact = Some((account, impact));
+                        this.status = "确认下方影响后再移除；远端邮件不会被删除".into();
+                    }
+                    Err(e) => this.status = format!("无法读取移除影响：{e}"),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+    fn confirm_remove(&mut self, cx: &mut Context<Self>) {
+        let Some((account, _)) = self.impact.take() else {
+            return;
+        };
+        if crate::lifecycle::sending(cx).active() {
+            self.impact = None;
+            self.status = "发送任务仍在处理；请等待结果写盘后再移除账号".into();
+            cx.notify();
+            return;
+        }
+        self.busy = true;
+        self.saving = true;
+        self.status = "正在移除本地账号、缓存、草稿与发送任务…".into();
+        let reply = crate::lifecycle::storage(cx).remove_account(account);
+        let task = cx
+            .background_executor()
+            .spawn(async move { receive(reply) });
         cx.spawn(async move |entity, cx| {
             let result = task.await;
             let _ = entity.update(cx, |this, cx| {
                 this.busy = false;
                 this.saving = false;
-                this.status = match result {
-                    Ok(_) => "账号已保存，尚未同步邮件。可在左侧展开账号查看状态".into(),
-                    Err(e) => format!("保存未确认：{e}。重试前请刷新账号列表"),
-                };
+                match result {
+                    Ok(impact) => {
+                        this.editing = None;
+                        this.checked = None;
+                        this.folders.clear();
+                        this.status = format!(
+                            "已从本地移除账号：缓存 {} 封、草稿 {} 份、发送任务 {} 条；远端邮件未删除",
+                            impact.cached_messages, impact.drafts, impact.tasks
+                        );
+                    }
+                    Err(e) => this.status = format!("移除未完全确认：{e}。请刷新账号列表核对"),
+                }
                 this.refresh(cx);
                 cx.notify();
             });
@@ -384,6 +512,7 @@ impl Accounts {
         cx.notify();
     }
 }
+
 impl Render for Accounts {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mut tree = div()
@@ -397,7 +526,8 @@ impl Render for Accounts {
             .child("邮箱账号");
         for (index, (id, settings)) in self.saved.iter().enumerate() {
             let expanded = self.expanded.as_ref() == Some(id);
-            let id = id.clone();
+            let row_id = id.clone();
+            let expand_id = row_id.clone();
             tree = tree.child(
                 MaterialButton::new(("account", index))
                     .child(format!(
@@ -406,15 +536,18 @@ impl Render for Accounts {
                         settings.display_name
                     ))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.expanded = if this.expanded.as_ref() == Some(&id) {
+                        this.expanded = if this.expanded.as_ref() == Some(&expand_id) {
                             None
                         } else {
-                            Some(id.clone())
+                            Some(expand_id.clone())
                         };
                         cx.notify();
                     })),
             );
             if expanded {
+                let edit_id = row_id.clone();
+                let remove_id = row_id.clone();
+                let edit_settings = settings.clone();
                 tree = tree
                     .child(div().text_sm().child(settings.address.clone()))
                     .child(div().text_sm().child("文件夹与缓存状态请在邮件窗口查看"))
@@ -422,6 +555,33 @@ impl Render for Accounts {
                         MaterialButton::new(("open-mailbox", index))
                             .child("打开邮件")
                             .on_click(|_, _, cx| crate::mailbox::open(cx)),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(
+                                MaterialButton::new(("edit-account", index))
+                                    .variant(ButtonVariant::Tonal)
+                                    .child("编辑配置")
+                                    .disabled(self.busy)
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.begin_edit(
+                                            edit_id.clone(),
+                                            &edit_settings,
+                                            window,
+                                            cx,
+                                        );
+                                    })),
+                            )
+                            .child(
+                                MaterialButton::new(("remove-account", index))
+                                    .child("移除账号")
+                                    .disabled(self.busy)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.request_remove(remove_id.clone(), cx);
+                                    })),
+                            ),
                     );
             }
         }
@@ -443,7 +603,11 @@ impl Render for Accounts {
             .flex()
             .flex_col()
             .gap_3()
-            .child(div().text_size(px(24.)).child("添加通用邮箱"))
+            .child(div().text_size(px(24.)).child(if self.editing.is_some() {
+                "编辑邮箱账号"
+            } else {
+                "添加通用邮箱"
+            }))
             .child("使用服务商的密码或应用专用密码。暂不支持 OAuth 登录。")
             .child("检查仅验证连接与认证，不发送邮件。密码保存在系统密钥库。");
         for (i, label) in LABELS.iter().enumerate() {
@@ -516,13 +680,67 @@ impl Render for Accounts {
                     .child(
                         MaterialButton::new("save-account")
                             .disabled(!self.can_save(cx))
-                            .child("保存账号")
+                            .child(if self.editing.is_some() {
+                                "更新账号"
+                            } else {
+                                "保存账号"
+                            })
                             .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
                     ),
             )
             .child(format!("IMAP：{}", self.imap))
             .child(format!("SMTP：{}", self.smtp))
             .child(format!("系统密钥库：{}", self.vault))
+            .when(self.impact.is_some(), |form| {
+                let (_, impact) = self.impact.as_ref().expect("impact");
+                form.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .p_2()
+                        .child(format!(
+                            "本地移除影响：缓存 {} 封 · 草稿 {} 份 · 发送任务 {} 条（待处理 {}）· 本地对象 {} 字节",
+                            impact.cached_messages,
+                            impact.drafts,
+                            impact.tasks,
+                            impact.pending_tasks,
+                            impact.object_bytes
+                        ))
+                        .child("只删除本地账号与上述数据；不删除远端邮件。密钥库条目会一并尝试删除。")
+                        .when(impact.pending_tasks > 0, |panel| {
+                            panel.child(
+                                div()
+                                    .text_color(theme::color(ColorRole::ERROR))
+                                    .child(format!(
+                                        "有 {} 条待处理发送任务；移除会删除其记录，请先确认已无在途发送",
+                                        impact.pending_tasks
+                                    )),
+                            )
+                        })
+                        .child(
+                            div()
+                                .flex()
+                                .gap_2()
+                                .child(
+                                    MaterialButton::new("confirm-remove-account")
+                                        .child("确认移除")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.confirm_remove(cx);
+                                        })),
+                                )
+                                .child(
+                                    MaterialButton::new("cancel-remove-account")
+                                        .child("取消")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.impact = None;
+                                            this.status = "已取消移除".into();
+                                            cx.notify();
+                                        })),
+                                ),
+                        ),
+                )
+            })
             .child(self.status.clone());
         if !self.folders.is_empty() {
             form = form.child("本次检查发现的文件夹（只读列表，尚未同步）");
