@@ -16,6 +16,8 @@ mod lifecycle;
 mod mailbox;
 mod perf_probe;
 mod reader;
+mod send_labels;
+mod send_tasks;
 
 /// 设 QINGMAIL_FPS=1 显示性能 HUD（帧率/帧耗时/GPU/CPU/内存）。
 fn show_fps() -> bool {
@@ -340,6 +342,8 @@ fn main() {
         .any(|arg| matches!(arg.as_str(), "--accounts" | "--accounts-probe"))
     {
         Command::Accounts
+    } else if args.iter().any(|arg| arg == "--send-tasks") {
+        Command::SendTasks
     } else if args.iter().any(|arg| arg == "--content-demo") {
         Command::Reader
     } else {
@@ -419,6 +423,9 @@ fn main() {
             lifecycle::open_main(cx);
             if command == Command::Mailbox {
                 mailbox::open(cx);
+            }
+            if command == Command::SendTasks {
+                send_tasks::open(cx);
             }
             if args
                 .iter()

@@ -1,44 +1,8 @@
 //! 明确发送确认；预览不联网、不排队，发送结果持续展示。
 use super::*;
+use crate::send_labels::state_label;
 use mail_core::SendState;
-fn copy_detail_label(detail: &str) -> &'static str {
-    match detail {
-        "copy_no_sent_folder" => "未找到服务器“已发送”文件夹；请添加或重命名后重试副本",
-        "copy_auth_failed" => "IMAP 认证失败；请检查凭据后重试副本",
-        "copy_tls_failed" => "IMAP 加密连接失败",
-        "copy_connection_failed" => "暂时无法连接 IMAP 服务器",
-        "copy_timeout" => "IMAP 连接或响应超时",
-        "copy_protocol_failed" => "服务器响应不符合预期",
-        "copy_search_failed" => "无法确认是否已有同一副本，已停止追加以免重复",
-        "copy_append_rejected" => "服务器拒绝保存已发送副本",
-        "copy_limit" => "邮件或响应超过副本保存上限",
-        "copy_result_unknown" => "副本是否已保存未知；重试前会先查重",
-        "copy_prepare_failed" => "无法重建冻结的发送内容，副本未保存",
-        "copy_invalid" => "副本保存参数无效",
-        _ => "已发送副本尚未保存",
-    }
-}
-fn state_label(task: &mail_storage::SendTask) -> String {
-    let base = match task.state {
-        SendState::Pending => "待提交；不会自动发送",
-        SendState::Sending => "正在交给邮件服务器；请勿重复发送",
-        SendState::Sent => {
-            if task.detail == "copy_already_present" {
-                "发送成功；服务器上已有同一副本，未重复保存"
-            } else {
-                "发送成功，已保存副本"
-            }
-        }
-        SendState::Failed => "发送未完成；不会自动重试",
-        SendState::Uncertain => "结果不确定：收件人可能已收到，请勿重复发送",
-        SendState::CopyPending => "邮件服务器已接受；已发送副本尚未保存，请勿重发",
-    };
-    if task.state == SendState::CopyPending {
-        format!("{base}。{}", copy_detail_label(&task.detail))
-    } else {
-        base.into()
-    }
-}
+
 impl Composer {
     pub(super) fn send_locked(&self) -> bool {
         self.checking_send || self.sending || self.send_review.is_some()
@@ -232,16 +196,27 @@ impl Composer {
                         || self.importing
                         || self.send_locked()
                         || self.account_scope.is_none()
-                        || !self.send_tasks.is_empty(),
+                        || self
+                            .send_tasks
+                            .iter()
+                            .any(|task| task.state != SendState::Failed),
                 )
                 .on_click(cx.listener(|this, _, window, cx| this.check_send(window, cx))),
         );
-        actions = actions.child(
-            MaterialButton::new("refresh-send-tasks")
-                .child("刷新发送记录")
-                .disabled(self.loading)
-                .on_click(cx.listener(|this, _, _, cx| this.refresh_send_tasks(cx))),
-        );
+        actions = actions
+            .child(
+                MaterialButton::new("refresh-send-tasks")
+                    .child("刷新发送记录")
+                    .disabled(self.loading)
+                    .on_click(cx.listener(|this, _, _, cx| this.refresh_send_tasks(cx))),
+            )
+            .child(
+                MaterialButton::new("open-send-tasks")
+                    .child("发送任务…")
+                    .on_click(cx.listener(|_, _, _, cx| {
+                        cx.defer(crate::send_tasks::open);
+                    })),
+            );
         area = area.child(actions);
         if let Some((review, _)) = &self.send_review {
             let empty = review.headers.subject.trim().is_empty();
@@ -290,6 +265,16 @@ impl Composer {
                                 })),
                         ),
                 );
+        }
+        if !self.send_tasks.is_empty()
+            && self
+                .send_tasks
+                .iter()
+                .all(|task| task.state == SendState::Failed)
+        {
+            area = area.child(div().text_size(px(12.)).child(
+                "上次提交明确失败：修改内容后可重新检查发送；内容不变时请到“发送任务”重发。",
+            ));
         }
         let mut records = div()
             .id("send-records")

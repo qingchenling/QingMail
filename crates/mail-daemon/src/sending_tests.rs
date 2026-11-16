@@ -417,3 +417,143 @@ fn retry_copy_rejects_tasks_that_already_have_a_saved_copy() {
     );
     worker.stop();
 }
+
+#[test]
+fn failed_history_allows_editing_but_blocks_same_version_and_uncertain() {
+    let (_root, mut store, draft) = setup();
+    let preview = review(&store, &draft).unwrap();
+    let ready = begin(&mut store, preview, false).unwrap();
+    store
+        .finish_smtp(ready.attempt, SmtpOutcome::DefinitelyRejected)
+        .unwrap();
+    // 未修改的同一版本仍被拒绝，失败任务只能通过任务入口重发。
+    assert!(review(&store, &draft).is_err());
+    let mut changed = draft.document.clone();
+    changed.body = Draft::plain("修改后的正文").unwrap();
+    let changed = store
+        .save_draft(&draft.account, &draft.id, draft.revision, &changed)
+        .unwrap();
+    let preview = review(&store, &changed).unwrap();
+    let ready = begin(&mut store, preview, false).unwrap();
+    store
+        .finish_smtp(ready.attempt, SmtpOutcome::Uncertain)
+        .unwrap();
+    // 结果不确定后，即使再改版本也不能绕过原任务。
+    let mut again = changed.document.clone();
+    again.body = Draft::plain("再改一次").unwrap();
+    let again = store
+        .save_draft(&changed.account, &changed.id, changed.revision, &again)
+        .unwrap();
+    assert!(review(&store, &again).is_err());
+    assert_eq!(store.task_list(&draft.account).unwrap().len(), 2);
+}
+
+#[test]
+fn resend_keeps_the_old_task_and_submits_once_with_a_new_identity() {
+    let (root, store, draft) = setup();
+    drop(store);
+    let mut worker = StorageWorker::start(Some(root.path().join("data"))).unwrap();
+    let client = worker.client();
+    let preview = receive(client.review_send(draft.clone())).unwrap();
+    let first = dispatch(
+        client.clone(),
+        preview,
+        false,
+        &Vault(true),
+        |_, _, _| outgoing::Delivery {
+            outcome: SmtpOutcome::DefinitelyRejected,
+            detail: outgoing::DeliveryDetail::DataRejected,
+        },
+        |_, _, _, _, _| panic!("a rejected submission has no copy"),
+    )
+    .unwrap();
+    assert_eq!(first.state, SendState::Failed);
+    let mut smtp_calls = 0;
+    let resent = resend_once(
+        client.clone(),
+        &Vault(true),
+        draft.account.clone(),
+        first.id.clone(),
+        |server, password, message| {
+            smtp_calls += 1;
+            assert_eq!(server.host, "example.invalid");
+            assert_eq!(password, "synthetic");
+            assert!(String::from_utf8_lossy(message.raw()).contains("Subject:"));
+            outgoing::Delivery {
+                outcome: SmtpOutcome::Accepted,
+                detail: outgoing::DeliveryDetail::Accepted,
+            }
+        },
+        |_, _, message_id, raw, preferred| {
+            assert!(message_id.starts_with('<'));
+            assert!(!raw.is_empty());
+            assert!(preferred.is_none());
+            sent::CopyResult::Saved(sent::CopiedMessage {
+                folder: "Sent".into(),
+                uidvalidity: 42,
+                uid: Some(7),
+                existed: false,
+            })
+        },
+    )
+    .unwrap();
+    assert_eq!(smtp_calls, 1);
+    assert_eq!(resent.state, SendState::Sent);
+    assert_eq!(resent.resend_of, Some(first.id.clone()));
+    assert_ne!(resent.id, first.id);
+    // 旧记录保留；同一旧任务再次重发不会获得第二个提交。
+    let tasks = receive(client.tasks(draft.account.clone())).unwrap();
+    assert_eq!(tasks.len(), 2);
+    assert_eq!(
+        tasks.iter().find(|t| t.id == first.id).unwrap().state,
+        SendState::Failed
+    );
+    assert!(
+        resend_once(
+            client.clone(),
+            &Vault(true),
+            draft.account.clone(),
+            first.id.clone(),
+            |_, _, _| panic!("must not submit twice"),
+            |_, _, _, _, _| panic!("must not copy twice"),
+        )
+        .is_err()
+    );
+    assert_eq!(smtp_calls, 1);
+    worker.stop();
+}
+
+#[test]
+fn resend_without_credentials_creates_no_new_task() {
+    let (root, store, draft) = setup();
+    drop(store);
+    let mut worker = StorageWorker::start(Some(root.path().join("data"))).unwrap();
+    let client = worker.client();
+    let preview = receive(client.review_send(draft.clone())).unwrap();
+    let first = dispatch(
+        client.clone(),
+        preview,
+        false,
+        &Vault(true),
+        |_, _, _| outgoing::Delivery {
+            outcome: SmtpOutcome::Uncertain,
+            detail: outgoing::DeliveryDetail::ResultUnknown,
+        },
+        |_, _, _, _, _| panic!("no copy after uncertain submission"),
+    )
+    .unwrap();
+    assert_eq!(first.state, SendState::Uncertain);
+    assert!(
+        resend_once(
+            client.clone(),
+            &Vault(false),
+            draft.account.clone(),
+            first.id.clone(),
+            |_, _, _| panic!("no SMTP without credentials"),
+            |_, _, _, _, _| panic!("no copy without credentials"),
+        )
+        .is_err()
+    );
+    assert_eq!(receive(client.tasks(draft.account)).unwrap().len(), 1);
+    worker.stop();
+}

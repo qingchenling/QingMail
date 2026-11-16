@@ -36,6 +36,10 @@ pub struct SendTask {
     pub account: AccountId,
     pub source_draft: DraftId,
     pub source_revision: u32,
+    pub sender: String,
+    /// 冻结的收件人与主题；主题在 `recipients.subject`，不另存一份。
+    pub recipients: DraftHeaders,
+    pub created_at: i64,
     pub state: SendState,
     /// 固定诊断代码，不接受包含密码或服务器原始响应的错误字符串。
     pub detail: String,
@@ -359,8 +363,12 @@ impl Store {
             Option<String>,
             Option<u32>,
             Option<u32>,
+            String,
+            String,
+            String,
+            i64,
         );
-        let (draft,revision,state,detail,parent,folder,epoch,uid): TaskRow = self.connection.query_row("SELECT source_draft,source_revision,state,detail,resend_of,copy_folder,copy_uidvalidity,copy_uid FROM send_tasks WHERE id=?1 AND account_id=?2",params![id.0,account.0],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?)))?;
+        let (draft,revision,state,detail,parent,folder,epoch,uid,sender,subject,recipients,created_at): TaskRow = self.connection.query_row("SELECT source_draft,source_revision,state,detail,resend_of,copy_folder,copy_uidvalidity,copy_uid,sender,subject,recipients,created_at FROM send_tasks WHERE id=?1 AND account_id=?2",params![id.0,account.0],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?,r.get(8)?,r.get(9)?,r.get(10)?,r.get(11)?)))?;
         let copy = match (folder, epoch) {
             (Some(folder), Some(uidvalidity)) if uidvalidity != 0 => Some(SentCopy {
                 folder,
@@ -370,16 +378,29 @@ impl Store {
             (None, None) => None,
             _ => return Err(Error::Invalid("发送副本位置不完整")),
         };
+        let headers = decode_headers(subject, &recipients)?;
         Ok(SendTask {
             id: id.clone(),
             account: account.clone(),
             source_draft: DraftId(draft),
             source_revision: revision,
+            sender,
+            recipients: headers,
+            created_at,
             state: parse_state(&state)?,
             detail,
             resend_of: parent.map(SendTaskId),
             copy,
         })
+    }
+
+    /// 任务入口读取；有界倒序，不触发网络或自动重试。
+    pub fn task_list(&self, account: &AccountId) -> Result<Vec<SendTask>> {
+        let mut query=self.connection.prepare("SELECT id FROM send_tasks WHERE account_id=?1 ORDER BY created_at DESC,rowid DESC LIMIT 200")?;
+        let ids = query
+            .query_map([&account.0], |r| Ok(SendTaskId(r.get(0)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        ids.iter().map(|id| self.task(account, id)).collect()
     }
 
     pub fn task_ids(&self, account: &AccountId) -> Result<Vec<SendTaskId>> {

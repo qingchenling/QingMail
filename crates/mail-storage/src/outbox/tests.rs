@@ -753,3 +753,18 @@ fn v5_upgrade_adds_copy_columns_and_preserves_copy_pending_tasks() {
             .starts_with("migration-v5-")
     }));
 }
+
+#[test]
+fn task_list_exposes_frozen_headers_for_the_task_entry() {
+    let (_root, mut store, account) = setup();
+    let id = task(&mut store, &account);
+    let list = store.task_list(&account).unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].id, id);
+    assert_eq!(list[0].recipients.subject, "主题🙂");
+    assert_eq!(list[0].sender, settings().address);
+    assert_eq!(list[0].recipients.to, vec!["to@example.org".to_string()]);
+    assert_eq!(list[0].recipients.cc, vec!["cc@example.org".to_string()]);
+    assert!(list[0].created_at > 0);
+    assert_eq!(list[0].state, SendState::Pending);
+}
