@@ -11,6 +11,11 @@ use gpui_kit_material::icons::Assets;
 use gpui_kit_material::prelude::*;
 use gpui_kit_material::theme;
 
+/// 设 QINGMAIL_FPS=1 显示性能 HUD（帧率/帧耗时/GPU/CPU/内存）。
+fn show_fps() -> bool {
+    std::env::var("QINGMAIL_FPS").is_ok_and(|value| value == "1")
+}
+
 /// 合成邮件列表条目（发件人、主题）。
 const MAILS: [(&str, &str); 6] = [
     ("Arch Linux 邮件列表", "[announce] 2026-11 稳定版发布公告"),
@@ -98,7 +103,7 @@ impl Home {
 }
 
 impl Render for Home {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme_button = MaterialButton::new("theme-toggle")
             .variant(ButtonVariant::Tonal)
             .child("切换主题")
@@ -213,6 +218,7 @@ impl Render for Home {
             .child(selected_note);
 
         div()
+            .relative()
             .size_full()
             .flex()
             .flex_col()
@@ -229,6 +235,7 @@ impl Render for Home {
             )
             .child(list)
             .child(footer)
+            .when(show_fps(), |d| d.child(gpui_fps::fps_monitor(window, cx)))
     }
 }
 
