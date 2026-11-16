@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import sqlite3
 import socket
 import stat
 import subprocess
@@ -17,7 +18,7 @@ def run(binary, evidence):
     checks = []
     processes = []
     log = evidence.with_suffix('.log')
-    with tempfile.TemporaryDirectory(prefix='qingmail-p0-lifecycle-') as directory, log.open('w') as output:
+    with tempfile.TemporaryDirectory(prefix='qingmail-p2-lifecycle-') as directory, log.open('w') as output:
         root = Path(directory)
         root.chmod(0o700)
         drafts = root / 'drafts'
@@ -60,8 +61,12 @@ def run(binary, evidence):
             proc = launch('--lifecycle-probe', '--no-tray')
             closed = until(lambda: s if (s := status()).get('windows') == '0' and s.get('probe_step') == '4' else None)
             assert int(closed['pid']) == proc.pid and proc.poll() is None
-            draft_path = drafts / 'p0-editor/draft.json'
-            draft = json.loads(draft_path.read_text())
+            draft_dir = drafts / 'p2-data'
+            def saved_draft():
+                with sqlite3.connect(f'file:{draft_dir / "state.sqlite3"}?mode=ro', uri=True) as db:
+                    row = db.execute('SELECT d.body_id FROM drafts d JOIN local_editor e ON e.draft_id=d.id AND e.account_id=d.account_id').fetchone()
+                return json.loads((draft_dir / 'objects' / row[0]).read_text())
+            draft = saved_draft()
             assert draft['text'] == '生命周期验证🙂\n关闭前最新草稿'
             assert all(a['bold'] for a in draft['attributes'][:-1])
             before = int(closed['ticks'])
@@ -99,19 +104,19 @@ def run(binary, evidence):
             control('--quit')
             assert proc.wait(timeout=8) == 0
             assert not (root / 'qingmail-p0/activate.sock').exists()
-            assert json.loads(draft_path.read_text()) == draft
+            assert saved_draft() == draft
             record('explicit quit drains draft and releases socket/lock')
 
             # 强制结束只要求保留此前已确认版本，不声称恢复未确认按键。
             proc = launch('--editor-demo', '--no-tray')
             until(lambda: status().get('editors') == '1')
-            until(lambda: json.loads(draft_path.read_text()) == draft)
+            until(lambda: saved_draft() == draft)
             os.kill(proc.pid, signal.SIGKILL)
             assert proc.wait(timeout=5) == -signal.SIGKILL
             assert (root / 'qingmail-p0/activate.sock').exists()
             proc = launch('--editor-demo', '--no-tray')
             until(lambda: status().get('pid') == str(proc.pid) and status().get('editors') == '1')
-            assert json.loads(draft_path.read_text()) == draft
+            assert saved_draft() == draft
             control('--quit')
             assert proc.wait(timeout=8) == 0
             record('crash leaves stale socket; restart recovers confirmed draft and replaces stale endpoint')
@@ -120,7 +125,7 @@ def run(binary, evidence):
             proc = launch('--lifecycle-failure-probe', '--no-tray')
             until(lambda: status().get('editors') == '1')
             time.sleep(1)
-            draft_dir = drafts / 'p0-editor'
+            draft_dir = drafts / 'p2-data'
             draft_dir.chmod(0o500)
             (drafts / 'trigger').touch()
             until(lambda: status().get('probe_step') == '3')
@@ -128,7 +133,7 @@ def run(binary, evidence):
             control('--quit')
             until(lambda: status().get('quitting') == 'false' and status().get('editors') == '1')
             assert proc.poll() is None
-            assert json.loads(draft_path.read_text()) == draft
+            assert saved_draft() == draft
             record('filesystem write failure cancels close/quit and preserves last confirmed draft')
             draft_dir.chmod(0o700)
             # 失败后显式重试；允许先消费上次关闭错误再发起重试。
@@ -148,8 +153,8 @@ def run(binary, evidence):
                     except subprocess.TimeoutExpired:
                         proc.kill()
                         proc.wait(timeout=3)
-            if (drafts / 'p0-editor').exists():
-                (drafts / 'p0-editor').chmod(0o700)
+            if (drafts / 'p2-data').exists():
+                (drafts / 'p2-data').chmod(0o700)
     evidence.write_text(json.dumps({'checks': checks}, ensure_ascii=False, indent=2) + '\n')
     print(f'PASS: {len(checks)} lifecycle checks; {evidence}')
 
@@ -157,6 +162,6 @@ def run(binary, evidence):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary', type=Path, default=Path('target/release/mail-ui'))
-    parser.add_argument('--evidence', type=Path, default=Path('docs/reports/evidence/P0-007-lifecycle.json'))
+    parser.add_argument('--evidence', type=Path, default=Path('docs/reports/evidence/P2-003-lifecycle.json'))
     args = parser.parse_args()
     run(args.binary.resolve(), args.evidence)

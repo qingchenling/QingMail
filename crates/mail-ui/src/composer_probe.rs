@@ -165,9 +165,10 @@ impl Composer {
                     return;
                 }
                 let store = self.store.clone().unwrap();
+                let request = store.open_editor(self.session.borrow().draft.clone());
                 let draft = self.session.borrow().draft.clone();
                 let task = cx.background_executor().spawn(async move {
-                    assert_eq!(store.load().unwrap().unwrap(), draft);
+                    assert_eq!(receive(request).unwrap().document.body, draft);
                     let evidence = "PASS native layout; UTF-8 selection; UTF-16 emoji replacement; marked preedit/commit; composition undo/redo; keyboard format undo/redo; inline bold/italic/link; controlled list export; background save/load equality; input accepted during 900ms simulated slow save; old save acknowledgement does not mark new edits saved\n";
                     std::fs::write("target/p0-editor-probe-result.txt", evidence).unwrap();
                     eprintln!("QINGMAIL_EDITOR_PROBE: {evidence}");

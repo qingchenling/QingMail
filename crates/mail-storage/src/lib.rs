@@ -19,10 +19,11 @@ use private_dir::PrivateDir;
 use rusqlite::{Connection, MAIN_DB, OpenFlags, OptionalExtension, params};
 use std::{fmt, fs::File, io, path::Path, time::Duration};
 
-const SCHEMA_VERSION: u32 = 2;
+const SCHEMA_VERSION: u32 = 3;
 const APPLICATION_ID: u32 = 0x514d4149;
 const SCHEMA: &str = include_str!("schema.sql");
 const SCHEMA_V2: &str = include_str!("schema-v2.sql");
+const SCHEMA_V3: &str = include_str!("schema-v3.sql");
 
 #[derive(Debug)]
 pub enum Error {
@@ -98,7 +99,14 @@ impl Store {
         connection.execute_batch(
             "PRAGMA foreign_keys=ON; PRAGMA journal_mode=DELETE; PRAGMA synchronous=EXTRA; PRAGMA trusted_schema=OFF;",
         )?;
-        migrate(&mut connection, &directory, existed, SCHEMA, SCHEMA_V2)?;
+        migrate(
+            &mut connection,
+            &directory,
+            existed,
+            SCHEMA,
+            SCHEMA_V2,
+            SCHEMA_V3,
+        )?;
         let mut foreign_keys = connection.prepare("PRAGMA foreign_key_check")?;
         if foreign_keys.query([])?.next()?.is_some() {
             return Err(Error::Invalid("数据库关联检查失败，已保留原文件"));
@@ -116,11 +124,58 @@ impl Store {
         })
     }
 
+    /// 本地草稿空间不含可用服务器或凭据；account()/accounts() 不暴露为真实账号。
+    pub fn local_draft_account(&mut self) -> Result<AccountId> {
+        if let Some(id) = self
+            .connection
+            .query_row("SELECT id FROM accounts WHERE kind='local'", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .optional()?
+        {
+            return Ok(AccountId(id));
+        }
+        let id = AccountId(new_id()?);
+        self.connection.execute(
+            "INSERT INTO accounts VALUES (?1,'本地草稿','','',1,'','tls','',1,'','tls','local')",
+            [&id.0],
+        )?;
+        Ok(id)
+    }
+
+    pub fn selected_local_draft(&self, account: &AccountId) -> Result<Option<mail_core::DraftId>> {
+        Ok(self
+            .connection
+            .query_row(
+                "SELECT draft_id FROM local_editor WHERE account_id=?1",
+                [&account.0],
+                |r| Ok(mail_core::DraftId(r.get(0)?)),
+            )
+            .optional()?)
+    }
+
+    pub fn select_local_draft(
+        &mut self,
+        account: &AccountId,
+        id: &mail_core::DraftId,
+    ) -> Result<()> {
+        let local: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM accounts WHERE id=?1 AND kind='local')",
+            [&account.0],
+            |r| r.get(0),
+        )?;
+        if !local {
+            return Err(Error::Invalid("只能在本地草稿空间中选择"));
+        }
+        self.connection.execute("INSERT INTO local_editor VALUES (1,?1,?2) ON CONFLICT(singleton) DO UPDATE SET draft_id=excluded.draft_id,account_id=excluded.account_id",params![id.0,account.0])?;
+        Ok(())
+    }
+
     pub fn create_account(&mut self, settings: &AccountSettings) -> Result<AccountId> {
         validate_settings(settings)?;
         let id = AccountId(new_id()?);
         self.connection.execute(
-            "INSERT INTO accounts VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+            "INSERT INTO accounts(id,display_name,address,imap_host,imap_port,imap_username,imap_security,smtp_host,smtp_port,smtp_username,smtp_security) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
             params![
                 id.0,
                 settings.display_name,
@@ -140,7 +195,7 @@ impl Store {
 
     pub fn account(&self, id: &AccountId) -> Result<Option<AccountSettings>> {
         Ok(self.connection.query_row(
-            "SELECT display_name,address,imap_host,imap_port,imap_username,imap_security,smtp_host,smtp_port,smtp_username,smtp_security FROM accounts WHERE id=?1",
+            "SELECT display_name,address,imap_host,imap_port,imap_username,imap_security,smtp_host,smtp_port,smtp_username,smtp_security FROM accounts WHERE id=?1 AND kind='remote'",
             [&id.0],
             |r| Ok(AccountSettings {
                 display_name: r.get(0)?, address: r.get(1)?,
@@ -154,7 +209,7 @@ impl Store {
     pub fn accounts(&self) -> Result<Vec<(AccountId, AccountSettings)>> {
         let mut query = self
             .connection
-            .prepare("SELECT id FROM accounts ORDER BY id")?;
+            .prepare("SELECT id FROM accounts WHERE kind='remote' ORDER BY id")?;
         let ids = query
             .query_map([], |r| Ok(AccountId(r.get(0)?)))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -339,6 +394,7 @@ fn migrate(
     existed: bool,
     schema: &str,
     upgrade: &str,
+    local_upgrade: &str,
 ) -> Result<()> {
     let version = validate_schema(connection)?;
     if version == SCHEMA_VERSION {
@@ -360,7 +416,10 @@ fn migrate(
     if version == 0 {
         tx.execute_batch(schema)?;
     }
-    tx.execute_batch(upgrade)?;
+    if version < 2 {
+        tx.execute_batch(upgrade)?;
+    }
+    tx.execute_batch(local_upgrade)?;
     tx.pragma_update(None, "application_id", APPLICATION_ID)?;
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.commit()?;
