@@ -11,6 +11,8 @@ use gpui_kit_material::icons::Assets;
 use gpui_kit_material::prelude::*;
 use gpui_kit_material::theme;
 
+mod perf_probe;
+
 /// 设 QINGMAIL_FPS=1 显示性能 HUD（帧率/帧耗时/GPU/CPU/内存）。
 fn show_fps() -> bool {
     std::env::var("QINGMAIL_FPS").is_ok_and(|value| value == "1")
@@ -37,10 +39,13 @@ struct Home {
     /// 是否已有 pump 回调在帧队列中，保证全局只有一个待推进回调。
     theme_animating: bool,
     selected: Option<usize>,
+    /// 仅限时诊断模式使用；普通窗口没有持续帧需求。
+    probe_started: Option<std::time::Instant>,
 }
 
 impl Home {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        perf_probe::start(window, cx);
         let input = cx.new(|cx| {
             InputState::new(window, cx).placeholder("搜索已缓存邮件（仅演示输入与中文 IME）…")
         });
@@ -51,6 +56,7 @@ impl Home {
             theme_target: None,
             theme_animating: false,
             selected: None,
+            probe_started: None,
         }
     }
 
@@ -104,6 +110,16 @@ impl Home {
 
 impl Render for Home {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let probe_marker = self.probe_started.map(|started| {
+            // 对照组：只靠绘制阶段的 GPUI 帧请求驱动，排除主题 pump。
+            window.request_animation_frame();
+            div()
+                .absolute()
+                .bottom(px(28.0))
+                .left(px((started.elapsed().as_secs_f32() % 1.0) * 500.0))
+                .size(px(12.0))
+                .bg(theme::color(ColorRole::PRIMARY))
+        });
         let theme_button = MaterialButton::new("theme-toggle")
             .variant(ButtonVariant::Tonal)
             .child("切换主题")
@@ -235,6 +251,7 @@ impl Render for Home {
             )
             .child(list)
             .child(footer)
+            .children(probe_marker)
             .when(show_fps(), |d| d.child(gpui_fps::fps_monitor(window, cx)))
     }
 }
@@ -251,6 +268,11 @@ fn main() {
 
             let bounds = Bounds::centered(None, size(px(960.0), px(680.0)), cx);
             let options = WindowOptions {
+                low_power_frame_interval: if perf_probe::unthrottled() {
+                    None
+                } else {
+                    WindowOptions::default().low_power_frame_interval
+                },
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitlebarOptions {
                     title: Some("QingMail — P0 交互验证".into()),

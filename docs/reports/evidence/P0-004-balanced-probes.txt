@@ -1,0 +1,76 @@
+powerprofilesctl get
+balanced
+pacman -Q rust hyprland vulkan-intel mesa nvidia-utils
+rust 1:1.100.0-1
+hyprland 0.57.2-1
+vulkan-intel 1:26.2.7-1
+mesa 1:26.2.7-1
+nvidia-utils 620.70.06-1
+[{"name": "eDP-1", "width": 2560, "height": 1600, "refreshRate": 240.0, "scale": 1.25, "vrr": false}]
+
+CASE release intel frames unthrottled=False
+window=[{"size": [998, 1206], "xwayland": false, "floating": false, "monitor": 0}]
+devices=["/dev/dri/renderD128"]
+PERF mode=frames unthrottled=false bounds=Size { 998px × 1206px } scale=1.25 active=true reduce_motion=false power=Balanced thermal=Nominal
+PERF state_at_s=0.000 active=true power=Balanced reduce_motion=false
+PERF state_at_s=4.448 active=false power=Balanced reduce_motion=false
+PERF elapsed_s=5.005 draws=537 submits=537 submits_per_s=107.29
+PERF draw_ms samples=537 mean=2.250 p50=2.221 p95=3.006 max=3.898 over_8ms=0 over_16ms=0
+PERF submit_ms samples=537 mean=0.809 p50=0.792 p95=1.114 max=1.639 over_8ms=0 over_16ms=0
+PERF interval_ms samples=536 mean=9.325 p50=8.597 p95=12.995 max=19.915 over_8ms=440 over_16ms=5
+PERF signal_to_draw_ms samples=537 mean=1.113 p50=1.016 p95=2.017 max=2.037 over_8ms=0 over_16ms=0
+PERF draws_by_collection_second=[109, 113, 112, 98, 99, 6]
+exit=0
+
+CASE release intel theme unthrottled=False
+window=[{"size": [998, 1206], "xwayland": false, "floating": false, "monitor": 0}]
+devices=["/dev/dri/renderD128"]
+PERF mode=theme unthrottled=false bounds=Size { 998px × 1206px } scale=1.25 active=true reduce_motion=false power=Balanced thermal=Nominal
+PERF state_at_s=0.000 active=true power=Balanced reduce_motion=false
+PERF elapsed_s=5.028 draws=587 submits=587 submits_per_s=116.75
+PERF draw_ms samples=587 mean=2.078 p50=2.087 p95=2.808 max=3.248 over_8ms=0 over_16ms=0
+PERF submit_ms samples=587 mean=0.672 p50=0.667 p95=0.851 max=3.035 over_8ms=0 over_16ms=0
+PERF interval_ms samples=586 mean=8.566 p50=8.393 p95=11.297 max=13.589 over_8ms=434 over_16ms=0
+PERF signal_to_draw_ms samples=587 mean=1.092 p50=1.077 p95=2.074 max=2.260 over_8ms=0 over_16ms=0
+PERF draws_by_collection_second=[115, 117, 111, 118, 120, 6]
+exit=0
+
+CASE release nvidia theme unthrottled=False
+window=[{"size": [998, 1206], "xwayland": false, "floating": false, "monitor": 0}]
+devices=["/dev/dri/renderD128", "/dev/dri/renderD129", "/dev/nvidia-modeset", "/dev/nvidia0", "/dev/nvidiactl"]
+PERF mode=theme unthrottled=false bounds=Size { 998px × 1206px } scale=1.25 active=true reduce_motion=false power=Balanced thermal=Nominal
+PERF state_at_s=0.000 active=true power=Balanced reduce_motion=false
+PERF elapsed_s=5.005 draws=630 submits=630 submits_per_s=125.89
+PERF draw_ms samples=630 mean=1.863 p50=1.816 p95=2.361 max=2.958 over_8ms=0 over_16ms=0
+PERF submit_ms samples=630 mean=0.526 p50=0.491 p95=0.768 max=1.584 over_8ms=0 over_16ms=0
+PERF interval_ms samples=629 mean=7.945 p50=8.273 p95=9.217 max=12.979 over_8ms=416 over_16ms=0
+PERF signal_to_draw_ms samples=630 mean=1.069 p50=1.069 p95=2.057 max=2.224 over_8ms=0 over_16ms=0
+PERF draws_by_collection_second=[123, 137, 131, 119, 114, 6]
+exit=0
+
+CASE debug intel frames unthrottled=False
+window=[{"size": [998, 1206], "xwayland": false, "floating": false, "monitor": 0}]
+devices=["/dev/dri/renderD128"]
+PERF mode=frames unthrottled=false bounds=Size { 998px × 1206px } scale=1.25 active=true reduce_motion=false power=Balanced thermal=Nominal
+PERF state_at_s=0.000 active=true power=Balanced reduce_motion=false
+PERF elapsed_s=5.046 draws=239 submits=239 submits_per_s=47.36
+PERF draw_ms samples=239 mean=12.643 p50=12.032 p95=17.390 max=25.358 over_8ms=239 over_16ms=21
+PERF submit_ms samples=239 mean=1.992 p50=1.909 p95=2.648 max=4.586 over_8ms=0 over_16ms=0
+PERF interval_ms samples=238 mean=21.121 p50=20.974 p95=26.801 max=33.225 over_8ms=238 over_16ms=227
+PERF signal_to_draw_ms samples=239 mean=1.173 p50=1.114 p95=2.139 max=2.178 over_8ms=0 over_16ms=0
+PERF draws_by_collection_second=[49, 47, 48, 46, 47, 2]
+exit=0
+
+CASE release intel idle unthrottled=False
+window=[{"size": [998, 1206], "xwayland": false, "floating": false, "monitor": 0}]
+devices=["/dev/dri/renderD128"]
+PERF mode=idle unthrottled=false bounds=Size { 998px × 1206px } scale=1.25 active=true reduce_motion=false power=Balanced thermal=Nominal
+PERF state_at_s=0.000 active=true power=Balanced reduce_motion=false
+PERF elapsed_s=5.044 draws=0 submits=0 submits_per_s=0.00
+PERF draw_ms samples=0
+PERF submit_ms samples=0
+PERF interval_ms samples=0
+PERF signal_to_draw_ms samples=0
+PERF draws_by_collection_second=[0, 0, 0, 0, 0, 0]
+exit=0
+Restored power profile: performance
