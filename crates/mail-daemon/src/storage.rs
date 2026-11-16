@@ -87,6 +87,16 @@ enum Request {
         account: AccountId,
         reply: SyncSender<StorageResult<Vec<mail_core::Folder>>>,
     },
+    Search {
+        account: AccountId,
+        query: mail_storage::SearchQuery,
+        reply: SyncSender<StorageResult<Vec<mail_storage::SearchHit>>>,
+    },
+    MarkAttachments {
+        location: mail_core::MailUid,
+        count: u32,
+        reply: SyncSender<StorageResult<()>>,
+    },
     List {
         account: Option<AccountId>,
         reply: SyncSender<StorageResult<Vec<StoredDraft>>>,
@@ -593,6 +603,28 @@ impl StorageClient {
     ) -> StorageResult<Receiver<StorageResult<Vec<mail_core::Folder>>>> {
         self.request(|reply| Request::Folders { account, reply })
     }
+    pub fn search(
+        &self,
+        account: AccountId,
+        query: mail_storage::SearchQuery,
+    ) -> StorageResult<Receiver<StorageResult<Vec<mail_storage::SearchHit>>>> {
+        self.request(|reply| Request::Search {
+            account,
+            query,
+            reply,
+        })
+    }
+    pub fn mark_attachments(
+        &self,
+        location: mail_core::MailUid,
+        count: u32,
+    ) -> StorageResult<Receiver<StorageResult<()>>> {
+        self.request(|reply| Request::MarkAttachments {
+            location,
+            count,
+            reply,
+        })
+    }
     /// 坏草稿恢复：读取选中草稿的原始正文字节，不要求正文可解析。
     pub fn selected_draft_body(
         &self,
@@ -808,6 +840,25 @@ fn run(path: Option<PathBuf>, receiver: Receiver<Request>) {
             } => {
                 let _ = reply.send(opened.and_then(|s| {
                     s.set_flags(&account, &folder, uidvalidity, &uids, seen, flagged)
+                        .map_err(|e| e.to_string())
+                }));
+            }
+            Request::Search {
+                account,
+                query,
+                reply,
+            } => {
+                let _ = reply.send(
+                    opened.and_then(|s| s.search(&account, &query).map_err(|e| e.to_string())),
+                );
+            }
+            Request::MarkAttachments {
+                location,
+                count,
+                reply,
+            } => {
+                let _ = reply.send(opened.and_then(|s| {
+                    s.mark_attachments(&location, count)
                         .map_err(|e| e.to_string())
                 }));
             }

@@ -142,7 +142,7 @@ impl Store {
             let existing:Option<String>=tx.query_row("SELECT message_id FROM folder_messages WHERE account_id=?1 AND folder_id=?2 AND uidvalidity=?3 AND uid=?4",params![account.0,id,batch.uidvalidity,uid],|r|r.get(0)).optional()?;
             let message_id = existing.map(Ok).unwrap_or_else(new_id)?;
             let flags = batch.flags.get(uid).copied().unwrap_or_default();
-            tx.execute("INSERT INTO messages VALUES (?1,?2,?3,?4,?5) ON CONFLICT(id) DO UPDATE SET subject=excluded.subject,sender=excluded.sender,received_at=excluded.received_at",params![message_id,account.0,message.subject,message.sender,message.received_at])?;
+            tx.execute("INSERT INTO messages(id,account_id,subject,sender,received_at) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(id) DO UPDATE SET subject=excluded.subject,sender=excluded.sender,received_at=excluded.received_at",params![message_id,account.0,message.subject,message.sender,message.received_at])?;
             tx.execute(
                 "INSERT INTO folder_messages(account_id,folder_id,uidvalidity,uid,message_id,seen,flagged) VALUES (?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(account_id,folder_id,uidvalidity,uid) DO UPDATE SET seen=excluded.seen,flagged=excluded.flagged",
                 params![account.0, id, batch.uidvalidity, uid, message_id, flags.seen, flags.flagged],
@@ -468,7 +468,7 @@ mod tests {
         let path = root.path().join("data");
         let mut store = Store::open(&path).unwrap();
         let a = store.create_account(&settings()).unwrap();
-        store.connection.execute_batch("DROP TABLE message_bodies; DROP TABLE remote_folders; DROP TABLE folder_sync; DROP TABLE catalog_sync; ALTER TABLE send_tasks DROP COLUMN copy_folder; ALTER TABLE send_tasks DROP COLUMN copy_uidvalidity; ALTER TABLE send_tasks DROP COLUMN copy_uid; ALTER TABLE folder_messages DROP COLUMN seen; ALTER TABLE folder_messages DROP COLUMN flagged; PRAGMA user_version=3;").unwrap();
+        store.connection.execute_batch("DROP TABLE message_bodies; DROP TABLE remote_folders; DROP TABLE folder_sync; DROP TABLE catalog_sync; ALTER TABLE send_tasks DROP COLUMN copy_folder; ALTER TABLE send_tasks DROP COLUMN copy_uidvalidity; ALTER TABLE send_tasks DROP COLUMN copy_uid; ALTER TABLE folder_messages DROP COLUMN seen; ALTER TABLE folder_messages DROP COLUMN flagged; ALTER TABLE messages DROP COLUMN has_attachments; PRAGMA user_version=3;").unwrap();
         drop(store);
         let store = Store::open(&path).unwrap();
         assert_eq!(store.account(&a).unwrap(), Some(settings()));

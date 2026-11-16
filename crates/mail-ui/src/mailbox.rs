@@ -1,8 +1,8 @@
 //! 原生只读索引窗口：目录/头部同步、按需正文下载与阅读；远端标记与发送操作尚未接入。
 use gpui_kit::{
-    App, Bounds, Context, FocusHandle, KeyDownEvent, Render, ScrollStrategy, TitlebarOptions,
-    UniformListScrollHandle, Window, WindowBounds, WindowOptions, div, prelude::*, px, size,
-    uniform_list,
+    App, Bounds, Context, Entity, FocusHandle, KeyDownEvent, Render, ScrollStrategy,
+    TitlebarOptions, UniformListScrollHandle, Window, WindowBounds, WindowOptions,
+    base::input::InputState, div, prelude::*, px, size, uniform_list,
 };
 use gpui_kit_material::{prelude::*, theme};
 use mail_core::{AccountId, AccountSettings, CachedMessage, FolderCache, RemoteFolder};
@@ -12,6 +12,7 @@ use mail_service::{
     credentials::{CredentialVault, SystemVault},
     folders, sync,
 };
+use mail_storage::{SearchHit, SearchQuery};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Mutex,
@@ -110,6 +111,14 @@ struct Mailbox {
     confirm_delete: bool,
     history_exhausted: bool,
     quiet_reload: bool,
+    restore_selected: Option<usize>,
+    search_text: Entity<InputState>,
+    search_sender: Entity<InputState>,
+    search_current_folder: bool,
+    search_attachments: bool,
+    search_results: Option<Vec<SearchHit>>,
+    search_selected: Option<usize>,
+    search_previous: Option<(Option<usize>, Option<u32>)>,
     before: Option<u32>,
     busy: bool,
     status: String,
@@ -133,6 +142,14 @@ impl Mailbox {
             confirm_delete: false,
             history_exhausted: false,
             quiet_reload: false,
+            restore_selected: None,
+            search_text: cx.new(|cx| InputState::new(window, cx)),
+            search_sender: cx.new(|cx| InputState::new(window, cx)),
+            search_current_folder: true,
+            search_attachments: false,
+            search_results: None,
+            search_selected: None,
+            search_previous: None,
             before: None,
             busy: false,
             status: "正在读取本地账号与缓存…".into(),
@@ -266,6 +283,9 @@ impl Mailbox {
         }
         self.selected_folder = Some(name);
         self.before = None;
+        self.search_results = None;
+        self.search_previous = None;
+        self.search_selected = None;
         self.checked.clear();
         self.undo_flags = None;
         self.confirm_delete = false;
@@ -303,7 +323,11 @@ impl Mailbox {
                         this.cache = cache;
                         this.scroll = UniformListScrollHandle::new();
                         let quiet = std::mem::take(&mut this.quiet_reload);
-                        if quiet
+                        if let Some(index) = std::mem::take(&mut this.restore_selected) {
+                            if index < this.messages().len() {
+                                this.selected = Some(index);
+                            }
+                        } else if quiet
                             && let Some(uid) = selected_uid
                         {
                             this.selected = this
@@ -490,21 +514,44 @@ impl Mailbox {
         else {
             return;
         };
-        let Some((account, settings)) = self.account.clone() else {
-            return;
-        };
-        if account != message.location.account {
-            return;
-        }
         let Some(name) = self.selected_folder.clone() else {
             return;
         };
+        self.read_location(message.location, name, cx);
+    }
+    fn open_hit(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        let Some(hit) = self
+            .search_results
+            .as_ref()
+            .and_then(|results| results.get(index))
+            .cloned()
+        else {
+            return;
+        };
+        self.search_selected = Some(index);
+        self.read_location(hit.message.location, hit.folder, cx);
+    }
+    fn read_location(
+        &mut self,
+        location: mail_core::MailUid,
+        folder: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((account, settings)) = self.account.clone() else {
+            return;
+        };
+        if account != location.account {
+            return;
+        }
         self.busy = true;
         self.status = "正在读取缓存；未缓存时将只读下载完整邮件（含内含附件，最多8MiB）…".into();
         let reader_account = Some((account.clone(), settings.address.clone()));
         let store = self.store.clone();
         let task = cx.background_executor().spawn(async move {
-            let raw = match receive(store.message_body(message.location.clone()))? {
+            let raw = match receive(store.message_body(location.clone()))? {
                 Some(raw) => raw,
                 None => {
                     let _guard = NETWORK
@@ -514,25 +561,28 @@ impl Mailbox {
                     let raw = sync::message(
                         &settings.imap,
                         &credentials.imap,
-                        &name,
-                        message.location.uidvalidity,
-                        message.location.uid,
+                        &folder,
+                        location.uidvalidity,
+                        location.uid,
                     )
                     .map_err(|e| e.to_string())?;
-                    receive(store.save_message_body(message.location.clone(), raw.clone()))?;
+                    receive(store.save_message_body(location.clone(), raw.clone()))?;
                     // 重新读取时再核对关联与摘要；不将损坏缓存误当可用下载。
-                    receive(store.message_body(message.location.clone()))?
+                    receive(store.message_body(location.clone()))?
                         .ok_or_else(|| "邮件缓存未确认".to_owned())?
                 }
             };
-            mail_content::parse(&raw).map_err(|e| e.to_string())
+            let content = mail_content::parse(&raw).map_err(|e| e.to_string())?;
+            // 记录附件数量，供本地“有附件”搜索使用；失败不影响阅读。
+            let _ = receive(store.mark_attachments(location, content.attachments.len() as u32));
+            Ok::<_, String>((content, account, reader_account))
         });
         cx.spawn(async move |entity, cx| {
             let result = task.await;
             let _ = entity.update(cx, |this, cx| {
                 this.busy = false;
                 match result {
-                    Ok(content) => {
+                    Ok((content, _, reader_account)) => {
                         this.status = "邮件已缓存并交给简化阅读，远端已读状态未改变".into();
                         cx.defer(move |cx| {
                             crate::reader::open_content(content, reader_account, cx)
@@ -548,6 +598,90 @@ impl Mailbox {
         .detach();
         cx.notify();
     }
+    fn run_search(&mut self, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        let Some((account, _)) = self.account.clone() else {
+            self.status = "请先添加邮箱".into();
+            cx.notify();
+            return;
+        };
+        let text = self.search_text.read(cx).value().trim().to_owned();
+        let sender = self.search_sender.read(cx).value().trim().to_owned();
+        if text.is_empty() && sender.is_empty() && !self.search_attachments {
+            self.status = "请输入关键词或发件人，或勾选“有附件”".into();
+            cx.notify();
+            return;
+        }
+        let folder = if self.search_current_folder {
+            match self.selected_folder.clone() {
+                Some(folder) => Some(folder),
+                None => {
+                    self.status = "请先选择文件夹，或切换为整个账号范围".into();
+                    cx.notify();
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        if self.search_results.is_none() {
+            self.search_previous = Some((self.selected, self.before));
+        }
+        let query = SearchQuery {
+            text: text.clone(),
+            sender: sender.clone(),
+            has_attachments: self.search_attachments,
+            folder: folder.clone(),
+        };
+        self.busy = true;
+        self.status = "正在搜索本地缓存…".into();
+        let reply = self.store.search(account, query);
+        let task = cx
+            .background_executor()
+            .spawn(async move { receive(reply) });
+        cx.spawn(async move |entity, cx| {
+            let result = task.await;
+            let _ = entity.update(cx, |this, cx| {
+                this.busy = false;
+                match result {
+                    Ok(results) => {
+                        this.status = format!(
+                            "本地搜索：{} 封 · {} · 仅覆盖已缓存索引；附件筛选只统计已下载正文",
+                            results.len(),
+                            if folder.is_some() {
+                                "当前文件夹"
+                            } else {
+                                "整个账号"
+                            }
+                        );
+                        this.search_results = Some(results);
+                        this.search_selected = None;
+                        this.checked.clear();
+                    }
+                    Err(error) => this.status = format!("搜索失败：{error}"),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+    fn clear_search(&mut self, cx: &mut Context<Self>) {
+        if self.search_results.take().is_none() {
+            return;
+        }
+        let (selected, before) = self.search_previous.take().unwrap_or((None, None));
+        self.before = before;
+        self.restore_selected = selected;
+        self.search_selected = None;
+        self.checked.clear();
+        self.status = "已清除搜索，恢复之前位置".into();
+        self.quiet_reload = true;
+        self.load_cache(cx);
+    }
+
     fn targets(&self) -> Vec<u32> {
         if !self.checked.is_empty() {
             return self.checked.iter().copied().collect();
@@ -806,6 +940,29 @@ impl Mailbox {
             .unwrap_or(&[])
     }
     fn keys(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(results) = &self.search_results {
+            let count = results.len();
+            if count == 0 {
+                return;
+            }
+            let index = match event.keystroke.key.as_str() {
+                "down" => self
+                    .search_selected
+                    .map(|i| (i + 1).min(count - 1))
+                    .unwrap_or(0),
+                "up" => self.search_selected.unwrap_or(0).saturating_sub(1),
+                "enter" => {
+                    if let Some(index) = self.search_selected {
+                        self.open_hit(index, cx);
+                    }
+                    return;
+                }
+                _ => return,
+            };
+            self.search_selected = Some(index);
+            cx.notify();
+            return;
+        }
         let count = self.messages().len();
         if count == 0 {
             return;
@@ -887,11 +1044,17 @@ impl Render for Mailbox {
                     }
                 })),
         );
-        tree = tree.child(
-            MaterialButton::new("mailbox-account-settings")
-                .child("添加邮箱")
-                .on_click(|_, _, cx| crate::accounts::open(cx)),
-        );
+        tree = tree
+            .child(
+                MaterialButton::new("mailbox-account-settings")
+                    .child("账号管理")
+                    .on_click(|_, _, cx| crate::accounts::open(cx)),
+            )
+            .child(
+                MaterialButton::new("mailbox-send-tasks")
+                    .child("发送任务")
+                    .on_click(|_, _, cx| crate::send_tasks::open(cx)),
+            );
         if let Some((_, settings)) = &self.account {
             tree = tree.child(
                 div()
@@ -1105,6 +1268,52 @@ impl Render for Mailbox {
                     .on_click(cx.listener(|this, _, _, cx| this.undo_flags(cx))),
             );
         }
+        let search_bar = div()
+            .flex()
+            .flex_wrap()
+            .gap_2()
+            .items_center()
+            .p_2()
+            .child(TextField::new("mail-search-text", &self.search_text).label("关键词"))
+            .child(TextField::new("mail-search-sender", &self.search_sender).label("发件人"))
+            .child(
+                MaterialButton::new("search-scope")
+                    .variant(ButtonVariant::Tonal)
+                    .child(if self.search_current_folder {
+                        "当前文件夹"
+                    } else {
+                        "整个账号"
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.search_current_folder = !this.search_current_folder;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                MaterialButton::new("search-attachments")
+                    .variant(if self.search_attachments {
+                        ButtonVariant::Filled
+                    } else {
+                        ButtonVariant::Text
+                    })
+                    .child("有附件")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.search_attachments = !this.search_attachments;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                MaterialButton::new("run-search")
+                    .child("搜索本地缓存")
+                    .disabled(self.busy)
+                    .on_click(cx.listener(|this, _, _, cx| this.run_search(cx))),
+            )
+            .child(
+                MaterialButton::new("clear-search")
+                    .child("清除搜索")
+                    .disabled(self.busy || self.search_results.is_none())
+                    .on_click(cx.listener(|this, _, _, cx| this.clear_search(cx))),
+            );
         let mut list = div()
             .id("mail-index-focus")
             .track_focus(&self.focus)
@@ -1114,6 +1323,7 @@ impl Render for Mailbox {
             .flex_1()
             .min_w_0()
             .min_h_0()
+            .child(search_bar)
             .child(ops)
             .child(
                 div()
@@ -1121,7 +1331,56 @@ impl Render for Mailbox {
                     .text_sm()
                     .child("最近90天 · 每页最多200封 · 按UID倒序 · 只下载邮件头"),
             );
-        if self.messages().is_empty() {
+        if let Some(results) = &self.search_results {
+            let mut search_view = div()
+                .id("search-results")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .p_2();
+            if results.is_empty() {
+                search_view = search_view.child(
+                    div()
+                        .p_4()
+                        .child("没有匹配的已缓存邮件；搜索不访问网络，可先同步或在目标文件夹重试"),
+                );
+            }
+            for (index, hit) in results.iter().enumerate() {
+                let selected = self.search_selected == Some(index);
+                search_view = search_view.child(
+                    div()
+                        .id(("search-hit", index))
+                        .p_2()
+                        .cursor_pointer()
+                        .bg(theme::color(if selected {
+                            ColorRole::SECONDARY_CONTAINER
+                        } else {
+                            ColorRole::SURFACE
+                        }))
+                        .child(format!(
+                            "{}{}",
+                            if hit.message.seen { "" } else { "● " },
+                            if hit.message.envelope.subject.is_empty() {
+                                "（无主题）"
+                            } else {
+                                &hit.message.envelope.subject
+                            }
+                        ))
+                        .child(div().text_sm().child(format!(
+                            "{} · {}",
+                            hit.message.envelope.sender,
+                            mail_service::accounts::folder_label(&hit.folder)
+                        )))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.open_hit(index, cx);
+                        })),
+                );
+            }
+            list = list.child(search_view);
+        } else if self.messages().is_empty() {
             list = list.child(div().p_4().child(if self.cache.is_some() {
                 "本页没有缓存邮件。同步后无结果表示该查询范围为空"
             } else {
@@ -1204,44 +1463,46 @@ impl Render for Mailbox {
                 .min_h_0(),
             );
         }
-        list = list.child(
-            div()
-                .flex()
-                .flex_wrap()
-                .gap_2()
-                .p_2()
-                .child(
-                    MaterialButton::new("first-cache-page")
-                        .disabled(self.busy || self.before.is_none())
-                        .child("返回最新缓存")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.before = None;
-                            this.load_cache(cx);
-                        })),
-                )
-                .child(
-                    MaterialButton::new("older-cache-page")
-                        .disabled(self.busy || self.messages().is_empty())
-                        .child("下一页缓存")
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.before =
-                                this.messages().last().map(|message| message.location.uid);
-                            this.load_cache(cx);
-                        })),
-                )
-                .child(
-                    MaterialButton::new("older-network-page")
-                        .disabled(self.busy || self.messages().is_empty())
-                        .child("查询较早邮件（90天内）")
-                        .on_click(cx.listener(|this, _, _, cx| this.sync_folder(true, cx))),
-                )
-                .child(
-                    MaterialButton::new("older-history")
-                        .disabled(self.busy || self.history_exhausted)
-                        .child("加载更早历史（90天前）")
-                        .on_click(cx.listener(|this, _, _, cx| this.load_older_history(cx))),
-                ),
-        );
+        if self.search_results.is_none() {
+            list = list.child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .p_2()
+                    .child(
+                        MaterialButton::new("first-cache-page")
+                            .disabled(self.busy || self.before.is_none())
+                            .child("返回最新缓存")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.before = None;
+                                this.load_cache(cx);
+                            })),
+                    )
+                    .child(
+                        MaterialButton::new("older-cache-page")
+                            .disabled(self.busy || self.messages().is_empty())
+                            .child("下一页缓存")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.before =
+                                    this.messages().last().map(|message| message.location.uid);
+                                this.load_cache(cx);
+                            })),
+                    )
+                    .child(
+                        MaterialButton::new("older-network-page")
+                            .disabled(self.busy || self.messages().is_empty())
+                            .child("查询较早邮件（90天内）")
+                            .on_click(cx.listener(|this, _, _, cx| this.sync_folder(true, cx))),
+                    )
+                    .child(
+                        MaterialButton::new("older-history")
+                            .disabled(self.busy || self.history_exhausted)
+                            .child("加载更早历史（90天前）")
+                            .on_click(cx.listener(|this, _, _, cx| this.load_older_history(cx))),
+                    ),
+            );
+        }
         let mut detail = div()
             .p_4()
             .flex()
@@ -1249,7 +1510,30 @@ impl Render for Mailbox {
             .gap_3()
             .min_w_0()
             .child("邮件头详情");
-        if let Some(message) = self.selected.and_then(|index| self.messages().get(index)) {
+        if let Some((index, hit)) = self
+            .search_selected
+            .zip(self.search_results.as_ref())
+            .and_then(|(index, results)| results.get(index).map(|hit| (index, hit)))
+        {
+            detail = detail
+                .child(hit.message.envelope.subject.clone())
+                .child(hit.message.envelope.sender.clone())
+                .child(format!(
+                    "文件夹：{} · 邮件日期：{}",
+                    mail_service::accounts::folder_label(&hit.folder),
+                    sync::display_time(hit.message.envelope.received_at)
+                ))
+                .child(format!(
+                    "UID {} · UIDVALIDITY {}",
+                    hit.message.location.uid, hit.message.location.uidvalidity
+                ))
+                .child(
+                    MaterialButton::new("open-search-hit")
+                        .disabled(self.busy)
+                        .child("打开正文")
+                        .on_click(cx.listener(move |this, _, _, cx| this.open_hit(index, cx))),
+                );
+        } else if let Some(message) = self.selected.and_then(|index| self.messages().get(index)) {
             detail = detail
                 .child(message.envelope.subject.clone())
                 .child(message.envelope.sender.clone())

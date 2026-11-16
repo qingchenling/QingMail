@@ -98,7 +98,7 @@ mod tests {
         let (root, store, location) = setup();
         store
             .connection
-            .execute_batch("DROP TABLE message_bodies; ALTER TABLE send_tasks DROP COLUMN copy_folder; ALTER TABLE send_tasks DROP COLUMN copy_uidvalidity; ALTER TABLE send_tasks DROP COLUMN copy_uid; ALTER TABLE folder_messages DROP COLUMN seen; ALTER TABLE folder_messages DROP COLUMN flagged; PRAGMA user_version=4;")
+            .execute_batch("DROP TABLE message_bodies; ALTER TABLE send_tasks DROP COLUMN copy_folder; ALTER TABLE send_tasks DROP COLUMN copy_uidvalidity; ALTER TABLE send_tasks DROP COLUMN copy_uid; ALTER TABLE folder_messages DROP COLUMN seen; ALTER TABLE folder_messages DROP COLUMN flagged; ALTER TABLE messages DROP COLUMN has_attachments; PRAGMA user_version=4;")
             .unwrap();
         drop(store);
         let mut store = Store::open(&root.path().join("data")).unwrap();

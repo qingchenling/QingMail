@@ -51,6 +51,9 @@ impl Composer {
             h.subject.clone(),
         ];
         self.attachment_ids = draft.document.attachments.clone();
+        if !h.cc.is_empty() || !h.bcc.is_empty() {
+            self.show_cc_bcc = true;
+        }
         self.attachment_infos.clear();
         let id = draft.id.clone();
         let request = crate::lifecycle::storage(cx)
@@ -154,16 +157,78 @@ impl Composer {
         }
         cx.notify();
     }
+    fn recipient_chips(&self, index: usize, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut row = div().flex().flex_wrap().gap_1();
+        let value = self.header_inputs[index].read(cx).value().to_string();
+        for address in value
+            .split([',', ';'])
+            .map(str::trim)
+            .filter(|address| !address.is_empty())
+        {
+            let address = address.to_owned();
+            let removed = address.clone();
+            row = row.child(
+                MaterialButton::new(format!("chip-{index}-{address}"))
+                    .variant(ButtonVariant::Tonal)
+                    .child(format!("{address} ×"))
+                    .disabled(self.loading || self.send_locked())
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.remove_recipient(index, &removed, window, cx);
+                    })),
+            );
+        }
+        row
+    }
+    fn remove_recipient(
+        &mut self,
+        index: usize,
+        value: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let remaining = self.header_inputs[index]
+            .read(cx)
+            .value()
+            .split([',', ';'])
+            .map(str::trim)
+            .filter(|address| !address.is_empty() && *address != value)
+            .collect::<Vec<_>>()
+            .join(", ");
+        self.header_inputs[index].update(cx, |input, cx| {
+            input.set_value(remaining, window, cx);
+        });
+        cx.notify();
+    }
     pub(super) fn fields_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let disabled = self.loading || self.closing || self.store.is_none() || self.send_locked();
         let mut fields = div().flex().flex_col().gap_1();
         for (index, label) in ["收件人", "抄送", "密送", "主题"].into_iter().enumerate() {
+            if (index == 1 || index == 2) && !self.show_cc_bcc {
+                continue;
+            }
             fields = fields.child(
                 TextField::new(("draft-header", index), &self.header_inputs[index])
                     .label(label)
                     .disabled(disabled),
             );
+            if index < 3 {
+                fields = fields.child(self.recipient_chips(index, cx));
+            }
         }
+        fields = fields.child(
+            MaterialButton::new("toggle-cc-bcc")
+                .variant(ButtonVariant::Text)
+                .child(if self.show_cc_bcc {
+                    "隐藏抄送/密送"
+                } else {
+                    "显示抄送/密送"
+                })
+                .disabled(disabled)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.show_cc_bcc = !this.show_cc_bcc;
+                    cx.notify();
+                })),
+        );
         let mut row = div().flex().flex_wrap().gap_2().child(
             MaterialButton::new("add-draft-attachment")
                 .child(if self.importing {
