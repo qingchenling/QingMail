@@ -3839,6 +3839,8 @@ dependencies = [
  "reqwest",
  "rustix",
  "scraper",
+ "serde",
+ "serde_json",
  "tempfile",
  "url",
 ]
@@ -3894,6 +3896,7 @@ dependencies = [
  "gpui-kit",
  "gpui-kit-material",
  "mail-content",
+ "ropey",
  "url",
 ]
 

@@ -14,3 +14,4 @@ gpui-kit-material = { workspace = true }
 gpui-fps = { workspace = true }
 mail-content = { workspace = true }
 url = { workspace = true }
+ropey = { workspace = true }
