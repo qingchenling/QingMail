@@ -1,6 +1,6 @@
 //! 原生写信与明确发送确认；后台持久任务禁止自动重发。
 use gpui_kit::{
-    App, Bounds, Context, Entity, EntityInputHandler, FontStyle, FontWeight, HighlightStyle,
+    App, Bounds, Context, Entity, EntityInputHandler, FontStyle, FontWeight, HighlightStyle, Hsla,
     KeyDownEvent, Render, SharedString, Subscription, TitlebarOptions, UnderlineStyle, Window,
     WindowBounds, WindowOptions,
     base::{
@@ -20,7 +20,9 @@ use mail_daemon::storage::{StorageClient, receive};
 use mail_storage::StoredDraft;
 use std::{
     cell::RefCell,
+    io::Write,
     ops::Range,
+    os::unix::fs::OpenOptionsExt,
     rc::Rc,
     time::{Duration, Instant},
 };
@@ -150,6 +152,7 @@ impl Session {
 struct RichStyles {
     session: Rc<RefCell<Session>>,
     projection: Option<Draft>,
+    quote_background: Hsla,
 }
 impl InputHighlighter for RichStyles {
     fn language(&self) -> SharedString {
@@ -199,6 +202,9 @@ impl InputHighlighter for RichStyles {
             let style = HighlightStyle {
                 font_weight: a.bold.then_some(FontWeight::BOLD),
                 font_style: a.italic.then_some(FontStyle::Italic),
+                // 引用在编辑器中直接可见；签名淡化，列表/引用续项见当前区块提示。
+                background_color: (a.block == Block::Quote).then_some(self.quote_background),
+                fade_out: (a.block == Block::Signature).then_some(0.65),
                 underline: a.link.as_ref().map(|_| UnderlineStyle {
                     thickness: px(1.),
                     color: None,
@@ -224,13 +230,27 @@ impl InputHighlighter for RichStyles {
 }
 
 pub(super) fn open(cx: &mut App) {
-    open_scoped(None, cx);
+    open_scoped(None, None, cx);
 }
 pub(super) fn open_account(account: mail_core::AccountId, address: String, cx: &mut App) {
-    open_scoped(Some((account, address)), cx);
+    open_scoped(Some((account, address)), None, cx);
 }
-fn open_scoped(account: Option<(mail_core::AccountId, String)>, cx: &mut App) {
-    if crate::lifecycle::reuse_editor(account.as_ref().map(|(id, _)| id), cx) {
+/// 回复/转发总是新建草稿窗口，不覆盖用户正在编辑的草稿。
+pub(super) fn open_document(
+    account: mail_core::AccountId,
+    address: String,
+    document: mail_storage::DraftDocument,
+    cx: &mut App,
+) {
+    open_scoped(Some((account, address)), Some(document), cx);
+}
+fn open_scoped(
+    account: Option<(mail_core::AccountId, String)>,
+    document: Option<mail_storage::DraftDocument>,
+    cx: &mut App,
+) {
+    if document.is_none() && crate::lifecycle::reuse_editor(account.as_ref().map(|(id, _)| id), cx)
+    {
         return;
     }
     let bounds = Bounds::centered(None, size(px(1180.), px(820.)), cx);
@@ -244,7 +264,7 @@ fn open_scoped(account: Option<(mail_core::AccountId, String)>, cx: &mut App) {
             ..Default::default()
         },
         cx,
-        |window, cx| cx.new(|cx| Composer::new(account, window, cx)),
+        |window, cx| cx.new(|cx| Composer::new(account, document, window, cx)),
     );
     match result {
         Ok((window, entity)) => crate::lifecycle::register_editor(window, entity.downgrade(), cx),
@@ -274,9 +294,12 @@ pub(super) struct Composer {
     session: Rc<RefCell<Session>>,
     store: Option<StorageClient>,
     stored: Option<StoredDraft>,
+    initial_document: Option<mail_storage::DraftDocument>,
+    force_new: bool,
     drafts: Vec<StoredDraft>,
     saved: Option<u64>,
     saving: bool,
+    load_failed: bool,
     auto_save_blocked: bool,
     loading: bool,
     last_edit: Instant,
@@ -298,6 +321,7 @@ impl Composer {
     }
     fn new(
         account_scope: Option<(mail_core::AccountId, String)>,
+        initial_document: Option<mail_storage::DraftDocument>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -307,8 +331,11 @@ impl Composer {
             .find(|name| names.iter().any(|available| available == name))
             .unwrap_or(".SystemUIFont")
             .into();
-        let initial = if account_scope.is_some() { "" } else { SAMPLE };
-        let draft = Draft::plain(initial).expect("bounded sample");
+        let initial = initial_document
+            .as_ref()
+            .map(|document| document.body.text().to_owned())
+            .unwrap_or_else(|| if account_scope.is_some() { "" } else { SAMPLE }.to_owned());
+        let draft = Draft::plain(&initial).expect("bounded sample");
         let session = Rc::new(RefCell::new(Session::new(draft.clone())));
         let input = cx.new(|cx| {
             let mut input = EditorState::new(window, cx)
@@ -327,6 +354,7 @@ impl Composer {
                     Some(Box::new(RichStyles {
                         session: session.clone(),
                         projection: None,
+                        quote_background: Hsla::from(theme::color(ColorRole::SURFACE_CONTAINER)),
                     }))
                 }),
                 cx,
@@ -379,9 +407,12 @@ impl Composer {
             session,
             store: None,
             stored: None,
+            initial_document,
+            force_new: false,
             drafts: vec![],
             saved: None,
             saving: false,
+            load_failed: false,
             auto_save_blocked: false,
             loading: true,
             last_edit: Instant::now(),
@@ -419,8 +450,19 @@ impl Composer {
 
     fn load_store(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let store = crate::lifecycle::storage(cx);
-        let request = if let Some((account, _)) = &self.account_scope {
-            store.open_account_editor(account.clone())
+        let account_scope = self.account_scope.clone();
+        let initial_document = self.initial_document.take();
+        let force_new = std::mem::take(&mut self.force_new);
+        let request = if let Some((account, _)) = &account_scope {
+            if force_new {
+                store.new_account_draft(account.clone())
+            } else if let Some(document) = initial_document {
+                store.new_account_draft_document(account.clone(), document)
+            } else {
+                store.open_account_editor(account.clone())
+            }
+        } else if force_new {
+            store.new_draft(Draft::plain("").expect("empty draft"))
         } else {
             store.open_editor(self.session.borrow().draft.clone())
         };
@@ -441,12 +483,16 @@ impl Composer {
                         this.stored = Some(draft);
                         this.restore_fields(window, cx);
                         this.saved = Some(0);
+                        this.load_failed = false;
                         this.sync_input(window, cx);
                         this.status = "已恢复草稿 · 检查并确认后才发送".into();
                         this.refresh_drafts(cx);
                         this.refresh_send_tasks(cx);
                     }
-                    Err(e) => this.status = format!("自动保存不可用，原文件未改动：{e}"),
+                    Err(e) => {
+                        this.load_failed = true;
+                        this.status = format!("草稿加载失败，原文件未改动：{e}");
+                    }
                 }
                 cx.notify();
             });
@@ -913,6 +959,246 @@ impl Composer {
             cx.notify();
         }
     }
+    fn current_block(&self, cx: &Context<Self>) -> Block {
+        let session = self.session.borrow();
+        let text = session.draft.text();
+        let mut byte = self.input.read(cx).selected_range().start.min(text.len());
+        while byte > 0 && !text.is_char_boundary(byte) {
+            byte -= 1;
+        }
+        let scalar = text[..byte].chars().count();
+        let index = scalar
+            .saturating_sub(1)
+            .min(session.draft.attributes().len().saturating_sub(2));
+        session
+            .draft
+            .attributes()
+            .get(index)
+            .map(|attributes| attributes.block)
+            .unwrap_or_default()
+    }
+    fn block_label(&self, cx: &Context<Self>) -> &'static str {
+        match self.current_block(cx) {
+            Block::Paragraph => "段落",
+            Block::Bullet => "列表",
+            Block::Quote => "引用",
+            Block::Signature => "签名",
+        }
+    }
+    /// 列表/引用中回车续项；空条目回车结束区块，交回编辑器正常换行。
+    fn continue_block(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.loading || self.closing || self.composing(window, cx) {
+            return false;
+        }
+        let range = self.input.read(cx).selected_range();
+        if range.start != range.end {
+            return false;
+        }
+        let byte = range.start;
+        let (block, line_start, line_empty) = {
+            let session = self.session.borrow();
+            let text = session.draft.text();
+            if byte > text.len() || !text.is_char_boundary(byte) {
+                return false;
+            }
+            let line_start = text[..byte].rfind('\n').map_or(0, |index| index + 1);
+            let line_end = text[byte..]
+                .find('\n')
+                .map_or(text.len(), |index| byte + index);
+            let scalar = text[..byte].chars().count();
+            let index = scalar
+                .saturating_sub(1)
+                .min(session.draft.attributes().len().saturating_sub(2));
+            let block = session
+                .draft
+                .attributes()
+                .get(index)
+                .map(|attributes| attributes.block)
+                .unwrap_or_default();
+            (
+                block,
+                line_start,
+                text[line_start..line_end].trim().is_empty(),
+            )
+        };
+        if !matches!(block, Block::Bullet | Block::Quote) {
+            return false;
+        }
+        {
+            let mut session = self.session.borrow_mut();
+            if line_empty {
+                if session
+                    .draft
+                    .set_block(line_start..byte, Block::Paragraph)
+                    .is_err()
+                {
+                    return false;
+                }
+            } else {
+                if session.draft.replace(byte..byte, "\n", None).is_err() {
+                    return false;
+                }
+                if session.draft.set_block(byte + 1..byte + 1, block).is_err() {
+                    return false;
+                }
+            }
+            session.revision += 1;
+        }
+        self.sync_input(window, cx);
+        let cursor = if line_empty { byte } else { byte + 1 };
+        self.input
+            .update(cx, |input, cx| input.set_selected_range(cursor..cursor, cx));
+        self.last_edit = Instant::now();
+        cx.notify();
+        !line_empty
+    }
+    /// 显式“粘贴 HTML”：读取文本剪贴板，清理后按受控模型插入光标处。
+    fn paste_html(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.loading || self.closing || self.composing(window, cx) {
+            return;
+        }
+        let Some(source) = cx.read_from_clipboard().and_then(|item| item.text()) else {
+            self.status = "剪贴板没有可粘贴的文本".into();
+            cx.notify();
+            return;
+        };
+        let pasted = match Draft::from_html(&source) {
+            Ok(pasted) if !pasted.text().trim().is_empty() => pasted,
+            Ok(_) => {
+                self.status = "粘贴内容没有可插入的文本".into();
+                cx.notify();
+                return;
+            }
+            Err(error) => {
+                self.status = format!("无法清理粘贴的 HTML：{error}");
+                cx.notify();
+                return;
+            }
+        };
+        let range = self.input.read(cx).selected_range();
+        let result = {
+            let mut session = self.session.borrow_mut();
+            session
+                .draft
+                .splice(range.clone(), &pasted)
+                .map(|()| session.revision += 1)
+        };
+        if let Err(error) = result {
+            self.status = error;
+            cx.notify();
+            return;
+        }
+        let mut cursor = range.start + pasted.text().len();
+        self.sync_input(window, cx);
+        let length = self.session.borrow().draft.text().len();
+        cursor = cursor.min(length);
+        while cursor > 0 && !self.session.borrow().draft.text().is_char_boundary(cursor) {
+            cursor -= 1;
+        }
+        self.input
+            .update(cx, |input, cx| input.set_selected_range(cursor..cursor, cx));
+        self.last_edit = Instant::now();
+        self.status = "已清理 HTML 并插入正文".into();
+        cx.notify();
+    }
+    fn export_text(&self) -> String {
+        format!(
+            "收件人：{}\n抄送：{}\n密送：{}\n主题：{}\n\n{}",
+            self.header_values[0],
+            self.header_values[1],
+            self.header_values[2],
+            self.header_values[3],
+            self.session.borrow().draft.plain_export()
+        )
+    }
+    fn save_as(&mut self, cx: &mut Context<Self>) {
+        self.save_bytes_as(self.export_text().into_bytes(), "qingmail-draft.txt", cx);
+    }
+    fn save_bytes_as(&mut self, bytes: Vec<u8>, name: &str, cx: &mut Context<Self>) {
+        let directory = std::env::var_os("HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::path::PathBuf::from("."));
+        let suggested = name.to_owned();
+        let receiver = cx.prompt_for_new_path(&directory, Some(&suggested));
+        let task = cx.background_executor().spawn(receiver);
+        cx.spawn(async move |entity, cx| {
+            let result = task.await;
+            let _ = entity.update(cx, |this, cx| {
+                match result {
+                    Ok(Ok(Some(path))) => {
+                        let written = std::fs::OpenOptions::new()
+                            .write(true)
+                            .create(true)
+                            .truncate(true)
+                            .mode(0o600)
+                            .open(&path)
+                            .and_then(|mut file| file.write_all(&bytes));
+                        this.status = match written {
+                            Ok(()) => format!("已另存到 {}", path.display()),
+                            Err(error) => format!("另存失败：{error}"),
+                        };
+                    }
+                    Ok(Ok(None)) => this.status = "已取消另存".into(),
+                    Ok(Err(error)) => this.status = format!("无法打开另存对话框：{error}"),
+                    Err(_) => this.status = "另存对话框已关闭".into(),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+    /// 坏草稿恢复：取出原始正文字节另存，不要求正文能反序列化。
+    fn save_raw_draft(&mut self, cx: &mut Context<Self>) {
+        let account = self.account_scope.as_ref().map(|(id, _)| id.clone());
+        let store = crate::lifecycle::storage(cx);
+        self.status = "正在读取原始草稿数据…".into();
+        let task = cx
+            .background_executor()
+            .spawn(async move { receive(store.selected_draft_body(account)) });
+        cx.spawn(async move |entity, cx| {
+            let result = task.await;
+            let _ = entity.update(cx, |this, cx| {
+                match result {
+                    Ok(Some(bytes)) => {
+                        this.save_bytes_as(bytes, "qingmail-draft-recovery.json", cx)
+                    }
+                    Ok(None) => this.status = "没有可另存的草稿数据".into(),
+                    Err(error) => this.status = format!("读取原始草稿失败：{error}"),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+    /// 坏草稿的明确放弃：只删草稿行，保留对象文件，再创建新草稿。
+    fn discard_bad_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let account = self.account_scope.as_ref().map(|(id, _)| id.clone());
+        let store = crate::lifecycle::storage(cx);
+        self.status = "正在放弃坏草稿；对象文件保留…".into();
+        let task = cx
+            .background_executor()
+            .spawn(async move { receive(store.discard_selected_draft(account)) });
+        cx.spawn_in(window, async move |entity, cx| {
+            let result = task.await;
+            let _ = entity.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(()) => {
+                        this.load_failed = false;
+                        this.loading = true;
+                        this.force_new = true;
+                        this.status = "已放弃坏草稿；正在创建新草稿…".into();
+                        this.load_store(window, cx);
+                    }
+                    Err(error) => this.status = format!("无法放弃草稿：{error}"),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
     fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let k = &event.keystroke;
         if !k.modifiers.control || k.modifiers.alt {
@@ -966,6 +1252,19 @@ impl Render for Composer {
                 MaterialButton::new("redo")
                     .child("重做")
                     .on_click(cx.listener(|this, _, w, cx| this.history(true, w, cx))),
+            )
+            .child(
+                MaterialButton::new("paste-html")
+                    .variant(ButtonVariant::Tonal)
+                    .child("粘贴 HTML")
+                    .disabled(self.loading)
+                    .on_click(cx.listener(|this, _, window, cx| this.paste_html(window, cx))),
+            )
+            .child(
+                MaterialButton::new("save-as")
+                    .child("另存草稿…")
+                    .disabled(self.loading)
+                    .on_click(cx.listener(|this, _, _, cx| this.save_as(cx))),
             );
         let revision = self.session.borrow().revision;
         let state = if self.loading {
@@ -978,6 +1277,16 @@ impl Render for Composer {
             "有未保存修改"
         };
         div().capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+            if event.keystroke.key == "enter"
+                && !event.keystroke.modifiers.shift
+                && !event.keystroke.modifiers.control
+                && !event.keystroke.modifiers.alt
+                && this.continue_block(window, cx)
+            {
+                cx.stop_propagation();
+                window.prevent_default();
+                return;
+            }
             if event.keystroke.modifiers.control && !event.keystroke.modifiers.alt && event.keystroke.key == "enter" {
                 this.check_send(window,cx);
                 cx.stop_propagation();
@@ -993,6 +1302,27 @@ impl Render for Composer {
             .child(div().text_size(px(22.)).child("QingMail · 写信草稿"))
             .child(div().text_size(px(13.)).child("选中后设置格式；Ctrl+B / I、Ctrl+Z / Shift+Z、Ctrl+S。收件人填写独立邮箱地址，以逗号或分号分隔。"))
             .child(toolbar)
+            .when(self.load_failed && !self.loading, |root| {
+                root.child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .flex_wrap()
+                        .p_2()
+                        .child(
+                            MaterialButton::new("save-raw-draft")
+                                .child("另存原始数据…")
+                                .on_click(cx.listener(|this, _, _, cx| this.save_raw_draft(cx))),
+                        )
+                        .child(
+                            MaterialButton::new("discard-bad-draft")
+                                .child("放弃并新建草稿")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.discard_bad_draft(window, cx);
+                                })),
+                        ),
+                )
+            })
             .child(self.draft_toolbar(cx))
             .child(div().text_size(px(14.)).child(self.account_scope.as_ref().map(|(_,address)| format!("发件账号：{address} · 草稿仅本地保存")).unwrap_or_else(||"未关联发件账号 · 本地草稿".into())))
             .child(self.fields_toolbar(cx))
@@ -1000,7 +1330,10 @@ impl Render for Composer {
             .child(TextField::new("link-url", &self.link))
             .child(div().flex().gap_4().flex_1().min_h_0()
                 .child(div().flex().flex_col().gap_2().flex_1().min_w_0()
-                    .child("原生编辑（粗斜体直接显示，段落结构见预览）")
+                    .child(format!(
+                        "原生编辑（粗斜体直接显示；当前区块：{}；列表/引用中回车续项）",
+                        self.block_label(cx)
+                    ))
                     .child(div().id("rich-editor").flex_1().min_h_0().border_1().border_color(theme::color(ColorRole::OUTLINE_VARIANT))
                         .p_3().text_size(px(18.)).font_family(self.font_family.clone())
                         .capture_action(cx.listener(|this, _: &Undo, window, cx| { this.history(false, window, cx); cx.stop_propagation(); }))

@@ -454,6 +454,7 @@ impl Mailbox {
         };
         self.busy = true;
         self.status = "正在读取缓存；未缓存时将只读下载完整邮件（含内含附件，最多8MiB）…".into();
+        let reader_account = Some((account.clone(), settings.address.clone()));
         let store = self.store.clone();
         let task = cx.background_executor().spawn(async move {
             let raw = match receive(store.message_body(message.location.clone()))? {
@@ -486,7 +487,9 @@ impl Mailbox {
                 match result {
                     Ok(content) => {
                         this.status = "邮件已缓存并交给简化阅读，远端已读状态未改变".into();
-                        cx.defer(move |cx| crate::reader::open_content(content, cx));
+                        cx.defer(move |cx| {
+                            crate::reader::open_content(content, reader_account, cx)
+                        });
                     }
                     Err(e) => {
                         this.status = format!("无法打开邮件：{e}。索引与原缓存已保留，可重试")
