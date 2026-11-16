@@ -169,6 +169,15 @@ impl Store {
         if !local {
             return Err(Error::Invalid("只能在本地草稿空间中选择"));
         }
+        self.select_editor_draft(account, id)
+    }
+
+    /// P2单编辑窗口记忆当前草稿；复用外键保证账号与草稿一致。
+    pub fn select_editor_draft(
+        &mut self,
+        account: &AccountId,
+        id: &mail_core::DraftId,
+    ) -> Result<()> {
         self.connection.execute("INSERT INTO local_editor VALUES (1,?1,?2) ON CONFLICT(singleton) DO UPDATE SET draft_id=excluded.draft_id,account_id=excluded.account_id",params![id.0,account.0])?;
         Ok(())
     }

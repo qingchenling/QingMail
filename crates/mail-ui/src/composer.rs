@@ -222,7 +222,13 @@ impl InputHighlighter for RichStyles {
 }
 
 pub(super) fn open(cx: &mut App) {
-    if crate::lifecycle::reuse_editor(cx) {
+    open_scoped(None, cx);
+}
+pub(super) fn open_account(account: mail_core::AccountId, address: String, cx: &mut App) {
+    open_scoped(Some((account, address)), cx);
+}
+fn open_scoped(account: Option<(mail_core::AccountId, String)>, cx: &mut App) {
+    if crate::lifecycle::reuse_editor(account.as_ref().map(|(id, _)| id), cx) {
         return;
     }
     let bounds = Bounds::centered(None, size(px(1180.), px(820.)), cx);
@@ -230,13 +236,13 @@ pub(super) fn open(cx: &mut App) {
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(TitlebarOptions {
-                title: Some("QingMail — 本地写信草稿".into()),
+                title: Some("QingMail — 写信草稿".into()),
                 ..Default::default()
             }),
             ..Default::default()
         },
         cx,
-        |window, cx| cx.new(|cx| Composer::new(window, cx)),
+        |window, cx| cx.new(|cx| Composer::new(account, window, cx)),
     );
     match result {
         Ok((window, entity)) => crate::lifecycle::register_editor(window, entity.downgrade(), cx),
@@ -245,6 +251,7 @@ pub(super) fn open(cx: &mut App) {
 }
 
 pub(super) struct Composer {
+    account_scope: Option<(mail_core::AccountId, String)>,
     header_inputs: Vec<Entity<InputState>>,
     header_values: [String; 4],
     header_subscriptions: Vec<Subscription>,
@@ -272,14 +279,29 @@ pub(super) struct Composer {
 }
 
 impl Composer {
-    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(super) fn explain_scope(
+        &mut self,
+        requested: Option<&mail_core::AccountId>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.account_scope.as_ref().map(|(id, _)| id) != requested {
+            self.status = "已有另一个草稿空间的窗口；请保存并关闭此窗口，再从目标账号打开写信。当前发件账号未改变".into();
+            cx.notify();
+        }
+    }
+    fn new(
+        account_scope: Option<(mail_core::AccountId, String)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let names = window.text_system().all_font_names();
         let font_family: SharedString = ["Noto Sans", "Liberation Sans", "DejaVu Sans"]
             .into_iter()
             .find(|name| names.iter().any(|available| available == name))
             .unwrap_or(".SystemUIFont")
             .into();
-        let draft = Draft::plain(SAMPLE).expect("bounded sample");
+        let initial = if account_scope.is_some() { "" } else { SAMPLE };
+        let draft = Draft::plain(initial).expect("bounded sample");
         let session = Rc::new(RefCell::new(Session::new(draft.clone())));
         let input = cx.new(|cx| {
             let mut input = EditorState::new(window, cx)
@@ -291,7 +313,7 @@ impl Composer {
                 .searchable(false)
                 .soft_wrap(true)
                 .context_menu(false)
-                .default_value(SAMPLE);
+                .default_value(initial);
             let session = session.clone();
             input.set_highlighter_factory(
                 Rc::new(move |_| {
@@ -329,6 +351,7 @@ impl Composer {
             .map(|_| cx.new(|cx| InputState::new(window, cx)))
             .collect();
         let mut this = Self {
+            account_scope,
             header_inputs,
             header_values: Default::default(),
             header_subscriptions: vec![],
@@ -384,7 +407,11 @@ impl Composer {
 
     fn load_store(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let store = crate::lifecycle::storage(cx);
-        let request = store.open_editor(self.session.borrow().draft.clone());
+        let request = if let Some((account, _)) = &self.account_scope {
+            store.open_account_editor(account.clone())
+        } else {
+            store.open_editor(self.session.borrow().draft.clone())
+        };
         let task = cx
             .background_executor()
             .spawn(async move { receive(request).map(|draft| (store, draft)) });
@@ -403,7 +430,7 @@ impl Composer {
                         this.restore_fields(window, cx);
                         this.saved = Some(0);
                         this.sync_input(window, cx);
-                        this.status = "已恢复本地草稿 · 不关联真实邮箱".into();
+                        this.status = "已恢复草稿 · 本轮不发送邮件".into();
                         this.refresh_drafts(cx);
                     }
                     Err(e) => this.status = format!("自动保存不可用，原文件未改动：{e}"),
@@ -415,7 +442,12 @@ impl Composer {
     }
 
     fn refresh_drafts(&mut self, cx: &mut Context<Self>) {
-        let request = crate::lifecycle::storage(cx).list();
+        let store = crate::lifecycle::storage(cx);
+        let request = if let Some((account, _)) = &self.account_scope {
+            store.account_drafts(account.clone())
+        } else {
+            store.list()
+        };
         let task = cx
             .background_executor()
             .spawn(async move { receive(request) });
@@ -448,9 +480,17 @@ impl Composer {
         }
         let client = crate::lifecycle::storage(cx);
         let request = if let Some(index) = index {
-            client.select(self.drafts[index].id.clone())
+            if let Some((account, _)) = &self.account_scope {
+                client.select_account_draft(account.clone(), self.drafts[index].id.clone())
+            } else {
+                client.select(self.drafts[index].id.clone())
+            }
         } else {
-            client.new_draft(Draft::plain("").expect("empty draft"))
+            if let Some((account, _)) = &self.account_scope {
+                client.new_account_draft(account.clone())
+            } else {
+                client.new_draft(Draft::plain("").expect("empty draft"))
+            }
         };
         self.loading = true;
         self.input
@@ -490,7 +530,7 @@ impl Composer {
             .gap_2()
             .child(
                 MaterialButton::new("new-local-draft")
-                    .child("新建本地草稿")
+                    .child("新建草稿")
                     .disabled(self.loading || self.saving || self.closing || self.importing)
                     .on_click(cx.listener(|this, _, w, cx| this.switch_draft(None, w, cx))),
             )
@@ -902,10 +942,11 @@ impl Render for Composer {
             }
         })).size_full().child(TextSelectionLayer).flex().flex_col().gap_3().p_4()
             .bg(theme::color(ColorRole::SURFACE)).text_color(theme::color(ColorRole::ON_SURFACE))
-            .child(div().text_size(px(22.)).child("QingMail · 本地写信草稿"))
+            .child(div().text_size(px(22.)).child("QingMail · 写信草稿"))
             .child(div().text_size(px(13.)).child("选中后设置格式；Ctrl+B / I、Ctrl+Z / Shift+Z、Ctrl+S。收件人填写独立邮箱地址，以逗号或分号分隔。"))
             .child(toolbar)
             .child(self.draft_toolbar(cx))
+            .child(div().text_size(px(14.)).child(self.account_scope.as_ref().map(|(_,address)| format!("发件账号：{address} · 草稿仅本地保存")).unwrap_or_else(||"未关联发件账号 · 本地草稿".into())))
             .child(self.fields_toolbar(cx))
             .child(TextField::new("link-url", &self.link))
             .child(div().flex().gap_4().flex_1().min_h_0()
@@ -922,7 +963,7 @@ impl Render for Composer {
                     .child(div().id("draft-preview").flex_1().min_h_0().overflow_y_scroll().p_3()
                         .child(TextView::new(&self.preview).font_family(self.font_family.clone()).on_link_click(|_, _, _, _| {})))))
             .child(div().text_size(px(13.)).child(format!("{state} · {}", self.status)))
-            .child(div().text_size(px(12.)).child("本地草稿尚未关联发件账号，不会发送。附件最多32个，总计25MiB。关闭重开恢复最后确认版本。粘贴仅纯文本。"))
+            .child(div().text_size(px(12.)).child("草稿保存在本机，本轮不会发送或上传远端草稿。附件最多32个，总计25MiB。关闭重开恢复最后确认版本。粘贴仅纯文本。"))
     }
 }
 

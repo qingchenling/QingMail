@@ -143,14 +143,18 @@ pub(super) fn open_main(cx: &mut App) {
         }
     }
 }
-pub(super) fn reuse_editor(cx: &mut App) -> bool {
-    let window = cx
+pub(super) fn reuse_editor(account: Option<&mail_core::AccountId>, cx: &mut App) -> bool {
+    let existing = cx
         .global::<Lifecycle>()
         .editors
         .iter()
         .find(|e| live(e.window, cx))
-        .map(|e| e.window);
-    window.is_some_and(|window| activate(window, cx))
+        .map(|e| (e.window, e.entity.clone()));
+    if let Some((window, entity)) = existing {
+        let _ = entity.update(cx, |this, cx| this.explain_scope(account, cx));
+        return activate(window, cx);
+    }
+    false
 }
 pub(super) fn register_editor(window: AnyWindowHandle, entity: WeakEntity<Composer>, cx: &mut App) {
     cx.global_mut::<Lifecycle>()

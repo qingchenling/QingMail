@@ -549,8 +549,15 @@ impl Render for Mailbox {
             .child(div().p_3().child("QingMail"));
         tree = tree.child(
             MaterialButton::new("mailbox-compose")
-                .child("写信 / 本地草稿")
-                .on_click(|_, _, cx| cx.defer(crate::composer::open)),
+                .child("写信 / 当前账号草稿")
+                .disabled(self.account.is_none())
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if let Some((account, settings)) = this.account.clone() {
+                        cx.defer(move |cx| {
+                            crate::composer::open_account(account, settings.address, cx)
+                        });
+                    }
+                })),
         );
         tree = tree.child(
             MaterialButton::new("mailbox-account-settings")
