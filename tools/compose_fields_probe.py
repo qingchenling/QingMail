@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """集中验证原生写信字段/正文/附件保存，以及删除源文件后的跨进程恢复。"""
+import argparse
 import hashlib
 import json
 import os
@@ -9,7 +10,9 @@ import subprocess
 import tempfile
 
 repo = Path(__file__).resolve().parents[1]
-evidence = repo / 'docs/reports/evidence/P2-007-compose.json'
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--evidence', type=Path, default=repo / 'docs/reports/evidence/P2-007-compose.json')
+evidence = parser.parse_args().evidence
 with tempfile.TemporaryDirectory(prefix='qingmail-compose-') as directory:
     root = Path(directory)
     root.chmod(0o700)

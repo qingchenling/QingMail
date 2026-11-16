@@ -85,7 +85,7 @@ impl Composer {
         .detach();
     }
     fn add_attachment(&mut self, cx: &mut Context<Self>) {
-        if self.loading || self.closing || self.importing {
+        if self.loading || self.closing || self.importing || self.send_locked() {
             return;
         }
         let Some(draft) = self.stored.as_ref() else {
@@ -155,7 +155,7 @@ impl Composer {
         cx.notify();
     }
     pub(super) fn fields_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let disabled = self.loading || self.closing || self.store.is_none();
+        let disabled = self.loading || self.closing || self.store.is_none() || self.send_locked();
         let mut fields = div().flex().flex_col().gap_1();
         for (index, label) in ["收件人", "抄送", "密送", "主题"].into_iter().enumerate() {
             fields = fields.child(

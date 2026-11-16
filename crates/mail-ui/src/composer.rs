@@ -1,4 +1,4 @@
-//! 原生本地写信草稿；不连接邮箱，不发送邮件。
+//! 原生写信与明确发送确认；后台持久任务禁止自动重发。
 use gpui_kit::{
     App, Bounds, Context, Entity, EntityInputHandler, FontStyle, FontWeight, HighlightStyle,
     KeyDownEvent, Render, SharedString, Subscription, TitlebarOptions, UnderlineStyle, Window,
@@ -29,6 +29,8 @@ use std::{
 mod fields;
 #[path = "composer_probe.rs"]
 mod probe;
+#[path = "composer_send.rs"]
+mod send;
 
 const SAMPLE: &str = "你好，QingMail！\n选中这段中文，测试粗体、斜体和链接。🙂\n第一项\n这是一段引用。\n凌晨 · QingMail";
 
@@ -251,6 +253,11 @@ fn open_scoped(account: Option<(mail_core::AccountId, String)>, cx: &mut App) {
 }
 
 pub(super) struct Composer {
+    checking_send: bool,
+    sending: bool,
+    send_review: Option<(mail_daemon::sending::SendReview, u64)>,
+    send_tasks: Vec<mail_storage::SendTask>,
+    send_tasks_generation: u64,
     account_scope: Option<(mail_core::AccountId, String)>,
     header_inputs: Vec<Entity<InputState>>,
     header_values: [String; 4],
@@ -351,6 +358,11 @@ impl Composer {
             .map(|_| cx.new(|cx| InputState::new(window, cx)))
             .collect();
         let mut this = Self {
+            checking_send: false,
+            sending: false,
+            send_review: None,
+            send_tasks: vec![],
+            send_tasks_generation: 0,
             account_scope,
             header_inputs,
             header_values: Default::default(),
@@ -430,8 +442,9 @@ impl Composer {
                         this.restore_fields(window, cx);
                         this.saved = Some(0);
                         this.sync_input(window, cx);
-                        this.status = "已恢复草稿 · 本轮不发送邮件".into();
+                        this.status = "已恢复草稿 · 检查并确认后才发送".into();
                         this.refresh_drafts(cx);
+                        this.refresh_send_tasks(cx);
                     }
                     Err(e) => this.status = format!("自动保存不可用，原文件未改动：{e}"),
                 }
@@ -469,6 +482,7 @@ impl Composer {
             || self.saving
             || self.closing
             || self.importing
+            || self.send_locked()
             || self.composing(window, cx)
         {
             return;
@@ -512,6 +526,7 @@ impl Composer {
                         this.sync_input(window, cx);
                         this.status = "已打开本地草稿".into();
                         this.refresh_drafts(cx);
+                        this.refresh_send_tasks(cx);
                     }
                     Err(e) => this.status = format!("切换失败，当前内容保留：{e}"),
                 }
@@ -531,7 +546,13 @@ impl Composer {
             .child(
                 MaterialButton::new("new-local-draft")
                     .child("新建草稿")
-                    .disabled(self.loading || self.saving || self.closing || self.importing)
+                    .disabled(
+                        self.loading
+                            || self.saving
+                            || self.closing
+                            || self.importing
+                            || self.send_locked(),
+                    )
                     .on_click(cx.listener(|this, _, w, cx| this.switch_draft(None, w, cx))),
             )
             .child(
@@ -560,7 +581,13 @@ impl Composer {
             row = row.child(
                 MaterialButton::new(("local-draft", index))
                     .child(label)
-                    .disabled(self.loading || self.saving || self.closing || self.importing)
+                    .disabled(
+                        self.loading
+                            || self.saving
+                            || self.closing
+                            || self.importing
+                            || self.send_locked(),
+                    )
                     .on_click(
                         cx.listener(move |this, _, w, cx| this.switch_draft(Some(index), w, cx)),
                     ),
@@ -682,6 +709,8 @@ impl Composer {
             cx.notify();
             return Err(self.status.clone());
         }
+        // 关闭不会撤回已确认发送；预览尚未确认时只丢弃预览。
+        self.send_review = None;
         self.closing = true;
         self.input
             .update(cx, |input, cx| input.set_readonly(true, cx));
@@ -694,11 +723,15 @@ impl Composer {
             return;
         }
         if !self.closing && self.store.is_some() {
+            let locked = self.send_locked();
             self.input
-                .update(cx, |input, cx| input.set_readonly(false, cx));
+                .update(cx, |input, cx| input.set_readonly(locked, cx));
         }
         if probe::enabled() {
             self.probe(window, cx);
+        }
+        if std::env::args().any(|a| a == "--send-review-probe") {
+            self.send_probe(window, cx);
         }
         if self.composing(window, cx) {
             return;
@@ -774,7 +807,12 @@ impl Composer {
     }
 
     fn format(&mut self, command: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if self.loading || self.closing || self.store.is_none() || self.composing(window, cx) {
+        if self.loading
+            || self.closing
+            || self.send_locked()
+            || self.store.is_none()
+            || self.composing(window, cx)
+        {
             self.status = "请先完成中文候选词输入".into();
             cx.notify();
             return;
@@ -836,7 +874,12 @@ impl Composer {
         cx.notify();
     }
     fn history(&mut self, redo: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.loading || self.closing || self.store.is_none() || self.composing(window, cx) {
+        if self.loading
+            || self.closing
+            || self.send_locked()
+            || self.store.is_none()
+            || self.composing(window, cx)
+        {
             return;
         }
         let current = self.input.read(cx).selected_range();
@@ -935,6 +978,11 @@ impl Render for Composer {
             "有未保存修改"
         };
         div().capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+            if event.keystroke.modifiers.control && !event.keystroke.modifiers.alt && event.keystroke.key == "enter" {
+                this.check_send(window,cx);
+                cx.stop_propagation();
+                window.prevent_default();
+            }
             if event.keystroke.modifiers.control && !event.keystroke.modifiers.alt && event.keystroke.key == "s" {
                 if !this.composing(window, cx) { this.save(cx); }
                 cx.stop_propagation();
@@ -948,6 +996,7 @@ impl Render for Composer {
             .child(self.draft_toolbar(cx))
             .child(div().text_size(px(14.)).child(self.account_scope.as_ref().map(|(_,address)| format!("发件账号：{address} · 草稿仅本地保存")).unwrap_or_else(||"未关联发件账号 · 本地草稿".into())))
             .child(self.fields_toolbar(cx))
+            .child(self.send_toolbar(cx))
             .child(TextField::new("link-url", &self.link))
             .child(div().flex().gap_4().flex_1().min_h_0()
                 .child(div().flex().flex_col().gap_2().flex_1().min_w_0()
@@ -963,7 +1012,7 @@ impl Render for Composer {
                     .child(div().id("draft-preview").flex_1().min_h_0().overflow_y_scroll().p_3()
                         .child(TextView::new(&self.preview).font_family(self.font_family.clone()).on_link_click(|_, _, _, _| {})))))
             .child(div().text_size(px(13.)).child(format!("{state} · {}", self.status)))
-            .child(div().text_size(px(12.)).child("草稿保存在本机，本轮不会发送或上传远端草稿。附件最多32个，总计25MiB。关闭重开恢复最后确认版本。粘贴仅纯文本。"))
+            .child(div().text_size(px(12.)).child("草稿保存在本机；只有确认发送才提交，不自动重发。附件最多32个，总计25MiB。关闭重开恢复最后确认版本。粘贴仅纯文本。"))
     }
 }
 

@@ -331,7 +331,7 @@ fn main() {
     } else if args.iter().any(|arg| {
         matches!(
             arg.as_str(),
-            "--mailbox" | "--mailbox-probe" | "--body-probe"
+            "--mailbox" | "--mailbox-probe" | "--body-probe" | "--send-review-probe"
         )
     }) {
         Command::Mailbox
@@ -374,7 +374,7 @@ fn main() {
     if args.iter().any(|arg| {
         matches!(
             arg.as_str(),
-            "--accounts-probe" | "--mailbox-probe" | "--body-probe"
+            "--accounts-probe" | "--mailbox-probe" | "--body-probe" | "--send-review-probe"
         )
     }) && (std::env::var_os("QINGMAIL_P0_RUNTIME_ROOT").is_none()
         || std::env::var_os("QINGMAIL_P0_DRAFT_ROOT").is_none())

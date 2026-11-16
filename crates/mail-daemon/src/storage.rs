@@ -101,6 +101,25 @@ enum Request {
         raw: Vec<u8>,
         reply: SyncSender<StorageResult<()>>,
     },
+    ReviewSend {
+        draft: Box<StoredDraft>,
+        reply: SyncSender<StorageResult<crate::sending::SendReview>>,
+    },
+    BeginSend {
+        review: crate::sending::SendReview,
+        allow_empty_subject: bool,
+        reply: SyncSender<StorageResult<crate::sending::ReadySend>>,
+    },
+    FinishSend {
+        attempt: mail_storage::SmtpAttempt,
+        outcome: mail_core::SmtpOutcome,
+        reply: SyncSender<StorageResult<mail_storage::SendTask>>,
+    },
+    DraftTasks {
+        account: AccountId,
+        id: mail_core::DraftId,
+        reply: SyncSender<StorageResult<Vec<mail_storage::SendTask>>>,
+    },
     Stop,
 }
 
@@ -239,6 +258,44 @@ impl StorageClient {
             body,
             reply,
         })
+    }
+    pub fn review_send(
+        &self,
+        draft: StoredDraft,
+    ) -> StorageResult<Receiver<StorageResult<crate::sending::SendReview>>> {
+        self.request(|reply| Request::ReviewSend {
+            draft: Box::new(draft),
+            reply,
+        })
+    }
+    pub(crate) fn begin_send(
+        &self,
+        review: crate::sending::SendReview,
+        allow_empty_subject: bool,
+    ) -> StorageResult<Receiver<StorageResult<crate::sending::ReadySend>>> {
+        self.request(|reply| Request::BeginSend {
+            review,
+            allow_empty_subject,
+            reply,
+        })
+    }
+    pub(crate) fn finish_send(
+        &self,
+        attempt: mail_storage::SmtpAttempt,
+        outcome: mail_core::SmtpOutcome,
+    ) -> StorageResult<Receiver<StorageResult<mail_storage::SendTask>>> {
+        self.request(|reply| Request::FinishSend {
+            attempt,
+            outcome,
+            reply,
+        })
+    }
+    pub fn draft_tasks(
+        &self,
+        account: AccountId,
+        id: mail_core::DraftId,
+    ) -> StorageResult<Receiver<StorageResult<Vec<mail_storage::SendTask>>>> {
+        self.request(|reply| Request::DraftTasks { account, id, reply })
     }
     pub fn open_account_editor(
         &self,
@@ -542,6 +599,36 @@ fn run(path: Option<PathBuf>, receiver: Receiver<Request>) {
                     s.save_message_body(&location, &raw)
                         .map_err(|e| e.to_string())
                 }));
+            }
+            Request::ReviewSend { draft, reply } => {
+                let _ = reply.send(opened.and_then(|s| crate::sending::review(s, &draft)));
+            }
+            Request::BeginSend {
+                review,
+                allow_empty_subject,
+                reply,
+            } => {
+                let _ = reply.send(
+                    opened.and_then(|s| crate::sending::begin(s, review, allow_empty_subject)),
+                );
+            }
+            Request::FinishSend {
+                attempt,
+                outcome,
+                reply,
+            } => {
+                let _ = reply.send(opened.and_then(|s| {
+                    let id = attempt.task().clone();
+                    // account从许可内的持久任务定位，不能接受UI提供的另一个账号。
+                    let account = attempt.account().clone();
+                    s.finish_smtp(attempt, outcome).map_err(|e| e.to_string())?;
+                    s.task(&account, &id).map_err(|e| e.to_string())
+                }));
+            }
+            Request::DraftTasks { account, id, reply } => {
+                let _ = reply.send(
+                    opened.and_then(|s| s.draft_tasks(&account, &id).map_err(|e| e.to_string())),
+                );
             }
             Request::Stop => break,
         }
