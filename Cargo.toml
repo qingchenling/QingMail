@@ -32,6 +32,9 @@ gpui-kit-material = { version = "=0.1.4", default-features = false, features = [
     "serde",
     "embedded-symbols",
 ] }
+# 性能 HUD：帧率、帧耗时、GPU/CPU/内存。与 gpui-kit 同步升级以保证
+# gpui-pre 快照一致。
+gpui-fps = "=0.9.1"
 
 [profile.release]
 lto = "thin"
