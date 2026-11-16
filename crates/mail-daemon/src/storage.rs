@@ -9,6 +9,7 @@ use std::{
 };
 
 pub type StorageResult<T> = Result<T, String>;
+pub type CatalogCache = (Vec<mail_core::RemoteFolder>, Option<i64>);
 pub type AccountList = Vec<(AccountId, mail_core::AccountSettings)>;
 
 #[derive(Clone)]
@@ -49,6 +50,28 @@ enum Request {
     },
     Accounts {
         reply: SyncSender<StorageResult<AccountList>>,
+    },
+    Catalog {
+        account: AccountId,
+        reply: SyncSender<StorageResult<CatalogCache>>,
+    },
+    FolderCache {
+        account: AccountId,
+        name: String,
+        before: Option<u32>,
+        reply: SyncSender<StorageResult<Option<mail_core::FolderCache>>>,
+    },
+    PublishCatalog {
+        account: AccountId,
+        folders: Vec<mail_core::RemoteFolder>,
+        now: i64,
+        reply: SyncSender<StorageResult<()>>,
+    },
+    PublishFolder {
+        account: AccountId,
+        batch: mail_core::FolderBatch,
+        now: i64,
+        reply: SyncSender<StorageResult<()>>,
     },
     Stop,
 }
@@ -105,6 +128,51 @@ impl StorageClient {
     }
     pub fn accounts(&self) -> StorageResult<Receiver<StorageResult<AccountList>>> {
         self.request(|reply| Request::Accounts { reply })
+    }
+    pub fn catalog(
+        &self,
+        account: AccountId,
+    ) -> StorageResult<Receiver<StorageResult<CatalogCache>>> {
+        self.request(|reply| Request::Catalog { account, reply })
+    }
+    pub fn folder_cache(
+        &self,
+        account: AccountId,
+        name: String,
+        before: Option<u32>,
+    ) -> StorageResult<Receiver<StorageResult<Option<mail_core::FolderCache>>>> {
+        self.request(|reply| Request::FolderCache {
+            account,
+            name,
+            before,
+            reply,
+        })
+    }
+    pub fn publish_catalog(
+        &self,
+        account: AccountId,
+        folders: Vec<mail_core::RemoteFolder>,
+        now: i64,
+    ) -> StorageResult<Receiver<StorageResult<()>>> {
+        self.request(|reply| Request::PublishCatalog {
+            account,
+            folders,
+            now,
+            reply,
+        })
+    }
+    pub fn publish_folder(
+        &self,
+        account: AccountId,
+        batch: mail_core::FolderBatch,
+        now: i64,
+    ) -> StorageResult<Receiver<StorageResult<()>>> {
+        self.request(|reply| Request::PublishFolder {
+            account,
+            batch,
+            now,
+            reply,
+        })
     }
     pub fn open_editor(
         &self,
@@ -223,6 +291,47 @@ fn run(path: Option<PathBuf>, receiver: Receiver<Request>) {
                     )
                 }));
             }
+            Request::Catalog { account, reply } => {
+                let _ = reply.send(opened.and_then(|s| {
+                    Ok((
+                        s.remote_folders(&account).map_err(|e| e.to_string())?,
+                        s.catalog_synced_at(&account).map_err(|e| e.to_string())?,
+                    ))
+                }));
+            }
+            Request::FolderCache {
+                account,
+                name,
+                before,
+                reply,
+            } => {
+                let _ = reply.send(opened.and_then(|s| {
+                    s.folder_cache(&account, &name, before)
+                        .map_err(|e| e.to_string())
+                }));
+            }
+            Request::PublishCatalog {
+                account,
+                folders,
+                now,
+                reply,
+            } => {
+                let _ = reply.send(opened.and_then(|s| {
+                    s.replace_remote_folders(&account, &folders, now)
+                        .map_err(|e| e.to_string())
+                }));
+            }
+            Request::PublishFolder {
+                account,
+                batch,
+                now,
+                reply,
+            } => {
+                let _ = reply.send(opened.and_then(|s| {
+                    s.apply_folder_batch(&account, &batch, now)
+                        .map_err(|e| e.to_string())
+                }));
+            }
             Request::Stop => break,
         }
     }
@@ -297,6 +406,69 @@ mod tests {
             )
             .unwrap(),
             update
+        );
+        worker.stop();
+    }
+
+    #[test]
+    fn catalog_queue_reads_published_cache_and_rejects_unknown_accounts() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("data");
+        let account = {
+            let mut store = Store::open(&path).unwrap();
+            let server = mail_core::ServerSettings {
+                host: "example.invalid".into(),
+                port: 993,
+                username: "synthetic".into(),
+                security: mail_core::ConnectionSecurity::Tls,
+            };
+            store
+                .create_account(&mail_core::AccountSettings {
+                    display_name: "synthetic".into(),
+                    address: "synthetic@example.invalid".into(),
+                    imap: server.clone(),
+                    smtp: server,
+                })
+                .unwrap()
+        };
+        let mut worker = StorageWorker::start(Some(path.clone())).unwrap();
+        let client = worker.client();
+        let folders = vec![mail_core::RemoteFolder {
+            name: "INBOX".into(),
+            display_name: "收件箱".into(),
+            delimiter: None,
+            selectable: true,
+        }];
+        receive(client.publish_catalog(account.clone(), folders.clone(), 1)).unwrap();
+        assert_eq!(
+            receive(client.catalog(account.clone())).unwrap(),
+            (folders, Some(1))
+        );
+        let batch = mail_core::FolderBatch {
+            remote_name: "INBOX".into(),
+            uidvalidity: 42,
+            since: 0,
+            has_more: false,
+            messages: vec![(
+                7,
+                mail_core::MessageEnvelope {
+                    subject: "后台同步".into(),
+                    sender: "test".into(),
+                    received_at: 1,
+                },
+            )],
+        };
+        receive(client.publish_folder(account.clone(), batch, 2)).unwrap();
+        let cache = receive(client.folder_cache(account.clone(), "INBOX".into(), None))
+            .unwrap()
+            .unwrap();
+        assert_eq!(cache.messages[0].location.uid, 7);
+        assert!(receive(client.publish_catalog(AccountId("missing".into()), vec![], 3)).is_err());
+        worker.stop();
+        let mut worker = StorageWorker::start(Some(path)).unwrap();
+        assert_eq!(
+            receive(worker.client().folder_cache(account, "INBOX".into(), None)).unwrap(),
+            Some(cache)
         );
         worker.stop();
     }

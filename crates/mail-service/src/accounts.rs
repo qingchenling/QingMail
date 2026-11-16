@@ -17,6 +17,7 @@ pub enum CheckError {
     Authentication,
     Protocol,
     Limit,
+    EpochChanged,
 }
 impl fmt::Display for CheckError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -29,17 +30,11 @@ impl fmt::Display for CheckError {
             Self::Authentication => "认证失败，请检查用户名及应用专用密码",
             Self::Protocol => "服务器协议响应不符合预期",
             Self::Limit => "服务器响应超过检查上限",
+            Self::EpochChanged => "文件夹 UIDVALIDITY 已变化，请先同步最新邮件",
         })
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RemoteFolder {
-    /// 原始协议名称，后续命令必须使用此值。
-    pub name: String,
-    pub display_name: String,
-    pub delimiter: Option<String>,
-    pub selectable: bool,
-}
+pub use mail_core::RemoteFolder;
 #[derive(Debug)]
 pub struct AccountCheck {
     pub imap: Result<Vec<RemoteFolder>, CheckError>,
@@ -95,7 +90,7 @@ pub fn check(settings: &AccountSettings, credentials: &Credentials) -> AccountCh
         smtp: check_smtp(&settings.smtp, &credentials.smtp),
     }
 }
-fn io_error(e: io::Error) -> CheckError {
+pub(crate) fn io_error(e: io::Error) -> CheckError {
     if matches!(
         e.kind(),
         io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
@@ -107,7 +102,7 @@ fn io_error(e: io::Error) -> CheckError {
         CheckError::Connect
     }
 }
-struct Bounded<T> {
+pub(crate) struct Bounded<T> {
     stream: T,
     remaining: usize,
     deadline: Instant,
@@ -183,6 +178,24 @@ fn check_imap_with_connector(
     password: &str,
     connector: &native_tls::TlsConnector,
 ) -> Result<Vec<RemoteFolder>, CheckError> {
+    let mut stream = authenticated(server, password, connector)?;
+    stream
+        .get_mut()
+        .write_all(b"QM3 LIST \"\" \"*\"\r\n")
+        .map_err(io_error)?;
+    stream.get_mut().flush().map_err(io_error)?;
+    let folders = imap_done(&mut stream, "QM3", false, true)?;
+    // 检查已完成。LOGOUT 不改变邮箱；服务端拒绝/断开不使已完成检查失效。
+    let _ = stream.get_mut().write_all(b"QM4 LOGOUT\r\n");
+    let _ = stream.get_mut().flush();
+    Ok(folders)
+}
+pub(crate) type ImapStream = BufReader<Bounded<native_tls::TlsStream<TcpStream>>>;
+pub(crate) fn authenticated(
+    server: &ServerSettings,
+    password: &str,
+    connector: &native_tls::TlsConnector,
+) -> Result<ImapStream, CheckError> {
     let socket = connect(server)?;
     let mut stream = Bounded::new(socket);
     if server.security == ConnectionSecurity::StartTls {
@@ -212,18 +225,9 @@ fn check_imap_with_connector(
     stream.get_mut().flush().map_err(io_error)?;
     drop(login);
     imap_done(&mut stream, "QM2", true, false)?;
-    stream
-        .get_mut()
-        .write_all(b"QM3 LIST \"\" \"*\"\r\n")
-        .map_err(io_error)?;
-    stream.get_mut().flush().map_err(io_error)?;
-    let folders = imap_done(&mut stream, "QM3", false, true)?;
-    // 检查已完成。LOGOUT 不改变邮箱；服务端拒绝/断开不使已完成检查失效。
-    let _ = stream.get_mut().write_all(b"QM4 LOGOUT\r\n");
-    let _ = stream.get_mut().flush();
-    Ok(folders)
+    Ok(stream)
 }
-fn quoted(output: &mut Vec<u8>, text: &str) {
+pub(crate) fn quoted(output: &mut Vec<u8>, text: &str) {
     output.push(b'"');
     for byte in text.bytes() {
         if matches!(byte, b'"' | b'\\') {
@@ -233,7 +237,15 @@ fn quoted(output: &mut Vec<u8>, text: &str) {
     }
     output.push(b'"');
 }
-fn imap_response(stream: &mut impl BufRead) -> Result<imap_proto::Response<'static>, CheckError> {
+pub(crate) fn imap_response(
+    stream: &mut impl BufRead,
+) -> Result<imap_proto::Response<'static>, CheckError> {
+    response(stream, false)
+}
+pub(crate) fn response(
+    stream: &mut impl BufRead,
+    sync: bool,
+) -> Result<imap_proto::Response<'static>, CheckError> {
     let mut bytes = Vec::new();
     loop {
         if stream.read_until(b'\n', &mut bytes).map_err(io_error)? == 0 {
@@ -244,7 +256,8 @@ fn imap_response(stream: &mut impl BufRead) -> Result<imap_proto::Response<'stat
         }
         // 接入检查不接受 FETCH 等复杂消息结构；限制解析面及嵌套风险。
         let prefix = bytes[..bytes.len().min(16)].to_ascii_uppercase();
-        if prefix.starts_with(b"* ")
+        if !sync
+            && prefix.starts_with(b"* ")
             && ![
                 &b"* OK"[..],
                 b"* NO",
@@ -258,6 +271,9 @@ fn imap_response(stream: &mut impl BufRead) -> Result<imap_proto::Response<'stat
         {
             return Err(CheckError::Protocol);
         }
+        if sync {
+            crate::sync::guard_response(&bytes)?;
+        }
         match imap_proto::Response::parse(&bytes) {
             Ok(([], response)) => return Ok(response.into_owned()),
             Err(nom::Err::Incomplete(_)) => continue,
@@ -265,7 +281,7 @@ fn imap_response(stream: &mut impl BufRead) -> Result<imap_proto::Response<'stat
         }
     }
 }
-fn imap_done(
+pub(crate) fn imap_done(
     stream: &mut impl BufRead,
     tag: &str,
     authentication: bool,
@@ -313,7 +329,7 @@ fn imap_done(
 }
 
 /// RFC 3501 modified UTF-7；显示解码不改变服务端文件夹标识。
-fn folder_label(raw: &str) -> String {
+pub fn folder_label(raw: &str) -> String {
     use base64::{Engine, engine::general_purpose::STANDARD};
     let decode = || -> Option<String> {
         let mut result = String::new();
@@ -457,4 +473,4 @@ fn bounded_line(stream: &mut impl Read) -> Result<Vec<u8>, CheckError> {
 
 #[cfg(test)]
 #[path = "accounts_tests.rs"]
-mod tests;
+pub(crate) mod tests;

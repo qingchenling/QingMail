@@ -25,13 +25,13 @@ with tempfile.TemporaryDirectory(prefix='qingmail-p2-editor-') as directory:
     assert 'QINGMAIL_EDITOR_PROBE: PASS' in log_text, log_text
     data = root / 'p2-editor-probe'
     with sqlite3.connect(f'file:{data / "state.sqlite3"}?mode=ro', uri=True) as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0] == 3
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 4
         row = db.execute('SELECT d.revision,d.body_id,a.kind FROM drafts d JOIN accounts a ON a.id=d.account_id JOIN local_editor e ON e.draft_id=d.id').fetchone()
         assert row[2] == 'local'
         assert db.execute('SELECT count(*) FROM send_tasks').fetchone()[0] == 0
     draft = json.loads((data / 'objects' / row[1]).read_text())
     assert draft['text'].endswith('后台保存期间输入')
-    evidence = dict(passed=True, schema=3, revision=row[0], local_only=True, sends=0,
+    evidence = dict(passed=True, schema=4, revision=row[0], local_only=True, sends=0,
                     checks=['native IME/emoji/format/history probe',
                             'input remains usable before delayed save acknowledgement',
                             'SQLite-backed body equals latest native editor document'])

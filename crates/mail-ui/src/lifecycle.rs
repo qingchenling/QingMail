@@ -20,6 +20,7 @@ struct Editor {
 pub(super) struct Lifecycle {
     main: Option<AnyWindowHandle>,
     reader: Option<AnyWindowHandle>,
+    mailbox: Option<AnyWindowHandle>,
     accounts: Option<(AnyWindowHandle, WeakEntity<crate::accounts::Accounts>)>,
     editors: Vec<Editor>,
     worker: Background,
@@ -66,6 +67,7 @@ pub(super) fn start(instance: Option<Instance>, cx: &mut App) -> Result<(), Stri
     cx.set_global(Lifecycle {
         main: None,
         reader: None,
+        mailbox: None,
         accounts: None,
         editors: vec![],
         worker,
@@ -180,6 +182,14 @@ pub(super) fn register_accounts(
     cx.global_mut::<Lifecycle>().accounts = Some((window, entity));
 }
 
+pub(super) fn reuse_mailbox(cx: &mut App) -> bool {
+    let window = cx.global::<Lifecycle>().mailbox;
+    window.is_some_and(|window| activate(window, cx))
+}
+pub(super) fn register_mailbox(window: AnyWindowHandle, cx: &mut App) {
+    cx.global_mut::<Lifecycle>().mailbox = Some(window);
+}
+
 pub(super) fn storage(cx: &App) -> mail_daemon::storage::StorageClient {
     cx.global::<Lifecycle>().storage.client()
 }
@@ -225,6 +235,7 @@ fn tick(cx: &mut App) {
                         Command::Editor => composer::open(cx),
                         Command::Reader => reader::open(cx),
                         Command::Accounts => crate::accounts::open(cx),
+                        Command::Mailbox => crate::mailbox::open(cx),
                         _ => {
                             let _ = queue;
                         }

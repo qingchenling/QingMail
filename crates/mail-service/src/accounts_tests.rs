@@ -16,7 +16,7 @@ use std::{
     thread,
 };
 
-fn certificate() -> (Vec<u8>, Vec<u8>) {
+pub(crate) fn certificate() -> (Vec<u8>, Vec<u8>) {
     let key = PKey::from_rsa(Rsa::generate(2048).unwrap()).unwrap();
     let mut name = X509NameBuilder::new().unwrap();
     name.append_entry_by_text("CN", "localhost").unwrap();
@@ -45,10 +45,10 @@ fn certificate() -> (Vec<u8>, Vec<u8>) {
         key.private_key_to_pem_pkcs8().unwrap(),
     )
 }
-fn listener() -> TcpListener {
+pub(crate) fn listener() -> TcpListener {
     TcpListener::bind("127.0.0.1:0").unwrap()
 }
-fn server(l: &TcpListener, security: ConnectionSecurity) -> ServerSettings {
+pub(crate) fn server(l: &TcpListener, security: ConnectionSecurity) -> ServerSettings {
     ServerSettings {
         host: "localhost".into(),
         port: l.local_addr().unwrap().port(),
@@ -56,18 +56,18 @@ fn server(l: &TcpListener, security: ConnectionSecurity) -> ServerSettings {
         security,
     }
 }
-fn socket(l: TcpListener) -> TcpStream {
+pub(crate) fn socket(l: TcpListener) -> TcpStream {
     let (s, _) = l.accept().unwrap();
     s.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
     s.set_write_timeout(Some(Duration::from_secs(3))).unwrap();
     s
 }
-fn line(r: &mut impl BufRead) -> String {
+pub(crate) fn line(r: &mut impl BufRead) -> String {
     let mut s = String::new();
     r.read_line(&mut s).unwrap();
     s
 }
-fn acceptor(cert: &[u8], key: &[u8]) -> native_tls::TlsAcceptor {
+pub(crate) fn acceptor(cert: &[u8], key: &[u8]) -> native_tls::TlsAcceptor {
     native_tls::TlsAcceptor::new(native_tls::Identity::from_pkcs8(cert, key).unwrap()).unwrap()
 }
 #[test]
