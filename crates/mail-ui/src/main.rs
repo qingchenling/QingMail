@@ -12,6 +12,7 @@ use gpui_kit_material::prelude::*;
 use gpui_kit_material::theme;
 
 mod composer;
+mod lifecycle;
 mod perf_probe;
 mod reader;
 
@@ -208,6 +209,11 @@ impl Render for Home {
                             .child("编辑验证")
                             .on_click(|_, _, cx| composer::open(cx)),
                     )
+                    .child(
+                        MaterialButton::new("quit-app")
+                            .child("保存并退出")
+                            .on_click(|_, _, cx| lifecycle::quit(cx)),
+                    )
                     .child(menu_popup)
                     .child(theme_button),
             );
@@ -251,7 +257,8 @@ impl Render for Home {
             .py_2()
             .text_size(px(12.0))
             .text_color(theme::color(ColorRole::ON_SURFACE_VARIANT))
-            .child(selected_note);
+            .child(selected_note)
+            .child(div().child(lifecycle::note(cx)));
 
         div()
             .relative()
@@ -276,42 +283,104 @@ impl Render for Home {
     }
 }
 
+fn open_home(cx: &mut App) -> Result<gpui_kit::AnyWindowHandle, String> {
+    let bounds = Bounds::centered(None, size(px(960.0), px(680.0)), cx);
+    let options = WindowOptions {
+        low_power_frame_interval: if perf_probe::unthrottled() {
+            None
+        } else {
+            WindowOptions::default().low_power_frame_interval
+        },
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        titlebar: Some(TitlebarOptions {
+            title: Some("QingMail — P0 交互验证".into()),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| Home::new(window, cx)))
+        .map(|(window, _)| window)
+        .map_err(|e| e.to_string())
+}
+
 fn main() {
+    use mail_daemon::{Command, Instance, Launch};
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    let command = if args.iter().any(|arg| arg == "--quit") {
+        Command::Quit
+    } else if args.iter().any(|arg| arg == "--status") {
+        Command::Status
+    } else if args.iter().any(|arg| {
+        matches!(
+            arg.as_str(),
+            "--editor-demo" | "--lifecycle-probe" | "--lifecycle-failure-probe"
+        )
+    }) {
+        Command::Editor
+    } else if args.iter().any(|arg| arg == "--content-demo") {
+        Command::Reader
+    } else {
+        Command::Open
+    };
+    let isolated_probe = args
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "--editor-probe" | "--editor-style-demo"))
+        || std::env::var_os("QINGMAIL_PERF_PROBE").is_some();
+    if args.iter().any(|arg| {
+        matches!(
+            arg.as_str(),
+            "--lifecycle-probe" | "--lifecycle-failure-probe"
+        )
+    }) && (std::env::var_os("QINGMAIL_P0_RUNTIME_ROOT").is_none()
+        || std::env::var_os("QINGMAIL_P0_DRAFT_ROOT").is_none())
+    {
+        eprintln!("生命周期探针需要独立运行目录和草稿目录，未启动。");
+        std::process::exit(1);
+    }
+    let instance = if isolated_probe {
+        None
+    } else {
+        let root = std::env::var_os("QINGMAIL_P0_RUNTIME_ROOT")
+            .or_else(|| std::env::var_os("XDG_RUNTIME_DIR"));
+        let Some(root) = root else {
+            eprintln!("QingMail 启动失败：缺少 XDG_RUNTIME_DIR；未启动后台。");
+            std::process::exit(1);
+        };
+        match Instance::launch(std::path::Path::new(&root), command) {
+            Ok(Launch::Forwarded(reply)) => {
+                print!("{reply}");
+                return;
+            }
+            Ok(Launch::Primary(instance)) => Some(instance),
+            Err(e) => {
+                eprintln!("QingMail 启动/激活失败：{e}");
+                std::process::exit(1);
+            }
+        }
+    };
     application()
+        .with_quit_mode(gpui_kit::QuitMode::Explicit)
         .with_assets(Assets::new())
-        .run(|cx: &mut App| {
+        .run(move |cx: &mut App| {
             gpui_kit::init(cx);
             gpui_kit_material::init(cx);
-
             let scheme = ThemeId::Baseline.scheme(ThemeMode::Light, Contrast::Standard);
             theme::init_component_theme(scheme, 1.0, cx);
-
-            let bounds = Bounds::centered(None, size(px(960.0), px(680.0)), cx);
-            let options = WindowOptions {
-                low_power_frame_interval: if perf_probe::unthrottled() {
-                    None
-                } else {
-                    WindowOptions::default().low_power_frame_interval
-                },
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("QingMail — P0 交互验证".into()),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            };
-            gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| Home::new(window, cx)))
-                .expect("failed to open window");
+            if let Err(e) = lifecycle::start(instance, cx) {
+                eprintln!("无法启动合成后台：{e}");
+                cx.quit();
+                return;
+            }
+            lifecycle::open_main(cx);
             cx.activate(true);
-            if std::env::args().any(|argument| argument == "--content-demo") {
+            if command == Command::Reader {
                 reader::open(cx);
             }
-            if std::env::args().any(|argument| {
-                matches!(
-                    argument.as_str(),
-                    "--editor-demo" | "--editor-probe" | "--editor-style-demo"
-                )
-            }) {
+            if command == Command::Editor
+                || args
+                    .iter()
+                    .any(|arg| matches!(arg.as_str(), "--editor-probe" | "--editor-style-demo"))
+            {
                 composer::open(cx);
             }
         });

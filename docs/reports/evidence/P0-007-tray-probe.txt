@@ -1,0 +1,2 @@
+PASS: missing watcher; missing host; registered item properties/icon; menu layout; activate/open; menu quit (6 checks, private session bus)
+Real session watcher: IsStatusNotifierHostRegistered = true. Operator verified tray reopen after closing main window, latest draft recovery after immediate editor close, and save-and-quit removing windows and tray icon; all normal.

@@ -61,6 +61,9 @@ const SAMPLES: &[(&str, &[u8])] = &[
 ];
 
 pub(super) fn open(cx: &mut App) {
+    if crate::lifecycle::reuse_reader(cx) {
+        return;
+    }
     let bounds = Bounds::centered(None, size(px(1100.0), px(760.0)), cx);
     let result = gpui_kit::open_window(
         WindowOptions {
@@ -74,8 +77,9 @@ pub(super) fn open(cx: &mut App) {
         cx,
         |_, cx| cx.new(Reader::new),
     );
-    if let Err(error) = result {
-        eprintln!("无法打开阅读验证窗口：{error}");
+    match result {
+        Ok((window, _)) => crate::lifecycle::register_reader(window, cx),
+        Err(error) => eprintln!("无法打开阅读验证窗口：{error}"),
     }
 }
 
