@@ -1,0 +1,37 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/mail-core",
+    "crates/mail-protocol",
+    "crates/mail-content",
+    "crates/mail-storage",
+    "crates/mail-service",
+    "crates/mail-daemon",
+    "crates/mail-ui",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+
+[workspace.dependencies]
+# 内部 crate：依赖方向见主文档 §3.1、§8.1，后台核心不得依赖 UI。
+mail-core = { path = "crates/mail-core" }
+mail-protocol = { path = "crates/mail-protocol" }
+mail-content = { path = "crates/mail-content" }
+mail-storage = { path = "crates/mail-storage" }
+mail-service = { path = "crates/mail-service" }
+
+# UI 框架。版本精确 pin（ADR-0001）：上游已有浮动快照导致编译失败的先例。
+gpui-kit = "=0.9.1"
+# Material 层：关闭默认 feature 中的 gpui-fast，与 gpui-kit 默认的上游
+# snapshot 后端保持一致；按需启用组件组。
+gpui-kit-material = { version = "=0.1.4", default-features = false, features = [
+    "full",
+    "serde",
+    "embedded-symbols",
+] }
+
+[profile.release]
+lto = "thin"

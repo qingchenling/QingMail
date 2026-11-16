@@ -1,0 +1,13 @@
+[package]
+name = "mail-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "mail-ui"
+path = "src/main.rs"
+
+[dependencies]
+gpui-kit = { workspace = true }
+gpui-kit-material = { workspace = true }
