@@ -5,10 +5,16 @@
 use crate::accounts::{self, CheckError, ImapStream, authenticated, io_error, quoted, response};
 use imap_proto::{MailboxDatum, Response, ResponseCode, Status, rfc4315::UidSetMember};
 use mail_core::{RemoteFolder, ServerSettings};
-use std::{collections::BTreeSet, io::Write};
+use std::{
+    collections::BTreeSet,
+    io::Write,
+    time::{Duration, Instant},
+};
 
 /// 与发送构建层的最终 MIME 上限一致；超过时不尝试 APPEND。
 pub const MAX_COPY_BYTES: usize = 40 * 1024 * 1024;
+/// 连接与定位/查重阶段的总期限；正文字节发出后另给有界响应窗口。
+pub const COPY_TOTAL_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CopyError {
@@ -134,7 +140,21 @@ pub fn save_copy(
         raw,
         preferred_folder,
         &connector,
+        Instant::now() + COPY_TOTAL_TIMEOUT,
     )
+}
+fn remaining(deadline: Instant) -> Option<Duration> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|left| !left.is_zero())
+}
+/// 为下一阶段设置读取预算；阶段之间检查总期限。
+fn phase(stream: &mut ImapStream, deadline: Instant) -> Result<(), CopyError> {
+    let left = remaining(deadline).ok_or(CopyError::Timeout)?;
+    stream
+        .get_mut()
+        .reset_budget(1024 * 1024, left.as_secs().max(1));
+    Ok(())
 }
 pub(crate) fn save_copy_using(
     server: &ServerSettings,
@@ -143,16 +163,20 @@ pub(crate) fn save_copy_using(
     raw: &[u8],
     preferred_folder: Option<&str>,
     tls: &native_tls::TlsConnector,
+    deadline: Instant,
 ) -> CopyResult {
     if !valid_request(server, password, message_id, raw) {
         return CopyResult::Failed(CopyError::Invalid);
+    }
+    if remaining(deadline).is_none() {
+        return CopyResult::Failed(CopyError::Timeout);
     }
     let mut stream = match authenticated(server, password, tls) {
         Ok(stream) => stream,
         Err(error) => return CopyResult::Failed(map_error(error)),
     };
     // 先完成全部网络判断，再无条件尝试 LOGOUT；失败路径不产生半边新状态。
-    let result = copy_over(&mut stream, message_id, raw, preferred_folder);
+    let result = copy_over(&mut stream, message_id, raw, preferred_folder, deadline);
     logout(&mut stream);
     match result {
         Ok(result) => result,
@@ -164,14 +188,18 @@ fn copy_over(
     message_id: &str,
     raw: &[u8],
     preferred_folder: Option<&str>,
+    deadline: Instant,
 ) -> Result<CopyResult, CopyError> {
+    phase(stream, deadline)?;
     command(stream, b"QM3 LIST \"\" \"*\"\r\n")?;
     let folders = accounts::imap_done(stream, "QM3", false, true).map_err(map_error)?;
     let Some(folder) = choose_sent_folder(&folders, preferred_folder) else {
         return Ok(CopyResult::Failed(CopyError::NoSentFolder));
     };
+    phase(stream, deadline)?;
     let epoch = examine(stream, &folder)?;
     // 查重在任何 APPEND 之前；查重失败时不追加，避免产生第二份副本。
+    phase(stream, deadline)?;
     if let Some(uid) = search_existing(stream, epoch, message_id)? {
         return Ok(CopyResult::Saved(CopiedMessage {
             folder,
@@ -180,7 +208,10 @@ fn copy_over(
             existed: true,
         }));
     }
-    Ok(CopyResult::Saved(append(stream, &folder, epoch, raw)?))
+    phase(stream, deadline)?;
+    Ok(CopyResult::Saved(append(
+        stream, &folder, epoch, raw, deadline,
+    )?))
 }
 
 /// 优先沿用上次记录的文件夹；否则按已知“已发送”名称与叶子名做确定性选择。
@@ -345,9 +376,8 @@ fn append(
     folder: &str,
     epoch: u32,
     raw: &[u8],
+    deadline: Instant,
 ) -> Result<CopiedMessage, CopyError> {
-    // 追加可能大于单条响应预算；只读取小响应，给慢上行留出整体时限。
-    stream.get_mut().reset_budget(1024 * 1024, 120);
     let mut command_bytes = b"QM6 APPEND ".to_vec();
     quoted(&mut command_bytes, folder);
     command_bytes.extend_from_slice(format!(" (\\Seen) {{{}}}\r\n", raw.len()).as_bytes());
@@ -386,6 +416,13 @@ fn append(
     {
         return Err(CopyError::ResultUnknown);
     }
+    // 正文字节已发出；给服务器一个有界响应窗口。超时不知道是否已保存，只能标为不确定。
+    let left = deadline
+        .checked_duration_since(Instant::now())
+        .unwrap_or_default();
+    stream
+        .get_mut()
+        .reset_budget(1024 * 1024, left.as_secs().clamp(30, 60));
     for _ in 0..64 {
         match response(stream, true) {
             Ok(Response::Done {

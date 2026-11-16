@@ -4,6 +4,7 @@ use mail_core::{AttachmentId, AttachmentInfo, DraftHeaders, OutgoingAttachment};
 use std::{
     io::{BufReader, Write},
     thread,
+    time::{Duration, Instant},
 };
 fn assert_closed(reader: &mut impl std::io::BufRead) {
     let mut trailing = String::new();
@@ -271,7 +272,13 @@ fn smtp_case_message(
         assert_eq!(line(&mut r), "QUIT\r\n");
         // 故意不返回221：QUIT失败不能把已接受变回失败/重试。
     });
-    let delivery = deliver_using(&settings, "synthetic-password", message, &params);
+    let delivery = deliver_using(
+        &settings,
+        "synthetic-password",
+        message,
+        &params,
+        Instant::now() + Duration::from_secs(30),
+    );
     worker.join().unwrap();
     delivery
 }
@@ -407,4 +414,31 @@ fn untrusted_certificate_prevents_authentication_and_message_commands() {
     );
     assert!(matches!(delivery.outcome, SmtpOutcome::DefinitelyRejected));
     worker.join().unwrap();
+}
+
+#[test]
+fn smtp_total_deadline_stops_before_any_message_bytes() {
+    let (cert, key) = certificate();
+    let accept = acceptor(&cert, &key);
+    let listener = listener();
+    let settings = server(&listener, ConnectionSecurity::Tls);
+    let worker = thread::spawn(move || {
+        // 接受 TCP/TLS 后不发送问候；客户端必须在总期限内放弃，而不是无限等待。
+        let _stream = accept.accept(socket(listener));
+        thread::sleep(Duration::from_millis(1_500));
+    });
+    use lettre::transport::smtp::client::Certificate;
+    let params = TlsParameters::builder("localhost".into())
+        .add_root_certificate(Certificate::from_pem(&cert).unwrap())
+        .build()
+        .unwrap();
+    let delivery = deliver_using(
+        &settings,
+        "synthetic-password",
+        prepare(&snapshot(), false).unwrap(),
+        &params,
+        Instant::now() + Duration::from_millis(600),
+    );
+    worker.join().unwrap();
+    assert!(matches!(delivery.outcome, SmtpOutcome::DefinitelyRejected));
 }

@@ -3,7 +3,8 @@ use mail_core::{AccountSettings, ConnectionSecurity, ServerSettings};
 use std::{
     fmt,
     io::{self, BufRead, BufReader, Read, Write},
-    net::{TcpStream, ToSocketAddrs},
+    net::{SocketAddr, TcpStream, ToSocketAddrs},
+    sync::mpsc::{self, RecvTimeoutError},
     time::{Duration, Instant},
 };
 
@@ -145,13 +146,35 @@ impl<T: Write> Write for Bounded<T> {
         self.stream.flush()
     }
 }
-fn connect(server: &ServerSettings) -> Result<TcpStream, CheckError> {
-    let addresses = (server.host.as_str(), server.port)
-        .to_socket_addrs()
+/// DNS 解析放入独立线程并限时等待；超时后不再等待，调用方按未连接处理。
+/// 解析线程可能稍后结束，但不会产生任何网络提交。
+pub(crate) fn resolve_bounded(
+    host: &str,
+    port: u16,
+    budget: Duration,
+) -> Result<Vec<SocketAddr>, CheckError> {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let host = host.to_owned();
+    std::thread::Builder::new()
+        .name("qingmail-dns".into())
+        .spawn(move || {
+            let result = (host.as_str(), port)
+                .to_socket_addrs()
+                .map(|addresses| addresses.collect::<Vec<_>>());
+            let _ = sender.send(result);
+        })
         .map_err(|_| CheckError::Dns)?;
+    match receiver.recv_timeout(budget) {
+        Ok(Ok(addresses)) if !addresses.is_empty() => Ok(addresses),
+        Ok(Ok(_)) | Ok(Err(_)) | Err(RecvTimeoutError::Disconnected) => Err(CheckError::Dns),
+        Err(RecvTimeoutError::Timeout) => Err(CheckError::Timeout),
+    }
+}
+fn connect(server: &ServerSettings) -> Result<TcpStream, CheckError> {
+    let addresses = resolve_bounded(&server.host, server.port, Duration::from_secs(10))?;
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut last = CheckError::Connect;
-    for address in addresses.take(8) {
+    for address in addresses.into_iter().take(8) {
         let Some(timeout) = deadline.checked_duration_since(Instant::now()) else {
             return Err(CheckError::Timeout);
         };

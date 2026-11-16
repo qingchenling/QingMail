@@ -4,8 +4,12 @@ use gpui_kit::{
     prelude::*, px, size,
 };
 use gpui_kit_material::{prelude::*, theme};
-use mail_core::{AccountId, SendState};
+use mail_core::{AccountId, AccountSettings, SendState};
 use mail_daemon::storage::{StorageClient, receive};
+use mail_service::{
+    credentials::{CredentialVault, SystemVault},
+    outgoing, sync,
+};
 use mail_storage::SendTask;
 
 pub(super) fn open(cx: &mut App) {
@@ -40,6 +44,7 @@ pub(super) struct SendTasks {
     store: StorageClient,
     account: Option<AccountId>,
     address: String,
+    settings: Option<AccountSettings>,
     tasks: Vec<SendTask>,
     status: String,
     busy: bool,
@@ -53,6 +58,7 @@ impl SendTasks {
             store: crate::lifecycle::storage(cx),
             account: None,
             address: String::new(),
+            settings: None,
             tasks: vec![],
             status: "正在读取发送任务…".into(),
             busy: false,
@@ -74,10 +80,10 @@ impl SendTasks {
         let task = cx.background_executor().spawn(async move {
             let accounts = receive(store.accounts())?;
             let Some((account, settings)) = accounts.into_iter().next() else {
-                return Ok::<_, String>((None, String::new(), vec![]));
+                return Ok::<_, String>((None, None, vec![]));
             };
             let tasks = receive(store.tasks(account.clone()))?;
-            Ok((Some(account), settings.address, tasks))
+            Ok((Some(account), Some(settings), tasks))
         });
         cx.spawn(async move |entity, cx| {
             let result = task.await;
@@ -87,9 +93,13 @@ impl SendTasks {
                 }
                 this.busy = false;
                 match result {
-                    Ok((account, address, tasks)) => {
+                    Ok((account, settings, tasks)) => {
                         this.account = account;
-                        this.address = address;
+                        this.address = settings
+                            .as_ref()
+                            .map(|settings| settings.address.clone())
+                            .unwrap_or_default();
+                        this.settings = settings;
                         this.tasks = tasks;
                         if this.account.is_none() {
                             this.status = "尚未添加邮箱".into();
@@ -169,6 +179,76 @@ impl SendTasks {
         self.run_reply(cx, "正在按冻结内容重发；关闭窗口不会取消…", reply);
     }
 
+    fn view(&mut self, task: &SendTask, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        let task = task.clone();
+        let store = self.store.clone();
+        let settings = self.settings.clone();
+        self.busy = true;
+        self.status = "正在准备发送内容…".into();
+        let job = cx.background_executor().spawn(async move {
+            // 已保存副本优先从服务器读取；失败或没有 UID 时退回冻结快照，
+            // 两者是同一份 MIME（APPEND 的字节由同一快照确定性重建）。
+            if task.state == SendState::Sent
+                && let (Some(settings), Some(copy), Some(uid)) = (
+                    settings,
+                    task.copy.clone(),
+                    task.copy.as_ref().and_then(|copy| copy.uid),
+                )
+            {
+                let credentials = match SystemVault.load(&task.account) {
+                    Ok(credentials) => credentials,
+                    Err(error) => {
+                        let (raw, _) = local_content(&store, &task)?;
+                        return Ok((
+                            raw,
+                            format!("读取服务器副本的凭据不可用：{error}；已显示本地冻结内容"),
+                        ));
+                    }
+                };
+                match sync::message(
+                    &settings.imap,
+                    &credentials.imap,
+                    &copy.folder,
+                    copy.uidvalidity,
+                    uid,
+                ) {
+                    Ok(raw) => return Ok((raw, "已从服务器读取已保存副本".to_string())),
+                    Err(error) => {
+                        let (raw, _) = local_content(&store, &task)?;
+                        return Ok((
+                            raw,
+                            format!("服务器副本读取失败：{error}；已显示本地冻结内容"),
+                        ));
+                    }
+                }
+            }
+            local_content(&store, &task)
+        });
+        cx.spawn(async move |entity, cx| {
+            let result = job.await.and_then(|(raw, note)| {
+                mail_content::parse(&raw)
+                    .map(|content| (content, note))
+                    .map_err(|e| e.to_string())
+            });
+            let _ = entity.update(cx, |this, cx| {
+                this.busy = false;
+                match result {
+                    Ok((content, note)) => {
+                        this.status = note;
+                        cx.defer(move |cx| crate::reader::open_content(content, cx));
+                    }
+                    Err(e) => this.status = format!("无法打开发送内容：{e}"),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn stop(&mut self, task: &SendTask, cx: &mut Context<Self>) {
         if self.busy {
             return;
@@ -233,6 +313,19 @@ impl SendTasks {
             )));
         }
         let mut actions = div().flex().gap_2().flex_wrap();
+        {
+            let task = task.clone();
+            actions = actions.child(
+                MaterialButton::new(format!("task-view-{}", task.id.0))
+                    .child(if task.state == SendState::Sent && task.copy.is_some() {
+                        "查看副本"
+                    } else {
+                        "查看内容"
+                    })
+                    .disabled(self.busy)
+                    .on_click(cx.listener(move |this, _, _, cx| this.view(&task, cx))),
+            );
+        }
         if task.state == SendState::CopyPending {
             let task = task.clone();
             actions = actions.child(
@@ -355,6 +448,14 @@ impl Render for SendTasks {
     }
 }
 
+fn local_content(store: &StorageClient, task: &SendTask) -> Result<(Vec<u8>, String), String> {
+    let snapshot = receive(store.task_snapshot(task.account.clone(), task.id.clone()))?;
+    let message = outgoing::prepare(&snapshot, true).map_err(|e| e.to_string())?;
+    Ok((
+        message.raw().to_vec(),
+        "已按冻结快照重建发送内容（与已保存副本同一 MIME）".into(),
+    ))
+}
 fn short_id(id: &str) -> &str {
     &id[..id.len().min(8)]
 }

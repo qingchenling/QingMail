@@ -4,10 +4,14 @@ use mail_core::ConnectionSecurity;
 use std::{
     io::{BufReader, Read, Write},
     thread,
+    time::{Duration, Instant},
 };
 
 const MESSAGE_ID: &str = "<0123456789abcdef0123456789abcdef@qingmail.invalid>";
 
+fn deadline() -> Instant {
+    Instant::now() + Duration::from_secs(30)
+}
 fn frozen() -> Vec<u8> {
     b"Date: Mon, 16 Nov 2026 08:00:00 +0000\r\nMessage-ID: <0123456789abcdef0123456789abcdef@qingmail.invalid>\r\nSubject: copy\r\n\r\nbody".to_vec()
 }
@@ -137,6 +141,7 @@ fn append_writes_the_exact_frozen_bytes_and_reports_appenduid() {
         &raw,
         None,
         &client(&cert),
+        deadline(),
     );
     worker.join().unwrap();
     assert_eq!(
@@ -184,6 +189,7 @@ fn existing_message_id_is_found_without_appending_a_second_copy() {
         &frozen(),
         None,
         &client(&cert),
+        deadline(),
     );
     worker.join().unwrap();
     assert_eq!(
@@ -224,6 +230,7 @@ fn missing_sent_folder_fails_before_any_append() {
         &frozen(),
         None,
         &client(&cert),
+        deadline(),
     );
     worker.join().unwrap();
     assert_eq!(result, CopyResult::Failed(CopyError::NoSentFolder));
@@ -284,6 +291,7 @@ fn refused_append_and_failed_search_are_reported_without_retry() {
             &frozen(),
             None,
             &client(&cert),
+            deadline(),
         );
         worker.join().unwrap();
         assert_eq!(
@@ -336,6 +344,7 @@ fn disconnect_after_literal_is_reported_as_unknown_not_saved() {
         &raw,
         None,
         &client(&cert),
+        deadline(),
     );
     worker.join().unwrap();
     assert_eq!(result, CopyResult::Failed(CopyError::ResultUnknown));
@@ -366,9 +375,44 @@ fn invalid_identifier_or_bytes_never_open_a_connection() {
                 message_id,
                 &raw,
                 None,
-                &connector
+                &connector,
+                deadline(),
             ),
             CopyResult::Failed(CopyError::Invalid)
         );
     }
+}
+
+#[test]
+fn stalled_copy_before_append_is_a_definite_failure() {
+    let (cert, key) = certificate();
+    let accept = acceptor(&cert, &key);
+    let listener = listener();
+    let settings = server(&listener, ConnectionSecurity::Tls);
+    let worker = thread::spawn(move || {
+        let mut r = BufReader::new(accept.accept(socket(listener)).unwrap());
+        r.get_mut().write_all(b"* OK synthetic\r\n").unwrap();
+        assert!(line(&mut r).starts_with("QM2 LOGIN "));
+        r.get_mut().write_all(b"QM2 OK authenticated\r\n").unwrap();
+        // 不回复 LIST：客户端总期限应生效并停止等待。
+        thread::sleep(Duration::from_millis(1_500));
+    });
+    let result = save_copy_using(
+        &settings,
+        "synthetic-password",
+        MESSAGE_ID,
+        &frozen(),
+        None,
+        &client(&cert),
+        Instant::now() + Duration::from_millis(500),
+    );
+    worker.join().unwrap();
+    // 服务器在 LIST 阶段断开或超时都不能声称副本已保存。
+    assert!(
+        matches!(
+            result,
+            CopyResult::Failed(CopyError::Timeout) | CopyResult::Failed(CopyError::Connection)
+        ),
+        "{result:?}"
+    );
 }

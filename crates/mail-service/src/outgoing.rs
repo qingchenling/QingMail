@@ -1,4 +1,5 @@
 //! 发送前检查与单次SMTP提交。调用者必须先持久化快照和Sending许可；不自动重试。
+use crate::accounts::resolve_bounded;
 use lettre::{
     Address, Message,
     address::Envelope,
@@ -16,7 +17,7 @@ use lettre::{
 use mail_core::{ConnectionSecurity, OutgoingSnapshot, ServerSettings, SmtpOutcome};
 use std::{
     collections::HashSet,
-    time::{Duration, UNIX_EPOCH},
+    time::{Duration, Instant, UNIX_EPOCH},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -232,19 +233,35 @@ fn failed(detail: DeliveryDetail) -> Delivery {
     }
 }
 
+/// 整次 SMTP 提交的独立期限；DNS 解析另有 10 秒上限。超时在 DATA 前是明确失败，
+/// DATA 中或之后只能是“结果不确定”，不能误报为未发送。
+pub const SMTP_TOTAL_TIMEOUT: Duration = Duration::from_secs(180);
+
 /// 只提交一次；仅能由明确发送操作触发，调用前必须已获得持久化Sending许可。
 /// 不接收“跳过证书验证”选项，不保存密码或返回服务器原始响应。
 pub fn deliver(server: &ServerSettings, password: &str, message: PreparedMessage) -> Delivery {
     let Ok(tls) = TlsParameters::new(server.host.clone()) else {
         return failed(DeliveryDetail::Tls);
     };
-    deliver_using(server, password, message, &tls)
+    deliver_using(
+        server,
+        password,
+        message,
+        &tls,
+        Instant::now() + SMTP_TOTAL_TIMEOUT,
+    )
+}
+fn remaining(deadline: Instant) -> Option<Duration> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|left| !left.is_zero())
 }
 fn deliver_using(
     server: &ServerSettings,
     password: &str,
     message: PreparedMessage,
     tls: &TlsParameters,
+    deadline: Instant,
 ) -> Delivery {
     if server.host.is_empty()
         || server.host.len() > 253
@@ -263,20 +280,44 @@ fn deliver_using(
         return failed(DeliveryDetail::Configuration);
     }
     let hello = ClientId::default();
-    let mut conn = match SmtpConnection::connect(
-        (server.host.as_str(), server.port),
-        Some(Duration::from_secs(5)),
-        &hello,
-        if server.security == ConnectionSecurity::Tls {
-            Some(tls)
-        } else {
-            None
-        },
-        None,
-    ) {
-        Ok(conn) => conn,
+    // 先限时解析，再把 IP 交给 lettre；TLS 域名仍来自 TlsParameters，证书校验不变。
+    let addresses = match resolve_bounded(&server.host, server.port, Duration::from_secs(10)) {
+        Ok(addresses) => addresses,
         Err(_) => return failed(DeliveryDetail::Connection),
     };
+    let Some(left) = remaining(deadline) else {
+        return failed(DeliveryDetail::Connection);
+    };
+    // 逐个尝试解析结果：localhost 可能先返回不可达的 IPv6 地址。
+    let mut connected = None;
+    for address in addresses.into_iter().take(8) {
+        match SmtpConnection::connect(
+            address,
+            Some(left.min(Duration::from_secs(10))),
+            &hello,
+            if server.security == ConnectionSecurity::Tls {
+                Some(tls)
+            } else {
+                None
+            },
+            None,
+        ) {
+            Ok(conn) => {
+                connected = Some(conn);
+                break;
+            }
+            Err(_) => continue,
+        }
+    }
+    let Some(mut conn) = connected else {
+        return failed(DeliveryDetail::Connection);
+    };
+    let Some(left) = remaining(deadline) else {
+        return failed(DeliveryDetail::Connection);
+    };
+    if conn.set_timeout(Some(left)).is_err() {
+        return failed(DeliveryDetail::Connection);
+    }
     if server.security == ConnectionSecurity::StartTls && conn.starttls(tls, &hello).is_err() {
         return failed(DeliveryDetail::Tls);
     }
@@ -291,20 +332,34 @@ fn deliver_using(
         _ => return failed(DeliveryDetail::Authentication),
     }
     // 在所有收件人均获接受前不发DATA，部分拒绝不会导致部分投递。
+    if remaining(deadline).is_none() {
+        return failed(DeliveryDetail::Connection);
+    }
     match conn.command(Mail::new(message.envelope.from().cloned(), vec![])) {
         Ok(r) if r.has_code(250) => {}
         _ => return failed(DeliveryDetail::EnvelopeRejected),
     }
     for recipient in message.envelope.to() {
+        if remaining(deadline).is_none() {
+            return failed(DeliveryDetail::Connection);
+        }
         match conn.command(Rcpt::new(recipient.clone(), vec![])) {
             Ok(r) if r.has_code(250) || r.has_code(251) => {}
             _ => return failed(DeliveryDetail::EnvelopeRejected),
         }
     }
+    if remaining(deadline).is_none() {
+        return failed(DeliveryDetail::Connection);
+    }
     match conn.command(Data) {
         Ok(r) if r.has_code(354) => {}
         _ => return failed(DeliveryDetail::DataRejected),
     }
+    // 354 之后一个正文字节都还没发送；期限已到仍是明确未投递。
+    let Some(left) = remaining(deadline) else {
+        return failed(DeliveryDetail::Connection);
+    };
+    let _ = conn.set_timeout(Some(left));
     // 从正文提交开始，任何非明确拒绝/接受的结果均保守标记Uncertain。
     // lettre的DATA终止器自带CRLF；去掉MIME末尾的一组，避免投递正文多出空行。
     let payload = message.raw.strip_suffix(b"\r\n").unwrap_or(&message.raw);
