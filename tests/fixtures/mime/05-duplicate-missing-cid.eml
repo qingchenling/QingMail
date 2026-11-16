@@ -1,0 +1,33 @@
+From: QingMail Demo <demo@example.invalid>
+MIME-Version: 1.0
+Subject: 重复与缺失 CID
+Content-Type: multipart/related; boundary="dup"
+
+--dup
+Content-Type: text/html; charset=utf-8
+
+<p>重复 CID 不应选取任意资源。</p><img src="cid:duplicate"><img src="cid:missing"><img src="cid:vector"><img src="cid:oversize">
+--dup
+Content-Type: image/png
+Content-ID: <duplicate>
+Content-Transfer-Encoding: base64
+
+iVBORw0KGgoAAAANSUhEUgAAACAAAAAUCAIAAABj86gYAAAAIElEQVR4nGMwajhAU8QwasGoBaMWjFowasGoBaMWEIMAU+SdLtwAOhcAAAAASUVORK5CYII=
+--dup
+Content-Type: image/png
+Content-ID: <duplicate>
+Content-Transfer-Encoding: base64
+
+iVBORw0KGgoAAAANSUhEUgAAACAAAAAUCAIAAABj86gYAAAAIElEQVR4nGMwajhAU8QwasGoBaMWjFowasGoBaMWEIMAU+SdLtwAOhcAAAAASUVORK5CYII=
+--dup
+Content-Type: image/svg+xml
+Content-ID: <vector>
+
+<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"></svg>
+--dup
+Content-Type: image/png
+Content-ID: <oversize>
+Content-Transfer-Encoding: base64
+
+iVBORw0KGgoAAAANSUhEUgABhqAAAYagCAIAAAAnMJyf
+--dup--

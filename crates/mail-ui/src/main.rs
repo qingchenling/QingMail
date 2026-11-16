@@ -12,6 +12,7 @@ use gpui_kit_material::prelude::*;
 use gpui_kit_material::theme;
 
 mod perf_probe;
+mod reader;
 
 /// 设 QINGMAIL_FPS=1 显示性能 HUD（帧率/帧耗时/GPU/CPU/内存）。
 fn show_fps() -> bool {
@@ -190,7 +191,19 @@ impl Render for Home {
                             .child("输入 / 列表 / 菜单 / 明暗主题 — 合成数据"),
                     ),
             )
-            .child(div().flex().gap_2().child(menu_popup).child(theme_button));
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(
+                        MaterialButton::new("reading-demo")
+                            .variant(ButtonVariant::Tonal)
+                            .child("阅读验证")
+                            .on_click(|_, _, cx| reader::open(cx)),
+                    )
+                    .child(menu_popup)
+                    .child(theme_button),
+            );
 
         let search = div()
             .px_4()
@@ -283,5 +296,8 @@ fn main() {
             gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| Home::new(window, cx)))
                 .expect("failed to open window");
             cx.activate(true);
+            if std::env::args().any(|argument| argument == "--content-demo") {
+                reader::open(cx);
+            }
         });
 }

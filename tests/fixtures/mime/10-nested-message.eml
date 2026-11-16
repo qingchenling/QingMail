@@ -1,0 +1,28 @@
+From: QingMail Demo <demo@example.invalid>
+MIME-Version: 1.0
+Subject: 嵌套消息的 CID 不得污染当前邮件
+Content-Type: multipart/mixed; boundary="nest"
+
+--nest
+Content-Type: text/html; charset=utf-8
+
+<p>外层正文</p><img src="cid:nested-only">
+--nest
+Content-Type: message/rfc822
+Content-Disposition: attachment; filename="forwarded.eml"
+
+From: Nested <nested@example.invalid>
+Content-Type: multipart/related; boundary="inside"
+
+--inside
+Content-Type: text/html
+
+<p>内层</p>
+--inside
+Content-Type: image/png
+Content-ID: <nested-only>
+Content-Transfer-Encoding: base64
+
+iVBORw0KGgoAAAANSUhEUgAAACAAAAAUCAIAAABj86gYAAAAIElEQVR4nGMwajhAU8QwasGoBaMWjFowasGoBaMWEIMAU+SdLtwAOhcAAAAASUVORK5CYII=
+--inside--
+--nest--

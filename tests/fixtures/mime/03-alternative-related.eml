@@ -1,0 +1,36 @@
+From: QingMail Demo <demo@example.invalid>
+MIME-Version: 1.0
+Subject: 每周开发简报 · HTML 与 CID
+Content-Type: multipart/mixed; boundary="mixed"
+
+--mixed
+Content-Type: multipart/related; boundary="related"
+
+--related
+Content-Type: multipart/alternative; boundary="alternative"
+
+--alternative
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+QingMail weekly digest. Plain alternative.
+--alternative
+Content-Type: text/html; charset=utf-8
+
+<html><head><style>.card {background-color:#f2f6ff;color:#193257;padding:20px;border-radius:12px} td, th {border:1px solid #cad4e4;padding:8px} h2 {color:#315d9a}</style></head><body style="background-color:#fffaf3;color:#253042"><div class="card"><h2>每周开发简报</h2><p>这是 <strong>合成 HTML 邮件</strong>，包含列表、引用与基础表格。</p><ul><li>邮件解析</li><li>安全阅读副本</li></ul><blockquote>保留原始邮件，派生阅读内容。</blockquote><table><tr><th>事项</th><th>状态</th></tr><tr><td>中文与内嵌图</td><td>待验收</td></tr><tr><td colspan="2"><table><tr><td>嵌套表格</td></tr></table></td></tr></table><p><img src="cid:logo%40demo" alt="QingMail 蓝色示例图片"></p><p><a href="https://example.invalid/details">阅读详情</a> · <a href="mailto:demo@example.invalid">回复示例地址</a></p></div></body></html>
+--alternative--
+--related
+Content-Type: image/png
+Content-ID: <logo@demo>
+Content-Transfer-Encoding: base64
+Content-Disposition: inline; filename="logo.png"
+
+iVBORw0KGgoAAAANSUhEUgAAACAAAAAUCAIAAABj86gYAAAAIElEQVR4nGMwajhAU8QwasGoBaMWjFowasGoBaMWEIMAU+SdLtwAOhcAAAAASUVORK5CYII=
+--related--
+--mixed
+Content-Type: application/octet-stream
+Content-Disposition: attachment; filename*=utf-8''..%2F..%2F%E6%B5%8B%E8%AF%95.txt
+Content-Transfer-Encoding: base64
+
+c3ludGhldGljIGF0dGFjaG1lbnQ=
+--mixed--

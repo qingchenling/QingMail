@@ -1,0 +1,9 @@
+From: QingMail Demo <demo@example.invalid>
+MIME-Version: 1.0
+Subject: 中文纯文本通知
+Content-Type: text/plain; charset=utf-8
+
+你好，QingMail。
+
+这是一封合成通知。支持选中、复制与中文显示。
+https://example.invalid/notice

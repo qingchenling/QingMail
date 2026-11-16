@@ -12,3 +12,5 @@ path = "src/main.rs"
 gpui-kit = { workspace = true }
 gpui-kit-material = { workspace = true }
 gpui-fps = { workspace = true }
+mail-content = { workspace = true }
+url = { workspace = true }

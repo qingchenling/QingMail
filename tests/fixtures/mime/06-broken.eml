@@ -1,0 +1,10 @@
+From: QingMail Demo <demo@example.invalid>
+MIME-Version: 1.0
+Subject: 损坏边界与编码
+Content-Type: multipart/mixed; boundary="broken"
+
+--broken
+Content-Type: text/plain; charset=x-unknown
+Content-Transfer-Encoding: quoted-printable
+
+Recovered readable text =ZZ with damaged escape.
