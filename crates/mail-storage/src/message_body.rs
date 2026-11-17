@@ -1,7 +1,7 @@
 use super::*;
 const MAX: u64 = 8 * 1024 * 1024;
 impl Store {
-    fn check_message_location(&self, location: &MailUid) -> Result<()> {
+    pub(super) fn check_message_location(&self, location: &MailUid) -> Result<()> {
         let valid:bool=self.connection.query_row("SELECT EXISTS(SELECT 1 FROM folder_messages WHERE account_id=?1 AND folder_id=?2 AND uidvalidity=?3 AND uid=?4)",params![location.account.0,location.folder_id,location.uidvalidity,location.uid],|r|r.get(0))?;
         if !valid {
             return Err(Error::Conflict);
@@ -98,7 +98,7 @@ mod tests {
         let (root, store, location) = setup();
         store
             .connection
-            .execute_batch("DROP VIEW visible_folder_messages; DROP TABLE mail_operations; DROP TRIGGER account_default_options; DROP TABLE account_options; DROP TRIGGER account_legacy_credential; DROP TABLE account_credentials; DROP TABLE mutation_results; DROP TABLE message_bodies; ALTER TABLE send_tasks DROP COLUMN copy_folder; ALTER TABLE send_tasks DROP COLUMN copy_uidvalidity; ALTER TABLE send_tasks DROP COLUMN copy_uid; ALTER TABLE folder_messages DROP COLUMN seen; ALTER TABLE folder_messages DROP COLUMN flagged; ALTER TABLE messages DROP COLUMN has_attachments; PRAGMA user_version=4;")
+            .execute_batch("DROP TABLE part_resources; DROP TABLE message_structures; DROP VIEW visible_folder_messages; DROP TABLE mail_operations; DROP TRIGGER account_default_options; DROP TABLE account_options; DROP TRIGGER account_legacy_credential; DROP TABLE account_credentials; DROP TABLE mutation_results; DROP TABLE message_bodies; ALTER TABLE send_tasks DROP COLUMN copy_folder; ALTER TABLE send_tasks DROP COLUMN copy_uidvalidity; ALTER TABLE send_tasks DROP COLUMN copy_uid; ALTER TABLE folder_messages DROP COLUMN seen; ALTER TABLE folder_messages DROP COLUMN flagged; ALTER TABLE messages DROP COLUMN has_attachments; PRAGMA user_version=4;")
             .unwrap();
         drop(store);
         let mut store = Store::open(&root.path().join("data")).unwrap();

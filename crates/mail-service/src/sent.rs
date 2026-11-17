@@ -77,7 +77,10 @@ fn map_error(error: CheckError) -> CopyError {
         CheckError::Timeout => CopyError::Timeout,
         CheckError::Tls => CopyError::Tls,
         CheckError::Authentication => CopyError::Authentication,
-        CheckError::Protocol | CheckError::EpochChanged => CopyError::Protocol,
+        CheckError::Protocol
+        | CheckError::EpochChanged
+        | CheckError::Cancelled
+        | CheckError::Storage => CopyError::Protocol,
         CheckError::Limit => CopyError::Limit,
     }
 }

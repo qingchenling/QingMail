@@ -1,5 +1,6 @@
 //! 独立后台 IPC 基础。尚未接入的业务命令通过精确能力集与 Unsupported 表达。
 mod business;
+mod downloads;
 mod endpoint;
 mod resources;
 mod send;
@@ -93,6 +94,7 @@ struct Service {
     sessions: Mutex<session::Sessions>,
     resources: Arc<Mutex<resources::Resources>>,
     business: business::Business,
+    downloads: downloads::Downloads,
     sending: send::Sending,
     tray_status: Mutex<String>,
     ownership: Mutex<()>,
@@ -120,6 +122,11 @@ impl Server {
             revision.clone(),
         )?;
         let resources = Arc::new(Mutex::new(resources::Resources::default()));
+        let downloads = downloads::Downloads::start(
+            storage.client(),
+            resources.clone(),
+            config.network_enabled,
+        )?;
         let business = business::Business::start(
             storage.client(),
             config.network_enabled,
@@ -139,6 +146,7 @@ impl Server {
             sessions: Mutex::new(session::Sessions::default()),
             resources,
             business,
+            downloads,
             tray_status: Mutex::new(if config.tray {
                 "正在检查托盘宿主".into()
             } else {
@@ -264,6 +272,7 @@ impl Server {
         });
         let mut service = Arc::try_unwrap(self.service)
             .map_err(|_| io::Error::other("后台工作线程尚未释放状态"))?;
+        service.downloads.stop();
         service.operations.stop();
         service.business.stop();
         service.accounts.stop();
@@ -438,6 +447,9 @@ impl Service {
                     CommandName::CreateUpload,
                     CommandName::FinishUpload,
                     CommandName::CancelResource,
+                    CommandName::DownloadAttachment,
+                    CommandName::ReadMessage,
+                    CommandName::ResourceStatus,
                     CommandName::SelectedDraftBody,
                     CommandName::ReviewSend,
                     CommandName::Business,
@@ -535,7 +547,38 @@ impl Service {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .upload(account.clone(), name.clone(), media_type.clone(), *size),
+            Command::ReadMessage { location } => {
+                let folders =
+                    crate::storage::receive(self.storage.folders(location.account.clone()))
+                        .map_err(|e| rpc_error(ErrorCode::Storage, e))?;
+                let folder = folders
+                    .into_iter()
+                    .find(|f| f.id.0 == location.folder_id && f.uidvalidity == location.uidvalidity)
+                    .ok_or_else(|| rpc_error(ErrorCode::Conflict, "邮件定位已变化"))?;
+                self.business.submit(Request::new(
+                    request.id.clone(),
+                    Command::Business {
+                        operation: BusinessOperation::Read {
+                            location: location.clone(),
+                            folder: folder.remote_name,
+                        },
+                    },
+                ))
+            }
+            Command::DownloadAttachment { resource } => {
+                if self.sessions().closing() {
+                    return Err(rpc_error(ErrorCode::Busy, "后台正在退出"));
+                }
+                self.downloads.start_download(resource)
+            }
+            Command::ResourceStatus { resource } => self
+                .resources
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .download_status(resource)
+                .map(Reply::Download),
             Command::CancelResource { resource } => {
+                self.business.cancel_read(resource);
                 self.resources
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())

@@ -140,6 +140,7 @@ struct Mailbox {
     inline: Option<InlineReading>,
     reading: Option<mail_core::MailUid>,
     read_running: bool,
+    read_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pending_read: Option<(mail_core::MailUid, String)>,
     reading_status: String,
     sync_revision: u64,
@@ -191,6 +192,7 @@ impl Mailbox {
             inline: None,
             reading: None,
             read_running: false,
+            read_cancel: Default::default(),
             pending_read: None,
             reading_status: String::new(),
             sync_revision: 0,
@@ -570,6 +572,8 @@ impl Mailbox {
         .detach();
     }
     fn invalidate_read(&mut self) {
+        self.read_cancel
+            .store(true, std::sync::atomic::Ordering::Release);
         self.reading = None;
         self.pending_read = None;
         self.inline = None;
@@ -987,17 +991,25 @@ impl Mailbox {
         self.reading_status = "正在加载邮件…".into();
         // 仅一个正文任务在执行；快速选择合并为最后一封，避免积压网络连接。
         if self.read_running {
+            self.read_cancel
+                .store(true, std::sync::atomic::Ordering::Release);
             self.pending_read = Some((location, folder));
             cx.notify();
             return;
         }
         self.read_running = true;
+        self.read_cancel = Default::default();
+        let cancel = self.read_cancel.clone();
         let reader_account = Some((account.clone(), settings.address.clone()));
         let inline_location = location.clone();
         let store = self.store.clone();
         let task = cx.background_executor().spawn(async move {
             if let Some(client) = store.ipc_client() {
-                let content = mail_daemon::client::content(&client, Op::Read { location, folder })?;
+                let content = mail_daemon::client::content_cancellable(
+                    &client,
+                    Op::Read { location, folder },
+                    &cancel,
+                )?;
                 return Ok((content, account, reader_account));
             }
             let raw = match receive(store.message_body(location.clone()))? {
@@ -1863,6 +1875,13 @@ fn enqueue_action(store: &StorageClient, operation: Op) -> Result<Reply, String>
         },
         None => Reply::Count(count),
     })
+}
+
+impl Drop for Mailbox {
+    fn drop(&mut self) {
+        self.read_cancel
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
 }
 
 #[cfg(test)]

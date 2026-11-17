@@ -280,7 +280,7 @@ fn fetch_folder(
         flags,
     })
 }
-fn ensure_epoch(response: &Response<'_>, epoch: u32) -> Result<(), CheckError> {
+pub(crate) fn ensure_epoch(response: &Response<'_>, epoch: u32) -> Result<(), CheckError> {
     if let Response::Data { outcome, .. } = response
         && let Some(ResponseCode::UidValidity(value)) = outcome.code
         && value != epoch

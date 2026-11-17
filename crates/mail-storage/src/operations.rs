@@ -592,7 +592,7 @@ mod tests {
     #[test]
     fn paused_account_bounded_retry_and_schema11_upgrade() {
         let (root, store, loc, _) = setup();
-        store.connection.execute_batch("DROP VIEW visible_folder_messages; DROP TABLE mail_operations; PRAGMA user_version=11;").unwrap();
+        store.connection.execute_batch("DROP TABLE part_resources; DROP TABLE message_structures; DROP VIEW visible_folder_messages; DROP TABLE mail_operations; PRAGMA user_version=11;").unwrap();
         drop(store);
         let mut store = Store::open(&root.path().join("data")).unwrap();
         assert!(

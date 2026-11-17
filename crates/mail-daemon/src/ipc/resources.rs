@@ -4,7 +4,12 @@ use mail_core::AccountId;
 use mail_protocol::*;
 use std::{
     collections::HashMap,
-    sync::Arc,
+    fs::File,
+    io::{Read, Seek, SeekFrom},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 const MAX_BYTES: u64 = 64 * 1024 * 1024;
@@ -14,7 +19,24 @@ struct Entry {
     touched: Instant,
     data: Data,
 }
+#[derive(Clone)]
+pub(super) struct PartSpec {
+    pub location: mail_core::MailUid,
+    pub folder: String,
+    pub part: mail_core::MimePart,
+}
+pub(super) struct DownloadProgress {
+    pub cancel: AtomicBool,
+    pub received: AtomicU64,
+}
 enum Data {
+    Download {
+        spec: PartSpec,
+        progress: Arc<DownloadProgress>,
+        file: Option<File>,
+        state: ResourceState,
+        error: Option<String>,
+    },
     Ready(Arc<[u8]>),
     Upload {
         account: AccountId,
@@ -28,6 +50,7 @@ impl Entry {
     fn size(&self) -> u64 {
         match &self.data {
             Data::Ready(bytes) => bytes.len() as u64,
+            Data::Download { .. } => 0,
             Data::Upload { size, .. } => *size,
         }
     }
@@ -44,8 +67,13 @@ pub(super) struct Resources {
 }
 impl Resources {
     fn reserve(&mut self, size: u64) -> Result<String, RpcError> {
-        self.entries
-            .retain(|_, entry| entry.touched.elapsed() < TTL);
+        self.entries.retain(|_, entry| {
+            let keep = entry.touched.elapsed() < TTL;
+            if !keep && let Data::Download { progress, .. } = &entry.data {
+                progress.cancel.store(true, Ordering::Release);
+            }
+            keep
+        });
         if self.entries.len() >= MAX_ENTRIES
             || size > MAX_BYTES.saturating_sub(self.entries.values().map(Entry::size).sum())
         {
@@ -112,8 +140,12 @@ impl Resources {
             .entries
             .get(id)
             .is_some_and(|e| e.touched.elapsed() >= TTL)
+            && let Some(Entry {
+                data: Data::Download { progress, .. },
+                ..
+            }) = self.entries.remove(id)
         {
-            self.entries.remove(id);
+            progress.cancel.store(true, Ordering::Release);
         }
         let entry = self
             .entries
@@ -129,25 +161,50 @@ impl Resources {
         length: u32,
     ) -> Result<(ResourceChunk, Vec<u8>), RpcError> {
         let entry = self.entry(id)?;
-        let Data::Ready(bytes) = &entry.data else {
-            return Err(rpc_error(ErrorCode::Conflict, "资源尚未完成"));
-        };
-        if length == 0 || length > MAX_CHUNK_BYTES || offset > bytes.len() as u64 {
+        if length == 0 || length > MAX_CHUNK_BYTES {
             return Err(rpc_error(ErrorCode::InvalidRequest, "资源分块范围无效"));
         }
-        let end = (offset + u64::from(length)).min(bytes.len() as u64) as usize;
-        let data = bytes[offset as usize..end].to_vec();
+        let (total, data) = match &mut entry.data {
+            Data::Ready(bytes) => {
+                if offset > bytes.len() as u64 {
+                    return Err(rpc_error(ErrorCode::InvalidRequest, "偏移无效"));
+                }
+                let end = (offset + u64::from(length)).min(bytes.len() as u64) as usize;
+                (bytes.len() as u64, bytes[offset as usize..end].to_vec())
+            }
+            Data::Download {
+                file: Some(file),
+                state: ResourceState::Ready,
+                ..
+            } => {
+                let total = file
+                    .metadata()
+                    .map_err(|e| rpc_error(ErrorCode::Storage, e.to_string()))?
+                    .len();
+                if offset > total {
+                    return Err(rpc_error(ErrorCode::InvalidRequest, "偏移无效"));
+                }
+                file.seek(SeekFrom::Start(offset))
+                    .map_err(|e| rpc_error(ErrorCode::Storage, e.to_string()))?;
+                let mut bytes = vec![0; u64::from(length).min(total - offset) as usize];
+                file.read_exact(&mut bytes)
+                    .map_err(|e| rpc_error(ErrorCode::Storage, e.to_string()))?;
+                (total, bytes)
+            }
+            _ => return Err(rpc_error(ErrorCode::Conflict, "资源尚未完整下载")),
+        };
         Ok((
             ResourceChunk {
                 resource: id.into(),
                 offset,
                 length: data.len() as u32,
-                total: bytes.len() as u64,
-                complete: end == bytes.len(),
+                total,
+                complete: offset + data.len() as u64 == total,
             },
             data,
         ))
     }
+
     pub fn write(&mut self, id: &str, offset: u64, input: &[u8]) -> Result<Reply, RpcError> {
         let entry = self.entry(id)?;
         let Data::Upload { size, bytes, .. } = &mut entry.data else {
@@ -195,12 +252,226 @@ impl Resources {
         })
     }
     pub fn cancel(&mut self, id: &str) {
-        self.entries.remove(id);
+        if let Some(Entry {
+            data:
+                Data::Download {
+                    progress,
+                    state,
+                    error,
+                    ..
+                },
+            ..
+        }) = self.entries.get_mut(id)
+        {
+            if *state != ResourceState::Ready {
+                progress.cancel.store(true, Ordering::Release);
+                *state = ResourceState::Failed;
+                *error = Some("下载已取消，可重试".into());
+            }
+        } else {
+            self.entries.remove(id);
+        }
+    }
+    pub fn lazy(&mut self, spec: PartSpec, file: Option<File>) -> Result<ResourceRef, RpcError> {
+        let id = self.reserve(0)?;
+        let received = if file.is_some() {
+            u64::from(spec.part.encoded_size)
+        } else {
+            0
+        };
+        let state = if file.is_some() {
+            ResourceState::Ready
+        } else {
+            ResourceState::NotCached
+        };
+        self.entries.insert(
+            id.clone(),
+            Entry {
+                touched: Instant::now(),
+                data: Data::Download {
+                    spec,
+                    progress: Arc::new(DownloadProgress {
+                        cancel: AtomicBool::new(false),
+                        received: AtomicU64::new(received),
+                    }),
+                    file,
+                    state,
+                    error: None,
+                },
+            },
+        );
+        Ok(self.download_status(&id)?.resource)
+    }
+    pub fn download_status(&mut self, id: &str) -> Result<DownloadInfo, RpcError> {
+        let entry = self.entry(id)?;
+        match &entry.data {
+            Data::Download {
+                spec,
+                progress,
+                file,
+                state,
+                error,
+            } => Ok(DownloadInfo {
+                resource: ResourceRef {
+                    id: id.into(),
+                    size: file
+                        .as_ref()
+                        .and_then(|f| f.metadata().ok())
+                        .map(|m| m.len())
+                        .unwrap_or(u64::from(spec.part.encoded_size)),
+                    media_type: spec.part.media_type.clone(),
+                    sha256: None,
+                    state: *state,
+                },
+                received: progress.received.load(Ordering::Acquire),
+                total: u64::from(spec.part.encoded_size),
+                error: error.clone(),
+            }),
+            Data::Ready(bytes) => Ok(DownloadInfo {
+                resource: ResourceRef {
+                    id: id.into(),
+                    size: bytes.len() as u64,
+                    media_type: "application/octet-stream".into(),
+                    sha256: None,
+                    state: ResourceState::Ready,
+                },
+                received: bytes.len() as u64,
+                total: bytes.len() as u64,
+                error: None,
+            }),
+            _ => Err(rpc_error(ErrorCode::Conflict, "上传会话不是接收附件")),
+        }
+    }
+    pub fn begin_download(
+        &mut self,
+        id: &str,
+    ) -> Result<Option<(PartSpec, Arc<DownloadProgress>)>, RpcError> {
+        let entry = self.entry(id)?;
+        let Data::Download {
+            spec,
+            progress,
+            state,
+            error,
+            ..
+        } = &mut entry.data
+        else {
+            return Ok(None);
+        };
+        if matches!(*state, ResourceState::Ready | ResourceState::Downloading) {
+            return Ok(None);
+        }
+        *progress = Arc::new(DownloadProgress {
+            cancel: AtomicBool::new(false),
+            received: AtomicU64::new(0),
+        });
+        *error = None;
+        *state = ResourceState::Downloading;
+        Ok(Some((spec.clone(), progress.clone())))
+    }
+    pub fn finish_download_if_current(
+        &mut self,
+        id: &str,
+        expected: &Arc<DownloadProgress>,
+        result: Result<File, String>,
+    ) {
+        if matches!(self.entries.get(id),Some(Entry{data:Data::Download{progress,..},..}) if Arc::ptr_eq(progress,expected))
+        {
+            self.finish_download(id, result);
+        }
+    }
+    pub fn finish_download(&mut self, id: &str, result: Result<File, String>) {
+        if let Ok(Entry {
+            data:
+                Data::Download {
+                    progress,
+                    file,
+                    state,
+                    error,
+                    ..
+                },
+            ..
+        }) = self.entry(id)
+        {
+            if progress.cancel.load(Ordering::Acquire) {
+                *state = ResourceState::Failed;
+                *error = Some("下载已取消".into());
+                return;
+            }
+            match result {
+                Ok(value) => {
+                    *file = Some(value);
+                    *state = ResourceState::Ready;
+                    *error = None;
+                }
+                Err(e) => {
+                    *state = ResourceState::Failed;
+                    *error = Some(e);
+                }
+            }
+        }
+    }
+    pub fn cancel_downloads(&mut self) {
+        for entry in self.entries.values() {
+            if let Data::Download { progress, .. } = &entry.data {
+                progress.cancel.store(true, Ordering::Release);
+            }
+        }
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn spec() -> PartSpec {
+        PartSpec {
+            location: mail_core::MailUid {
+                account: AccountId("a".into()),
+                folder_id: "inbox".into(),
+                uidvalidity: 42,
+                uid: 7,
+            },
+            folder: "INBOX".into(),
+            part: mail_core::MimePart {
+                section: "2".into(),
+                media_type: "application/octet-stream".into(),
+                charset: None,
+                encoding: "base64".into(),
+                encoded_size: 50 * 1024 * 1024,
+                name: Some("large.bin".into()),
+                cid: None,
+                attachment: true,
+            },
+        }
+    }
+    #[test]
+    fn deferred_parts_are_unreadable_until_complete_and_cancelled_generations_cannot_publish() {
+        use std::io::Write;
+        let mut r = Resources::default();
+        let reference = r.lazy(spec(), None).unwrap();
+        assert_eq!(reference.state, ResourceState::NotCached);
+        assert!(r.read(&reference.id, 0, 1).is_err());
+        let (_, old) = r.begin_download(&reference.id).unwrap().unwrap();
+        old.received.store(5, Ordering::Release);
+        assert_eq!(r.download_status(&reference.id).unwrap().received, 5);
+        assert!(r.begin_download(&reference.id).unwrap().is_none());
+        r.cancel(&reference.id);
+        assert!(old.cancel.load(Ordering::Acquire));
+        let (_, current) = r.begin_download(&reference.id).unwrap().unwrap();
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(b"complete").unwrap();
+        r.finish_download_if_current(&reference.id, &old, Ok(file));
+        assert!(r.read(&reference.id, 0, 1).is_err());
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(b"complete").unwrap();
+        r.finish_download_if_current(&reference.id, &current, Ok(file));
+        assert_eq!(r.download_status(&reference.id).unwrap().resource.size, 8);
+        assert_eq!(r.read(&reference.id, 0, 3).unwrap().1, b"com");
+        let (chunk, bytes) = r.read(&reference.id, 3, 65536).unwrap();
+        assert!(chunk.complete);
+        assert_eq!(bytes, b"plete");
+        assert!(r.read(&reference.id, 9, 1).is_err());
+        assert!(r.read(&reference.id, 0, 65537).is_err());
+    }
+
     #[test]
     fn partial_wrong_offset_and_overflow_never_finish_attachment() {
         let mut r = Resources::default();

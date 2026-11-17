@@ -41,6 +41,9 @@ pub struct Attachment {
     pub media_type: String,
     pub content_id: Option<String>,
     pub bytes: Arc<[u8]>,
+    /// 远端附件只含受控资源ID；不以空bytes冒充已下载。
+    pub remote: Option<String>,
+    pub declared_size: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -177,6 +180,8 @@ pub fn parse(raw: &[u8]) -> Result<MailContent, ContentError> {
             name: bounded(part.attachment_name().unwrap_or("未命名附件"), 255).to_owned(),
             media_type: media_type.clone(),
             content_id: cid.clone(),
+            remote: None,
+            declared_size: bytes.len() as u64,
             bytes: Arc::from(bytes.as_ref()),
         });
         let Some(cid) = cid else {
@@ -488,6 +493,90 @@ pub fn file_url(path: &std::path::Path) -> Result<String, ContentError> {
         .map_err(|_| ContentError("副本路径无效".into()))
 }
 
+/// 使用已解码的受限正文/CID构建派生阅读内容；不把未下载附件伪装成完整MIME。
+/// 仍经过同一MIME解析器和HTML安全清理。此raw仅为派生阅读副本，不用于服务器草稿替换。
+pub fn parse_sections(
+    headers: &[u8],
+    sections: &[SectionInput<'_>],
+) -> Result<MailContent, ContentError> {
+    let base = parse(headers)?;
+    let mut raw =
+        b"MIME-Version: 1.0\r\nContent-Type: multipart/related; boundary=qingmail-section\r\n\r\n"
+            .to_vec();
+    // base64数据不可能包含边界中的连字符；元数据仅接受受限MIME token。
+    for text in [true, false] {
+        if text {
+            raw.extend_from_slice(b"--qingmail-section\r\nContent-Type: multipart/alternative; boundary=qingmail-alt\r\n\r\n");
+        }
+        let boundary = if text {
+            "qingmail-alt"
+        } else {
+            "qingmail-section"
+        };
+        for section in sections
+            .iter()
+            .filter(|s| matches!(s.media_type, "text/plain" | "text/html") == text)
+        {
+            let safe = |s: &str| {
+                !s.is_empty()
+                    && s.len() <= 128
+                    && s.bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"/-_.+".contains(&b))
+            };
+            if !safe(section.media_type)
+                || section.charset.is_some_and(|s| !safe(s))
+                || section.cid.is_some_and(|s| {
+                    s.len() > 1024
+                        || s.chars()
+                            .any(|c| c.is_control() || matches!(c, '<' | '>' | '"'))
+                })
+            {
+                return Err(ContentError("分段MIME元数据无效".into()));
+            }
+            raw.extend_from_slice(
+                format!(
+                    "--{boundary}\r\nContent-Type: {}{}\r\nContent-Transfer-Encoding: base64\r\n",
+                    section.media_type,
+                    section
+                        .charset
+                        .map(|s| format!("; charset=\"{s}\""))
+                        .unwrap_or_default()
+                )
+                .as_bytes(),
+            );
+            if let Some(cid) = section.cid {
+                raw.extend_from_slice(format!("Content-ID: <{cid}>\r\n").as_bytes());
+            }
+            raw.extend_from_slice(b"\r\n");
+            raw.extend_from_slice(STANDARD.encode(section.bytes).as_bytes());
+            raw.extend_from_slice(b"\r\n");
+            if raw.len() > MAX_MESSAGE_BYTES {
+                return Err(ContentError("分段阅读资源超过安全总量".into()));
+            }
+        }
+        if text {
+            raw.extend_from_slice(b"--qingmail-alt--\r\n");
+        }
+    }
+    raw.extend_from_slice(b"--qingmail-section--\r\n");
+    let mut result = parse(&raw)?;
+    result.subject = base.subject;
+    result.sender = base.sender;
+    result.from = base.from;
+    result.to = base.to;
+    result.cc = base.cc;
+    result.reply_to = base.reply_to;
+    result.date_unix = base.date_unix;
+    result.date_text = base.date_text;
+    Ok(result)
+}
+pub struct SectionInput<'a> {
+    pub media_type: &'a str,
+    pub charset: Option<&'a str>,
+    pub cid: Option<&'a str>,
+    pub bytes: &'a [u8],
+}
+
 #[cfg(test)]
 mod reply_tests {
     use super::*;
@@ -538,5 +627,83 @@ mod reply_tests {
         let reply = content.reply_draft();
         assert!(reply.text().len() <= MAX_TEXT);
         assert!(reply.text().contains("已截断"));
+    }
+}
+
+#[cfg(test)]
+mod sections_tests {
+    use super::*;
+    #[test]
+    fn selected_cid_sections_use_existing_image_validation_and_remote_blocking() {
+        let original = parse(include_bytes!(
+            "../../../tests/fixtures/mime/03-alternative-related.eml"
+        ))
+        .unwrap();
+        let image = &original.images[0].png;
+        let content = parse_sections(b"Subject: selected CID\r\n\r\n", &[
+            SectionInput { media_type: "text/html", charset: Some("utf-8"), cid: None,
+                bytes: b"<p>selected</p><img src='cid:selected'><img src='cid:missing'><img src='https://example.invalid/tracker'>" },
+            SectionInput { media_type: "image/png", charset: None, cid: Some("selected"), bytes: image },
+        ]).unwrap();
+        assert_eq!(content.images.len(), 1);
+        assert_eq!(content.images[0].key, "cid:selected");
+        assert_eq!(content.remote_images.len(), 1);
+        let browser = content.browser_html();
+        assert!(browser.contains("data:image/png;base64,"));
+        assert!(!browser.contains("https://example.invalid/tracker"));
+        assert!(!browser.contains("src=\"cid:missing\""));
+    }
+    #[test]
+    fn sections_preserve_envelope_charset_and_safe_browser_output_without_attachment_bytes() {
+        let content=parse_sections(b"From: Alice <alice@example.invalid>\r\nTo: me@example.invalid\r\nSubject: section read\r\nContent-Type: multipart/mixed; boundary=old\r\n\r\n",&[
+        SectionInput{media_type:"text/plain",charset:Some("utf-8"),cid:None,bytes:"纯文本你好".as_bytes()},
+        SectionInput{media_type:"text/html",charset:Some("utf-8"),cid:None,bytes:"<p>HTML你好</p><script>evil()</script><img src=\"https://example.invalid/track\">".as_bytes()}
+    ]).unwrap();
+        assert_eq!(content.subject, "section read");
+        assert_eq!(content.from, vec!["alice@example.invalid"]);
+        assert!(content.plain.contains("你好"));
+        assert!(content.is_html);
+        assert!(content.document.plain_text().contains("HTML你好"));
+        assert!(!content.document.native_html().contains("<script"));
+        assert_eq!(content.remote_images.len(), 1);
+        assert!(content.attachments.is_empty());
+        let latin = parse_sections(
+            b"Subject: charset\r\n\r\n",
+            &[SectionInput {
+                media_type: "text/plain",
+                charset: Some("iso-8859-1"),
+                cid: None,
+                bytes: b"caf\xe9",
+            }],
+        )
+        .unwrap();
+        assert!(latin.plain.contains("café"));
+    }
+    #[test]
+    fn section_metadata_cannot_inject_mime_headers() {
+        assert!(
+            parse_sections(
+                b"Subject: safe\r\n\r\n",
+                &[SectionInput {
+                    media_type: "text/plain\r\nX-Evil: yes",
+                    charset: None,
+                    cid: None,
+                    bytes: b"test"
+                }]
+            )
+            .is_err()
+        );
+        assert!(
+            parse_sections(
+                b"Subject: safe\r\n\r\n",
+                &[SectionInput {
+                    media_type: "image/png",
+                    charset: None,
+                    cid: Some("x>\r\nEvil"),
+                    bytes: b"test"
+                }]
+            )
+            .is_err()
+        );
     }
 }

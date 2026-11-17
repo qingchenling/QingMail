@@ -126,6 +126,9 @@ pub(super) struct Reader {
     busy: bool,
     status: String,
     images: Vec<Arc<Image>>,
+    active_downloads: std::collections::HashSet<String>,
+    downloads: std::collections::HashMap<String, mail_protocol::DownloadInfo>,
+    download_cancel: std::collections::HashMap<String, Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl Reader {
@@ -141,6 +144,9 @@ impl Reader {
     ) -> Self {
         let text = cx.new(|cx| TextViewState::html(&content.document.native_html(), cx));
         let mut this = Self {
+            active_downloads: Default::default(),
+            download_cancel: Default::default(),
+            downloads: Default::default(),
             external,
             embedded: false,
             account,
@@ -362,8 +368,133 @@ impl Reader {
         .detach();
     }
 
+    fn cancel_download(&mut self, id: &str, cx: &mut Context<Self>) {
+        if let Some(cancel) = self.download_cancel.get(id) {
+            cancel.store(true, std::sync::atomic::Ordering::Release);
+        }
+        let store = crate::lifecycle::storage(cx);
+        let id = id.to_string();
+        cx.background_executor()
+            .spawn(async move {
+                let _ = store.control(mail_protocol::Command::CancelResource { resource: id });
+            })
+            .detach();
+        self.status = "正在取消，当前有界网络请求结束后停止".into();
+        cx.notify();
+    }
+    fn save_remote_attachment(&mut self, index: usize, cx: &mut Context<Self>) {
+        let attachment = self.content.attachments[index].clone();
+        let Some(id) = attachment.remote else { return };
+        if !self.active_downloads.insert(id.clone()) {
+            return;
+        }
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.download_cancel.insert(id.clone(), cancel.clone());
+        let store = crate::lifecycle::storage(cx);
+        let directory = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/tmp"));
+        let prompt = cx.prompt_for_new_path(&directory, Some("qingmail-attachment.bin"));
+        cx.spawn(async move |entity, cx| {
+            let result = async {
+                let path = match prompt.await {
+                    Ok(Ok(Some(path))) => path,
+                    Ok(Ok(None)) => return Err("已取消保存".to_string()),
+                    _ => return Err("文件选择器不可用".to_string()),
+                };
+                let db = store.clone();
+                let key = id.clone();
+                let mut info = match cx
+                    .background_executor()
+                    .spawn(async move {
+                        db.control(mail_protocol::Command::DownloadAttachment { resource: key })
+                    })
+                    .await?
+                {
+                    mail_protocol::Reply::Download(info) => info,
+                    _ => return Err("下载响应无效".into()),
+                };
+                loop {
+                    if cancel.load(std::sync::atomic::Ordering::Acquire) {
+                        return Err("已取消下载/保存".into());
+                    }
+                    let display = info.clone();
+                    let key = id.clone();
+                    if entity
+                        .update(cx, |this, cx| {
+                            this.downloads.insert(key, display);
+                            cx.notify();
+                        })
+                        .is_err()
+                    {
+                        let db = store.clone();
+                        let key = id.clone();
+                        cx.background_executor()
+                            .spawn(async move {
+                                let _ = db.control(mail_protocol::Command::CancelResource {
+                                    resource: key,
+                                });
+                            })
+                            .await;
+                        return Err("阅读窗口已关闭，下载取消".into());
+                    }
+                    match info.resource.state {
+                        mail_protocol::ResourceState::Ready => break,
+                        mail_protocol::ResourceState::Failed => {
+                            return Err(info.error.unwrap_or_else(|| "下载失败，可重试".into()));
+                        }
+                        _ => (),
+                    }
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(400))
+                        .await;
+                    let db = store.clone();
+                    let key = id.clone();
+                    info = match cx
+                        .background_executor()
+                        .spawn(async move {
+                            db.control(mail_protocol::Command::ResourceStatus { resource: key })
+                        })
+                        .await?
+                    {
+                        mail_protocol::Reply::Download(info) => info,
+                        _ => return Err("下载状态无效".into()),
+                    };
+                }
+                let client = store.ipc_client().ok_or("后台连接不可用")?;
+                let resource = info.resource;
+                cx.background_executor()
+                    .spawn(async move { save_resource(&client, &resource, &path, &cancel) })
+                    .await?;
+                Ok::<_, String>(())
+            }
+            .await;
+            let _ = entity.update(cx, |this, cx| {
+                this.active_downloads.remove(&id);
+                this.download_cancel.remove(&id);
+                if let Err(error) = &result
+                    && let Some(info) = this.downloads.get_mut(&id)
+                    && info.resource.state != mail_protocol::ResourceState::Ready
+                {
+                    info.resource.state = mail_protocol::ResourceState::Failed;
+                    info.error = Some(error.clone());
+                }
+                this.status = match result {
+                    Ok(()) => "附件已完整保存（不自动打开）".into(),
+                    Err(e) => format!("附件未保存：{e}"),
+                };
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
     fn save_attachment(&mut self, index: usize, cx: &mut Context<Self>) {
         let attachment = self.content.attachments[index].clone();
+        if attachment.remote.is_some() {
+            self.save_remote_attachment(index, cx);
+            return;
+        }
         let directory = std::env::var_os("HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("/tmp"));
@@ -658,18 +789,56 @@ impl Render for Reader {
                             .flex_wrap()
                             .gap_2()
                             .child(format!(
-                                "附件：{} · {} · {} 字节",
-                                attachment.name,
-                                attachment.media_type,
-                                attachment.bytes.len()
+                                "附件：{} · {} · 大小约 {} 字节",
+                                attachment.name, attachment.media_type, attachment.declared_size
                             ))
                             .child(
-                                quiet(("save-attachment", index), "另存为")
-                                    .icon(icon("download"))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.save_attachment(index, cx)
-                                    })),
+                                quiet(
+                                    ("save-attachment", index),
+                                    if attachment.remote.is_some() {
+                                        "下载/另存为"
+                                    } else {
+                                        "另存为"
+                                    },
+                                )
+                                .disabled(
+                                    attachment
+                                        .remote
+                                        .as_ref()
+                                        .is_some_and(|id| self.active_downloads.contains(id)),
+                                )
+                                .icon(icon("download"))
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| this.save_attachment(index, cx),
+                                )),
                             )
+                            .when_some(attachment.remote.clone(), |row, id| {
+                                let info = self.downloads.get(&id);
+                                row.child(match info {
+                                    Some(info) => format!(
+                                        "{} · {}/{} 编码字节{}",
+                                        download_state(info.resource.state),
+                                        info.received,
+                                        info.total,
+                                        info.error
+                                            .as_ref()
+                                            .map(|e| format!(" · {e}"))
+                                            .unwrap_or_default()
+                                    ),
+                                    None => "按需获取，不随正文下载".into(),
+                                })
+                                .when(
+                                    self.active_downloads.contains(&id),
+                                    |row| {
+                                        row.child(
+                                            quiet(("cancel-attachment", index), "取消下载")
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.cancel_download(&id, cx)
+                                                })),
+                                        )
+                                    },
+                                )
+                            })
                     },
                 ));
         div()
@@ -728,4 +897,59 @@ fn cache_parent() -> std::io::Result<PathBuf> {
         .mode(0o700)
         .create(&path)?;
     Ok(path)
+}
+
+fn download_state(state: mail_protocol::ResourceState) -> &'static str {
+    match state {
+        mail_protocol::ResourceState::NotCached => "未缓存",
+        mail_protocol::ResourceState::Downloading => "下载中",
+        mail_protocol::ResourceState::Ready => "已下载",
+        mail_protocol::ResourceState::Failed => "失败",
+    }
+}
+fn save_resource(
+    client: &mail_protocol::transport::Client,
+    resource: &mail_protocol::ResourceRef,
+    path: &Path,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<(), String> {
+    let parent = path.parent().ok_or("保存目录无效")?;
+    let temporary = parent.join(format!(
+        ".qingmail-{}.partial",
+        mail_protocol::transport::request_id().map_err(|e| e.to_string())?
+    ));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&temporary)
+        .map_err(|e| format!("无法创建临时文件，请检查空间：{e}"))?;
+    let result = (|| {
+        let mut offset = 0;
+        loop {
+            if cancel.load(std::sync::atomic::Ordering::Acquire) {
+                return Err("已取消保存，未发布部分文件".into());
+            }
+            let (chunk, bytes) = client
+                .read_chunk(&resource.id, offset, mail_protocol::MAX_CHUNK_BYTES)
+                .map_err(|e| e.to_string())?;
+            if chunk.total != resource.size {
+                return Err("附件总量已变化，未发布文件".to_string());
+            }
+            file.write_all(&bytes)
+                .map_err(|e| format!("保存失败，请检查磁盘空间：{e}"))?;
+            offset += bytes.len() as u64;
+            if chunk.complete {
+                break;
+            }
+        }
+        file.sync_all().map_err(|e| e.to_string())?;
+        // hard_link原子且不覆盖已有文件；不把部分数据发布为用户选择的最终文件。
+        fs::hard_link(&temporary, path)
+            .map_err(|e| format!("无法发布附件（不覆盖已有文件）：{e}"))?;
+        Ok(())
+    })();
+    drop(file);
+    let _ = fs::remove_file(temporary);
+    result
 }
