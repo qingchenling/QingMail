@@ -97,7 +97,7 @@ fn independent_process_lost_reply_restart_and_existing_instance() {
     }
     let capabilities = client.request(Command::Hello).unwrap();
     assert!(
-        matches!(capabilities,Reply::Hello {commands,..} if commands.contains(&CommandName::SaveDraft) && !commands.contains(&CommandName::ConfirmSend))
+        matches!(capabilities,Reply::Hello {commands,..} if commands.contains(&CommandName::SaveDraft) && !commands.contains(&CommandName::ConfirmSend) && !commands.contains(&CommandName::CheckAccount))
     );
     let socket = root.path().join("runtime/qingmail/daemon.sock");
     assert_eq!(fs::metadata(&socket).unwrap().mode() & 0o777, 0o600);
