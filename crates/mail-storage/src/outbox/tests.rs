@@ -615,7 +615,7 @@ fn v2_upgrade_keeps_existing_drafts_and_remote_account_identity() {
     drop(store);
     // 从当前库移除 v3/v4 的结构，恢复真实 v2 布局；正文和 v2 行保持原样。
     let conn = Connection::open(path.join("state.sqlite3")).unwrap();
-    conn.execute_batch("DROP VIEW visible_folder_messages; DROP TABLE mail_operations; DROP TRIGGER account_default_options; DROP TABLE account_options; DROP TRIGGER account_legacy_credential; DROP TABLE account_credentials; DROP TABLE mutation_results; DROP TABLE message_bodies; DROP TABLE remote_folders; DROP TABLE folder_sync; DROP TABLE catalog_sync; DROP TABLE local_editor; DROP INDEX one_local_workspace; ALTER TABLE accounts DROP COLUMN kind; ALTER TABLE send_tasks DROP COLUMN copy_folder; ALTER TABLE send_tasks DROP COLUMN copy_uidvalidity; ALTER TABLE send_tasks DROP COLUMN copy_uid; ALTER TABLE folder_messages DROP COLUMN seen; ALTER TABLE folder_messages DROP COLUMN flagged; ALTER TABLE messages DROP COLUMN has_attachments; PRAGMA user_version=2;").unwrap();
+    conn.execute_batch("DROP TABLE part_resources; DROP TABLE message_structures; DROP VIEW visible_folder_messages; DROP TABLE mail_operations; DROP TRIGGER account_default_options; DROP TABLE account_options; DROP TRIGGER account_legacy_credential; DROP TABLE account_credentials; DROP TABLE mutation_results; DROP TABLE message_bodies; DROP TABLE remote_folders; DROP TABLE folder_sync; DROP TABLE catalog_sync; DROP TABLE local_editor; DROP INDEX one_local_workspace; ALTER TABLE accounts DROP COLUMN kind; ALTER TABLE send_tasks DROP COLUMN copy_folder; ALTER TABLE send_tasks DROP COLUMN copy_uidvalidity; ALTER TABLE send_tasks DROP COLUMN copy_uid; ALTER TABLE folder_messages DROP COLUMN seen; ALTER TABLE folder_messages DROP COLUMN flagged; ALTER TABLE messages DROP COLUMN has_attachments; PRAGMA user_version=2;").unwrap();
     drop(conn);
     let mut store = Store::open(&path).unwrap();
     assert_eq!(store.draft(&account, &draft.id).unwrap(), draft);
@@ -723,7 +723,7 @@ fn v5_upgrade_adds_copy_columns_and_preserves_copy_pending_tasks() {
     drop(store);
     let conn = Connection::open(path.join("state.sqlite3")).unwrap();
     conn.execute_batch(
-        "DROP VIEW visible_folder_messages; DROP TABLE mail_operations; DROP TRIGGER account_default_options; DROP TABLE account_options; DROP TRIGGER account_legacy_credential; DROP TABLE account_credentials; DROP TABLE mutation_results; ALTER TABLE send_tasks DROP COLUMN copy_folder; \
+        "DROP TABLE part_resources; DROP TABLE message_structures; DROP VIEW visible_folder_messages; DROP TABLE mail_operations; DROP TRIGGER account_default_options; DROP TABLE account_options; DROP TRIGGER account_legacy_credential; DROP TABLE account_credentials; DROP TABLE mutation_results; ALTER TABLE send_tasks DROP COLUMN copy_folder; \
          ALTER TABLE send_tasks DROP COLUMN copy_uidvalidity; \
          ALTER TABLE send_tasks DROP COLUMN copy_uid; \
          ALTER TABLE folder_messages DROP COLUMN seen; ALTER TABLE folder_messages DROP COLUMN flagged; ALTER TABLE messages DROP COLUMN has_attachments; PRAGMA user_version=5;",

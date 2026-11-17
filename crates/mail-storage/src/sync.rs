@@ -468,7 +468,7 @@ mod tests {
         let path = root.path().join("data");
         let mut store = Store::open(&path).unwrap();
         let a = store.create_account(&settings()).unwrap();
-        store.connection.execute_batch("DROP VIEW visible_folder_messages; DROP TABLE mail_operations; DROP TRIGGER account_default_options; DROP TABLE account_options; DROP TRIGGER account_legacy_credential; DROP TABLE account_credentials; DROP TABLE mutation_results; DROP TABLE message_bodies; DROP TABLE remote_folders; DROP TABLE folder_sync; DROP TABLE catalog_sync; ALTER TABLE send_tasks DROP COLUMN copy_folder; ALTER TABLE send_tasks DROP COLUMN copy_uidvalidity; ALTER TABLE send_tasks DROP COLUMN copy_uid; ALTER TABLE folder_messages DROP COLUMN seen; ALTER TABLE folder_messages DROP COLUMN flagged; ALTER TABLE messages DROP COLUMN has_attachments; PRAGMA user_version=3;").unwrap();
+        store.connection.execute_batch("DROP TABLE part_resources; DROP TABLE message_structures; DROP VIEW visible_folder_messages; DROP TABLE mail_operations; DROP TRIGGER account_default_options; DROP TABLE account_options; DROP TRIGGER account_legacy_credential; DROP TABLE account_credentials; DROP TABLE mutation_results; DROP TABLE message_bodies; DROP TABLE remote_folders; DROP TABLE folder_sync; DROP TABLE catalog_sync; ALTER TABLE send_tasks DROP COLUMN copy_folder; ALTER TABLE send_tasks DROP COLUMN copy_uidvalidity; ALTER TABLE send_tasks DROP COLUMN copy_uid; ALTER TABLE folder_messages DROP COLUMN seen; ALTER TABLE folder_messages DROP COLUMN flagged; ALTER TABLE messages DROP COLUMN has_attachments; PRAGMA user_version=3;").unwrap();
         drop(store);
         let store = Store::open(&path).unwrap();
         assert_eq!(store.account(&a).unwrap(), Some(settings()));

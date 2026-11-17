@@ -33,6 +33,29 @@ pub struct StorageWorker {
 }
 
 enum Request {
+    MimeStructure {
+        location: mail_core::MailUid,
+        reply: SyncSender<StorageResult<Option<mail_core::MimeStructure>>>,
+    },
+    SaveStructure {
+        location: mail_core::MailUid,
+        value: mail_core::MimeStructure,
+        reply: SyncSender<StorageResult<()>>,
+    },
+    PartFile {
+        location: mail_core::MailUid,
+        part: mail_core::MimePart,
+        reply: SyncSender<StorageResult<Option<std::fs::File>>>,
+    },
+    PartTemporary {
+        reply: SyncSender<StorageResult<std::fs::File>>,
+    },
+    SavePart {
+        location: mail_core::MailUid,
+        part: mail_core::MimePart,
+        file: std::fs::File,
+        reply: SyncSender<StorageResult<()>>,
+    },
     ClaimOperation {
         reply: SyncSender<StorageResult<OperationClaim>>,
     },
@@ -429,6 +452,50 @@ impl StorageClient {
             settings: Box::new(settings),
             key,
             baseline: baseline.map(Box::new),
+            reply,
+        })
+    }
+    pub(crate) fn mime_structure(
+        &self,
+        location: mail_core::MailUid,
+    ) -> StorageResult<Receiver<StorageResult<Option<mail_core::MimeStructure>>>> {
+        self.request(|reply| Request::MimeStructure { location, reply })
+    }
+    pub(crate) fn save_structure(
+        &self,
+        location: mail_core::MailUid,
+        value: mail_core::MimeStructure,
+    ) -> StorageResult<Receiver<StorageResult<()>>> {
+        self.request(|reply| Request::SaveStructure {
+            location,
+            value,
+            reply,
+        })
+    }
+    pub(crate) fn part_file(
+        &self,
+        location: mail_core::MailUid,
+        part: mail_core::MimePart,
+    ) -> StorageResult<Receiver<StorageResult<Option<std::fs::File>>>> {
+        self.request(|reply| Request::PartFile {
+            location,
+            part,
+            reply,
+        })
+    }
+    pub(crate) fn part_temporary(&self) -> StorageResult<Receiver<StorageResult<std::fs::File>>> {
+        self.request(|reply| Request::PartTemporary { reply })
+    }
+    pub(crate) fn save_part(
+        &self,
+        location: mail_core::MailUid,
+        part: mail_core::MimePart,
+        file: std::fs::File,
+    ) -> StorageResult<Receiver<StorageResult<()>>> {
+        self.request(|reply| Request::SavePart {
+            location,
+            part,
+            file,
             reply,
         })
     }
@@ -1015,6 +1082,47 @@ fn run(path: Option<PathBuf>, receiver: Receiver<Request>) {
             } => {
                 let _ = reply.send(opened.and_then(|s| {
                     s.finish_operation(&id, state, detail)
+                        .map_err(|e| e.to_string())
+                }));
+            }
+            Request::MimeStructure { location, reply } => {
+                let _ = reply.send(
+                    opened.and_then(|s| s.mime_structure(&location).map_err(|e| e.to_string())),
+                );
+            }
+            Request::SaveStructure {
+                location,
+                value,
+                reply,
+            } => {
+                let _ = reply.send(opened.and_then(|s| {
+                    s.save_mime_structure(&location, &value)
+                        .map_err(|e| e.to_string())
+                }));
+            }
+            Request::PartFile {
+                location,
+                part,
+                reply,
+            } => {
+                let _ =
+                    reply
+                        .send(opened.and_then(|s| {
+                            s.part_file(&location, &part).map_err(|e| e.to_string())
+                        }));
+            }
+            Request::PartTemporary { reply } => {
+                let _ =
+                    reply.send(opened.and_then(|s| s.part_temporary().map_err(|e| e.to_string())));
+            }
+            Request::SavePart {
+                location,
+                part,
+                file,
+                reply,
+            } => {
+                let _ = reply.send(opened.and_then(|s| {
+                    s.save_part(&location, &part, file)
                         .map_err(|e| e.to_string())
                 }));
             }

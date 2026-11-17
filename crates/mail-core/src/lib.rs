@@ -2,6 +2,9 @@
 //!
 //! 不依赖 GPUI，不依赖任何具体同步或存储实现（主文档 §3.1）。
 
+mod mime;
+pub use mime::{MimePart, MimeStructure};
+
 use serde::{Deserialize, Serialize};
 
 /// 账号本地稳定 ID。

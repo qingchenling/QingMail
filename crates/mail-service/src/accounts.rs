@@ -19,10 +19,14 @@ pub enum CheckError {
     Protocol,
     Limit,
     EpochChanged,
+    Cancelled,
+    Storage,
 }
 impl fmt::Display for CheckError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
+            Self::Cancelled => "下载已取消",
+            Self::Storage => "写入失败，请检查剩余磁盘空间",
             Self::Invalid => "配置无效",
             Self::Dns => "无法解析服务器地址",
             Self::Connect => "无法连接服务器",

@@ -14,7 +14,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
     thread,
@@ -27,6 +27,7 @@ struct Context {
     cache: PathBuf,
     resources: Arc<Mutex<Resources>>,
     contents: HashMap<String, (Instant, MailContent)>,
+    cancel: Arc<AtomicBool>,
 }
 enum Work {
     Run(Box<Request>),
@@ -35,6 +36,7 @@ enum Work {
 pub(super) struct Business {
     queue: mpsc::SyncSender<Work>,
     results: ResultMap,
+    cancellations: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     storage: StorageClient,
     worker: Option<thread::JoinHandle<()>>,
 }
@@ -58,6 +60,8 @@ impl Business {
         let (queue, receiver) = mpsc::sync_channel(8);
         let results: ResultMap = Default::default();
         let replies = results.clone();
+        let cancellations: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>> = Default::default();
+        let cancels = cancellations.clone();
         let store = storage.clone();
         let worker = thread::Builder::new()
             .name("qingmail-business".into())
@@ -68,13 +72,24 @@ impl Business {
                     cache,
                     resources,
                     contents: HashMap::new(),
+                    cancel: Arc::new(AtomicBool::new(false)),
                 };
                 while let Ok(Work::Run(request)) = receiver.recv() {
                     let request = *request;
                     let Command::Business { operation } = &request.command else {
                         continue;
                     };
+                    context.cancel = cancels
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .get(&request.id)
+                        .cloned()
+                        .unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
                     let mut result = context.execute(operation.clone());
+                    cancels
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&request.id);
                     if operation.writes()
                         && !matches!(
                             receive(
@@ -113,9 +128,20 @@ impl Business {
         Ok(Self {
             queue,
             results,
+            cancellations,
             storage,
             worker: Some(worker),
         })
+    }
+    pub fn cancel_read(&self, id: &str) {
+        if let Some(cancel) = self
+            .cancellations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(id)
+        {
+            cancel.store(true, Ordering::Release);
+        }
     }
     pub fn active(&self) -> bool {
         self.results
@@ -192,6 +218,12 @@ impl Business {
                 }
             }
         }
+        if matches!(operation, BusinessOperation::Read { .. }) {
+            self.cancellations
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(request.id.clone(), Arc::new(AtomicBool::new(false)));
+        }
         results.insert(request.id.clone(), (request.clone(), Instant::now(), None));
         if self
             .queue
@@ -199,6 +231,10 @@ impl Business {
             .is_err()
         {
             results.remove(&request.id);
+            self.cancellations
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&request.id);
             let result = Err(rpc_error(ErrorCode::Busy, "后台队列繁忙，请稍后重试"));
             if operation.writes() {
                 let _ = receive(self.storage.finish_mutation(request, result.clone()));
@@ -208,6 +244,14 @@ impl Business {
         Ok(Reply::Pending { task: request.id })
     }
     pub fn stop(&mut self) {
+        for cancel in self
+            .cancellations
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+        {
+            cancel.store(true, Ordering::Release);
+        }
         if let Some(worker) = self.worker.take() {
             let _ = self.queue.send(Work::Stop);
             let _ = worker.join();
@@ -252,6 +296,9 @@ impl Context {
             _ => None,
         };
         let _permit = account.map(|id| crate::network_gate::acquire(id, true));
+        if self.cancel.load(Ordering::Acquire) {
+            return Err(rpc_error(ErrorCode::Offline, "阅读已取消"));
+        }
         match operation {
             RefreshCatalog { account } => {
                 let (settings, credentials) = self.credentials(account.clone())?;
@@ -295,30 +342,7 @@ impl Context {
                 }) {
                     return Err(rpc_error(ErrorCode::Conflict, "邮件定位已变化，请重新同步"));
                 }
-                let raw = match receive(self.store.message_body(location.clone())).map_err(fail)? {
-                    Some(raw) => raw,
-                    None => {
-                        let (settings, credentials) = self.credentials(location.account.clone())?;
-                        let raw = sync::message(
-                            &settings.imap,
-                            &credentials.imap,
-                            &folder,
-                            location.uidvalidity,
-                            location.uid,
-                        )
-                        .map_err(fail)?;
-                        receive(self.store.save_message_body(location.clone(), raw))
-                            .map_err(fail)?;
-                        receive(self.store.message_body(location.clone()))
-                            .map_err(fail)?
-                            .ok_or_else(|| fail("正文缓存未确认"))?
-                    }
-                };
-                let content = mail_content::parse(&raw).map_err(fail)?;
-                let _ = receive(
-                    self.store
-                        .mark_attachments(location.clone(), content.attachments.len() as u32),
-                );
+                let content = self.read_sections(&location, &folder)?;
                 self.publish(content, Some(location))
             }
             Flags {
@@ -473,8 +497,21 @@ impl Context {
         content: MailContent,
         location: Option<mail_core::MailUid>,
     ) -> Result<Reply, RpcError> {
+        if self.cancel.load(Ordering::Acquire) {
+            return Err(fail("阅读已取消"));
+        }
         let mut resources = self.resources.lock().unwrap_or_else(|e| e.into_inner());
         let mut inserted = vec![];
+        let lazy_refs = content
+            .attachments
+            .iter()
+            .map(|a| {
+                a.remote
+                    .as_ref()
+                    .map(|id| resources.download_status(id).map(|s| s.resource))
+                    .transpose()
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let result = (|| {
             let mut put = |bytes: Arc<[u8]>, kind: String| {
                 let reference = resources.insert(bytes, kind)?;
@@ -489,10 +526,14 @@ impl Context {
             let attachments = content
                 .attachments
                 .iter()
-                .map(|a| {
+                .zip(lazy_refs)
+                .map(|(a, lazy)| {
                     Ok(ReceivedAttachment {
                         name: a.name.clone(),
-                        resource: put(a.bytes.clone(), a.media_type.clone())?,
+                        resource: match lazy {
+                            Some(r) => r,
+                            None => put(a.bytes.clone(), a.media_type.clone())?,
+                        },
                     })
                 })
                 .collect::<Result<Vec<_>, RpcError>>()?;
@@ -546,5 +587,273 @@ impl Context {
                 .insert(view.document.id.clone(), (Instant::now(), content));
         }
         result
+    }
+}
+
+impl Context {
+    fn read_sections(
+        &mut self,
+        location: &mail_core::MailUid,
+        folder: &str,
+    ) -> Result<MailContent, RpcError> {
+        if self.cancel.load(Ordering::Acquire) {
+            return Err(fail("阅读已取消"));
+        }
+        // 旧完整MIME缓存保持离线可读；新读取优先结构与分段。
+        if let Some(raw) = receive(self.store.message_body(location.clone())).map_err(fail)? {
+            let content = mail_content::parse(&raw).map_err(fail)?;
+            let _ = receive(
+                self.store
+                    .mark_attachments(location.clone(), content.attachments.len() as u32),
+            );
+            return Ok(content);
+        }
+        let structure = match receive(self.store.mime_structure(location.clone())).map_err(fail)? {
+            Some(value) => value,
+            None => {
+                let (settings, credentials) = self.credentials(location.account.clone())?;
+                let size = mail_service::parts::size(
+                    &settings.imap,
+                    &credentials.imap,
+                    folder,
+                    location.uidvalidity,
+                    location.uid,
+                )
+                .map_err(fail)?;
+                match mail_service::parts::structure(
+                    &settings.imap,
+                    &credentials.imap,
+                    folder,
+                    location.uidvalidity,
+                    location.uid,
+                    size,
+                ) {
+                    Ok(value) => {
+                        receive(self.store.save_structure(location.clone(), value.clone()))
+                            .map_err(fail)?;
+                        value
+                    }
+                    Err(error) => {
+                        if size > mail_content::MAX_MESSAGE_BYTES as u32 {
+                            return Err(fail(format!(
+                                "MIME结构异常（{error}）；邮件超过8MiB，未完整下载。可稍后重试"
+                            )));
+                        }
+                        let raw = sync::message(
+                            &settings.imap,
+                            &credentials.imap,
+                            folder,
+                            location.uidvalidity,
+                            location.uid,
+                        )
+                        .map_err(fail)?;
+                        receive(self.store.save_message_body(location.clone(), raw.clone()))
+                            .map_err(fail)?;
+                        let mut content = mail_content::parse(&raw).map_err(fail)?;
+                        content.warnings.push(
+                            "MIME结构不可用，已在8MiB限制内回退完整邮件；附件可能已随回退读取"
+                                .into(),
+                        );
+                        return Ok(content);
+                    }
+                }
+            }
+        };
+        if self.cancel.load(Ordering::Acquire) {
+            return Err(fail("阅读已取消"));
+        }
+        let mut selected = vec![];
+        let mut warnings = vec![];
+        for media in ["text/plain", "text/html"] {
+            if let Some(part) = structure
+                .parts
+                .iter()
+                .find(|p| p.media_type == media && !p.attachment)
+            {
+                match self.read_part(location, folder, part, mail_content::MAX_BODY_BYTES as u64) {
+                    Ok(bytes) => selected.push((part.clone(), bytes)),
+                    Err(e) => warnings.push(format!("正文分段未获取：{}", e.message)),
+                }
+            }
+        }
+        // 仅正文引用到的唯一CID图片自动获取，不遍历下载所有内嵌附件。
+        let body_text = selected
+            .iter()
+            .map(|(_, b)| String::from_utf8_lossy(b))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut total = selected.iter().map(|(_, b)| b.len()).sum::<usize>();
+        let mut count = 0;
+        for part in &structure.parts {
+            let Some(cid) = part
+                .cid
+                .as_deref()
+                .map(|s| s.trim().trim_matches(['<', '>']))
+            else {
+                continue;
+            };
+            if !part.media_type.starts_with("image/") || !body_text.contains(&format!("cid:{cid}"))
+            {
+                continue;
+            }
+            if structure
+                .parts
+                .iter()
+                .filter(|p| {
+                    p.cid.as_deref().map(|s| s.trim().trim_matches(['<', '>'])) == Some(cid)
+                })
+                .count()
+                != 1
+            {
+                warnings.push("重复CID已阻止".into());
+                continue;
+            }
+            if count >= mail_content::MAX_IMAGES
+                || part.encoded_size > 3 * 1024 * 1024
+                || total >= 5 * 1024 * 1024
+            {
+                warnings.push("内嵌资源超过安全限制，未自动获取".into());
+                continue;
+            }
+            match self.read_part(location, folder, part, mail_content::MAX_IMAGE_BYTES as u64) {
+                Ok(bytes) if total + bytes.len() <= 5 * 1024 * 1024 => {
+                    total += bytes.len();
+                    count += 1;
+                    selected.push((part.clone(), bytes));
+                }
+                _ => warnings.push("CID图片无法获取或超过安全限制".into()),
+            }
+        }
+        if self.cancel.load(Ordering::Acquire) {
+            return Err(fail("阅读已取消"));
+        }
+        let inputs = selected
+            .iter()
+            .map(|(p, b)| mail_content::SectionInput {
+                media_type: &p.media_type,
+                charset: p.charset.as_deref(),
+                cid: p.cid.as_deref().map(|s| s.trim().trim_matches(['<', '>'])),
+                bytes: b,
+            })
+            .collect::<Vec<_>>();
+        let mut content =
+            mail_content::parse_sections(&structure.headers, &inputs).map_err(fail)?;
+        content.attachments.clear();
+        for part in &structure.parts {
+            if matches!(part.media_type.as_str(), "text/plain" | "text/html") && !part.attachment {
+                continue;
+            }
+            let file =
+                receive(self.store.part_file(location.clone(), part.clone())).map_err(fail)?;
+            let resource = self
+                .resources
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .lazy(
+                    super::resources::PartSpec {
+                        location: location.clone(),
+                        folder: folder.into(),
+                        part: part.clone(),
+                    },
+                    file,
+                )?;
+            content.attachments.push(mail_content::Attachment {
+                name: part.name.clone().unwrap_or_else(|| "未命名附件".into()),
+                media_type: part.media_type.clone(),
+                content_id: part.cid.clone(),
+                bytes: Arc::from([]),
+                remote: Some(resource.id),
+                declared_size: u64::from(part.encoded_size),
+            });
+        }
+        if selected.is_empty() {
+            warnings.push("没有可安全获取的正文；附件可单独下载".into());
+        }
+        content.warnings.extend(warnings);
+        let _ = receive(
+            self.store
+                .mark_attachments(location.clone(), content.attachments.len() as u32),
+        );
+        Ok(content)
+    }
+    fn read_part(
+        &self,
+        location: &mail_core::MailUid,
+        folder: &str,
+        part: &mail_core::MimePart,
+        max: u64,
+    ) -> Result<Vec<u8>, RpcError> {
+        use std::io::{Read, Seek};
+        if let Some(file) =
+            receive(self.store.part_file(location.clone(), part.clone())).map_err(fail)?
+        {
+            if file.metadata().map_err(fail)?.len() > max {
+                return Err(fail("正文或图片超过安全限制"));
+            }
+            let mut bytes = vec![];
+            file.take(max + 1).read_to_end(&mut bytes).map_err(fail)?;
+            return Ok(bytes);
+        }
+        if u64::from(part.encoded_size) > max * 3 {
+            return Err(fail("正文或CID超过安全获取限制"));
+        }
+        let (settings, credentials) = self.credentials(location.account.clone())?;
+        let mut file = receive(self.store.part_temporary()).map_err(fail)?;
+        mail_service::parts::fetch(
+            &settings.imap,
+            &credentials.imap,
+            folder,
+            location.uidvalidity,
+            location.uid,
+            part,
+            &mut file,
+            max,
+            |_| !self.cancel.load(Ordering::Acquire),
+        )
+        .map_err(fail)?;
+        if self.cancel.load(Ordering::Acquire) {
+            return Err(fail("阅读已取消，未发布资源"));
+        }
+        file.sync_all().map_err(fail)?;
+        file.rewind().map_err(fail)?;
+        let mut bytes = vec![];
+        file.by_ref()
+            .take(max + 1)
+            .read_to_end(&mut bytes)
+            .map_err(fail)?;
+        receive(self.store.save_part(location.clone(), part.clone(), file)).map_err(fail)?;
+        Ok(bytes)
+    }
+}
+
+#[cfg(test)]
+mod parts_tests {
+    use super::*;
+    #[test]
+    fn cancelled_read_never_enters_body_fetch_or_publishes_resources() {
+        let root = tempfile::tempdir().unwrap();
+        let mut worker =
+            crate::storage::StorageWorker::start(Some(root.path().join("data"))).unwrap();
+        let mut context = Context {
+            store: worker.client(),
+            enabled: false,
+            cache: root.path().join("cache"),
+            resources: Default::default(),
+            contents: HashMap::new(),
+            cancel: Arc::new(AtomicBool::new(true)),
+        };
+        let result = context.execute(BusinessOperation::Read {
+            location: mail_core::MailUid {
+                account: mail_core::AccountId("fixture".into()),
+                folder_id: "inbox".into(),
+                uidvalidity: 42,
+                uid: 7,
+            },
+            folder: "INBOX".into(),
+        });
+        assert!(result.unwrap_err().message.contains("取消"));
+        assert!(context.contents.is_empty());
+        drop(context);
+        worker.stop();
     }
 }

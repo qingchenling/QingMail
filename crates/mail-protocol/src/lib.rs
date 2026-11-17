@@ -154,6 +154,9 @@ pub enum Command {
     ReadMessage {
         location: MailUid,
     },
+    ResourceStatus {
+        resource: String,
+    },
     DownloadAttachment {
         resource: String,
     },
@@ -311,6 +314,7 @@ impl Command {
             }
             Self::FinishUpload { resource }
             | Self::CancelResource { resource }
+            | Self::ResourceStatus { resource }
             | Self::DownloadAttachment { resource }
                 if !valid_id(resource) =>
             {
@@ -557,6 +561,7 @@ pub enum CommandName {
     SyncNow,
     PauseSync,
     ReadMessage,
+    ResourceStatus,
     DownloadAttachment,
     CancelResource,
     ReadResource,
@@ -630,6 +635,7 @@ impl Command {
             Self::SyncNow { .. } => CommandName::SyncNow,
             Self::PauseSync { .. } => CommandName::PauseSync,
             Self::ReadMessage { .. } => CommandName::ReadMessage,
+            Self::ResourceStatus { .. } => CommandName::ResourceStatus,
             Self::DownloadAttachment { .. } => CommandName::DownloadAttachment,
             Self::CancelResource { .. } => CommandName::CancelResource,
             Self::ReadResource { .. } => CommandName::ReadResource,
@@ -739,6 +745,7 @@ pub enum Reply {
     Message(MessageView),
     Resource(ResourceChunk),
     ResourceCreated(ResourceRef),
+    Download(DownloadInfo),
     OptionalResource(Option<ResourceRef>),
     Attachment(AttachmentInfo),
     Attachments(Vec<AttachmentInfo>),
@@ -950,4 +957,14 @@ mod contract_tests {
         json["command"]["args"]["settings"]["imap"]["password"] = "do-not-accept".into();
         assert!(serde_json::from_value::<Request>(json).is_err());
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DownloadInfo {
+    pub resource: ResourceRef,
+    /// 网络获取的编码字节数；Ready时resource.size为完整解码大小。
+    pub received: u64,
+    pub total: u64,
+    pub error: Option<String>,
 }

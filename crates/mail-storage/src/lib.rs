@@ -7,6 +7,7 @@ mod message_body;
 mod multi_account;
 mod mutations;
 mod operations;
+mod parts;
 pub use account_credentials::AccountVersion;
 pub use mutations::MutationClaim;
 mod objects;
@@ -31,7 +32,7 @@ use private_dir::PrivateDir;
 use rusqlite::{Connection, MAIN_DB, OpenFlags, OptionalExtension, params};
 use std::{fmt, fs::File, io, path::Path, time::Duration};
 
-const SCHEMA_VERSION: u32 = 12;
+const SCHEMA_VERSION: u32 = 13;
 const APPLICATION_ID: u32 = 0x514d4149;
 const SCHEMA: &str = include_str!("schema.sql");
 const SCHEMA_V2: &str = include_str!("schema-v2.sql");
@@ -307,6 +308,8 @@ impl Store {
             "DELETE FROM draft_attachments WHERE account_id=?1",
             "DELETE FROM local_editor WHERE account_id=?1",
             "DELETE FROM drafts WHERE account_id=?1",
+            "DELETE FROM part_resources WHERE account_id=?1",
+            "DELETE FROM message_structures WHERE account_id=?1",
             "DELETE FROM message_bodies WHERE account_id=?1",
             "DELETE FROM folder_messages WHERE account_id=?1",
             "DELETE FROM folder_sync WHERE folder_id IN (SELECT id FROM folders WHERE account_id=?1)",
@@ -655,6 +658,9 @@ fn migrate(
     }
     if version < 12 {
         tx.execute_batch(include_str!("schema-v12.sql"))?;
+    }
+    if version < 13 {
+        tx.execute_batch(include_str!("schema-v13.sql"))?;
     }
     tx.pragma_update(None, "application_id", APPLICATION_ID)?;
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;

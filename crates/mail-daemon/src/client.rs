@@ -5,6 +5,13 @@ use mail_protocol::{
 };
 use std::time::{Duration, Instant};
 pub fn run(client: &Client, operation: BusinessOperation) -> Result<Reply, String> {
+    run_cancellable(client, operation, None)
+}
+fn run_cancellable(
+    client: &Client,
+    operation: BusinessOperation,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+) -> Result<Reply, String> {
     let writes = operation.writes();
     let request = Request::new(
         request_id().map_err(|e| e.to_string())?,
@@ -19,6 +26,12 @@ pub fn run(client: &Client, operation: BusinessOperation) -> Result<Reply, Strin
     }
     let deadline = Instant::now() + Duration::from_secs(180);
     while Instant::now() < deadline {
+        if !writes && cancel.is_some_and(|c| c.load(std::sync::atomic::Ordering::Acquire)) {
+            let _ = client.request(Command::CancelResource {
+                resource: request.id.clone(),
+            });
+            return Err("阅读已取消".into());
+        }
         match client.request(Command::JobResult {
             task: request.id.clone(),
         }) {
@@ -50,11 +63,20 @@ pub fn content(
     };
     materialize(client, view)
 }
+pub fn content_cancellable(
+    client: &Client,
+    operation: BusinessOperation,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<mail_content::MailContent, String> {
+    let Reply::Message(view) = run_cancellable(client, operation, Some(cancel))? else {
+        return Err("阅读响应类型无效".into());
+    };
+    materialize(client, view)
+}
 fn materialize(client: &Client, view: MessageView) -> Result<mail_content::MailContent, String> {
     let refs = std::iter::once(&view.document)
         .chain(std::iter::once(&view.plain))
         .chain(view.images.iter().map(|i| &i.resource))
-        .chain(view.attachments.iter().map(|a| &a.resource))
         .cloned()
         .collect::<Vec<_>>();
     let result = (|| {
@@ -100,14 +122,13 @@ fn materialize(client: &Client, view: MessageView) -> Result<mail_content::MailC
             );
         }
         for attachment in view.attachments {
-            let bytes = client
-                .read_resource(&attachment.resource, mail_content::MAX_MESSAGE_BYTES as u64)
-                .map_err(|e| e.to_string())?;
             content.attachments.push(mail_content::Attachment {
                 name: attachment.name,
-                media_type: attachment.resource.media_type,
+                media_type: attachment.resource.media_type.clone(),
                 content_id: None,
-                bytes: bytes.into(),
+                declared_size: attachment.resource.size,
+                remote: Some(attachment.resource.id),
+                bytes: std::sync::Arc::from([]),
             });
         }
         Ok(content)

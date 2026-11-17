@@ -1124,3 +1124,179 @@ fn offline_operations_lost_reply_restart_overlay_and_explicit_resolution() {
     client.request(Command::PrepareShutdown).unwrap();
     daemon.exited();
 }
+
+#[test]
+fn parts_deferred_large_attachment_offline_body_browser_and_file_resource_stream() {
+    use mail_core::*;
+    let root = private_root();
+    let (location, large) = {
+        let mut store = mail_storage::Store::open(&root.path().join("data")).unwrap();
+        let server = ServerSettings {
+            host: "example.invalid".into(),
+            port: 993,
+            username: "fixture".into(),
+            security: ConnectionSecurity::Tls,
+        };
+        let account = store
+            .create_account(&AccountSettings {
+                display_name: "parts".into(),
+                address: "parts@example.invalid".into(),
+                imap: server.clone(),
+                smtp: server,
+            })
+            .unwrap();
+        let inbox = store.upsert_folder(&account, "INBOX", 42).unwrap();
+        let location = MailUid {
+            account,
+            folder_id: inbox.id.0,
+            uidvalidity: 42,
+            uid: 7,
+        };
+        store
+            .cache_message(
+                &location,
+                &MessageEnvelope {
+                    subject: "sections".into(),
+                    sender: "fixture@example.invalid".into(),
+                    received_at: 1,
+                },
+            )
+            .unwrap();
+        let small = MimePart {
+            section: "1".into(),
+            media_type: "text/html".into(),
+            charset: Some("utf-8".into()),
+            encoding: "binary".into(),
+            encoded_size: 160,
+            name: None,
+            cid: None,
+            attachment: false,
+        };
+        let large = MimePart {
+            section: "2".into(),
+            media_type: "application/octet-stream".into(),
+            charset: None,
+            encoding: "base64".into(),
+            encoded_size: 12 * 1024 * 1024,
+            name: Some("large.bin".into()),
+            cid: None,
+            attachment: true,
+        };
+        store
+            .save_mime_structure(
+                &location,
+                &MimeStructure {
+                    total_size: 13 * 1024 * 1024,
+                    headers: b"From: fixture@example.invalid\r\nSubject: sections\r\n\r\n".to_vec(),
+                    parts: vec![small.clone(), large.clone()],
+                },
+            )
+            .unwrap();
+        let mut file = store.part_temporary().unwrap();
+        file.write_all("<p>小正文可离线阅读</p><script>evil()</script><img src=\"https://example.invalid/tracker\">".as_bytes()).unwrap();
+        store.save_part(&location, &small, file).unwrap();
+        assert!(store.part_file(&location, &large).unwrap().is_none());
+        (location, large)
+    };
+    let mut daemon = Daemon::start(root.path());
+    let client = daemon.ready(root.path());
+    let content = mail_daemon::client::content(
+        &client,
+        BusinessOperation::Read {
+            location: location.clone(),
+            folder: "INBOX".into(),
+        },
+    )
+    .unwrap();
+    assert!(content.plain.contains("小正文"));
+    assert!(!content.document.native_html().contains("<script"));
+    assert_eq!(content.attachments.len(), 1);
+    assert!(content.attachments[0].bytes.is_empty());
+    let id = content.attachments[0].remote.clone().unwrap();
+    assert!(
+        matches!(client.request(Command::ResourceStatus{resource:id.clone()}).unwrap(),Reply::Download(s) if s.resource.state==ResourceState::NotCached)
+    );
+    assert!(client.read_chunk(&id, 0, 65536).is_err());
+    assert!(
+        client
+            .request(Command::DownloadAttachment {
+                resource: id.clone()
+            })
+            .is_err()
+    );
+    let Reply::BrowserCopy { url } = mail_daemon::client::run(
+        &client,
+        BusinessOperation::BrowserCopy {
+            content: content.display_handle.unwrap(),
+        },
+    )
+    .unwrap() else {
+        panic!()
+    };
+    let html = fs::read_to_string(url.strip_prefix("file://").unwrap()).unwrap();
+    assert!(html.contains("小正文"));
+    assert!(html.contains("connect-src 'none'"));
+    assert!(!html.contains("<script"));
+    assert!(!html.contains("src=\"https://example.invalid/tracker\""));
+    assert!(!html.contains("large.bin"));
+    client.request(Command::PrepareShutdown).unwrap();
+    daemon.exited();
+    drop(daemon);
+    {
+        let mut store = mail_storage::Store::open(&root.path().join("data")).unwrap();
+        assert!(store.part_file(&location, &large).unwrap().is_none());
+        let mut file = store.part_temporary().unwrap();
+        let chunk = [0x5a; 65536];
+        for _ in 0..144 {
+            file.write_all(&chunk).unwrap();
+        }
+        store.save_part(&location, &large, file).unwrap();
+    }
+    let mut daemon = Daemon::start(root.path());
+    let client = daemon.ready(root.path());
+    let content = mail_daemon::client::content(
+        &client,
+        BusinessOperation::Read {
+            location: location.clone(),
+            folder: "INBOX".into(),
+        },
+    )
+    .unwrap();
+    assert!(content.attachments[0].bytes.is_empty());
+    let id = content.attachments[0].remote.clone().unwrap();
+    let Reply::Download(status) = client
+        .request(Command::DownloadAttachment {
+            resource: id.clone(),
+        })
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(status.resource.state, ResourceState::Ready);
+    assert_eq!(status.resource.size, 9 * 1024 * 1024);
+    let (first, bytes) = client.read_chunk(&id, 0, 65536).unwrap();
+    assert_eq!(first.total, 9 * 1024 * 1024);
+    assert_eq!(bytes, vec![0x5a; 65536]);
+    let (last, bytes) = client.read_chunk(&id, 9 * 1024 * 1024 - 5, 65536).unwrap();
+    assert!(last.complete);
+    assert_eq!(bytes, vec![0x5a; 5]);
+    assert!(client.read_chunk(&id, 0, 65537).is_err());
+    let Reply::Pending { task } = client.request(Command::ReadMessage { location }).unwrap() else {
+        panic!()
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if matches!(
+            client
+                .request(Command::JobResult { task: task.clone() })
+                .unwrap(),
+            Reply::Job { result: Some(_) }
+        ) {
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    client.request(Command::PrepareShutdown).unwrap();
+    daemon.exited();
+}
