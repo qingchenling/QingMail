@@ -2,6 +2,7 @@ use mail_core::AccountId;
 use secret_service::{EncryptionType, SecretService};
 use std::{collections::HashMap, fmt, time::Duration};
 use zeroize::Zeroizing;
+pub mod staging;
 
 /// 不实现 Debug/Clone，避免意外日志和无意扩散；不承诺第三方库内存副本全部清零。
 pub struct Credentials {
@@ -30,6 +31,7 @@ pub enum VaultError {
     Invalid,
     OperationFailed,
     Timeout,
+    Expired,
 }
 impl fmt::Display for VaultError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -40,6 +42,7 @@ impl fmt::Display for VaultError {
             Self::Ambiguous => "密钥库存在重复项，请处理后重试",
             Self::Invalid => "凭据格式无效",
             Self::Timeout => "密钥库操作超时；保存结果可能未知，请检查密钥库后重试",
+            Self::Expired => "临时凭据已过期，请重新输入密码并检查连接",
             Self::OperationFailed => "密钥库操作失败，未回退明文文件",
         })
     }

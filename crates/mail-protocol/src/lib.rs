@@ -83,6 +83,9 @@ pub enum Command {
         settings: AccountSettings,
         credential_ref: String,
     },
+    AccountCheckStatus {
+        task: String,
+    },
     CommitAccount {
         check: String,
         account: Option<AccountId>,
@@ -283,6 +286,7 @@ impl Command {
             Self::CheckAccount { credential_ref, .. } if !valid_id(credential_ref) => {
                 Err(ProtocolError::Invalid)
             }
+            Self::AccountCheckStatus { task } if !valid_id(task) => Err(ProtocolError::Invalid),
             Self::AttachmentInfos { ids, .. } if ids.len() > 32 => Err(ProtocolError::Invalid),
             Self::CreateUpload { name, size, .. }
                 if *size > 25 * 1024 * 1024
@@ -450,6 +454,7 @@ pub enum CommandName {
     MutationResult,
     Accounts,
     CheckAccount,
+    AccountCheckStatus,
     SetDefaultAccount,
     SyncHistory,
     DraftConflicts,
@@ -518,6 +523,7 @@ impl Command {
             Self::MutationResult { .. } => CommandName::MutationResult,
             Self::Accounts => CommandName::Accounts,
             Self::CheckAccount { .. } => CommandName::CheckAccount,
+            Self::AccountCheckStatus { .. } => CommandName::AccountCheckStatus,
             Self::CommitAccount { .. } => CommandName::CommitAccount,
             Self::AccountImpact { .. } => CommandName::AccountImpact,
             Self::RemoveAccount { .. } => CommandName::RemoveAccount,
@@ -586,6 +592,9 @@ pub enum Reply {
     Mutation(MutationStatus),
     Accounts(Vec<(AccountId, AccountSettings)>),
     AccountCheck(AccountCheckResult),
+    AccountCheckPending {
+        task: String,
+    },
     AccountSaved(AccountId),
     AccountImpact(AccountImpact),
     Catalog {
