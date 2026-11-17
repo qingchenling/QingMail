@@ -265,6 +265,16 @@ pub fn parse(raw: &[u8]) -> Result<MailContent, ContentError> {
     } else {
         result.finish_plain();
     }
+    if result
+        .attachments
+        .iter()
+        .any(|a| a.media_type == "application/vnd.qingmail.draft+json")
+        && server_draft_model(raw).is_some()
+    {
+        result
+            .attachments
+            .retain(|a| a.media_type != "application/vnd.qingmail.draft+json");
+    }
     result.warnings.sort();
     result.warnings.dedup();
     Ok(result)
@@ -719,7 +729,11 @@ pub struct EditableServerCopy {
 }
 pub fn editable_server_copy(raw: &[u8]) -> Result<EditableServerCopy, ContentError> {
     let content = parse(raw)?;
-    let body = Draft::plain(&content.plain).map_err(ContentError)?;
+    let model = server_draft_model(raw);
+    let body = match &model {
+        Some(model) => model.clone(),
+        None => Draft::plain(&content.plain).map_err(ContentError)?,
+    };
     let parsed = MessageParser::new()
         .max_depth(32)
         .max_parts(256)
@@ -744,8 +758,57 @@ pub fn editable_server_copy(raw: &[u8]) -> Result<EditableServerCopy, ContentErr
         cc: content.cc,
         bcc: address_list(parsed.bcc()),
         body,
-        attachments: content.attachments,
+        attachments: content
+            .attachments
+            .into_iter()
+            .filter(|a| model.is_none() || a.media_type != "application/vnd.qingmail.draft+json")
+            .collect(),
     })
+}
+/// 仅当受控模型和实际plain/HTML正文完全一致时恢复格式，不能让过期元数据覆盖外部修改。
+pub fn server_draft_model(raw: &[u8]) -> Option<Draft> {
+    if raw.len() > MAX_MESSAGE_BYTES {
+        return None;
+    }
+    let parsed = MessageParser::new()
+        .max_depth(32)
+        .max_parts(256)
+        .parse(raw)?;
+    let mut model = None;
+    for part in parsed.parts() {
+        if part.content_type().is_some_and(|t| {
+            t.ctype().eq_ignore_ascii_case("application")
+                && t.subtype()
+                    .is_some_and(|s| s.eq_ignore_ascii_case("vnd.qingmail.draft+json"))
+        }) {
+            if model.is_some() {
+                return None;
+            }
+            let (bytes, problems) = part.decoded_checked();
+            if !problems.is_empty() {
+                return None;
+            }
+            model = Some(Draft::from_json(&bytes).ok()?);
+        }
+    }
+    let model = model?;
+    let normalize = |s: &str| s.replace("\r\n", "\n").trim_end().to_owned();
+    let plain = parsed
+        .text_body()
+        .find(|p| matches!(p.kind(), PartKind::Text))?
+        .text_checked()?;
+    let html = parsed
+        .html_body()
+        .find(|p| matches!(p.kind(), PartKind::Html))?
+        .text_checked()?;
+    if !plain.1.is_empty()
+        || !html.1.is_empty()
+        || normalize(&plain.0) != normalize(&model.plain_export())
+        || normalize(&html.0) != normalize(&model.html())
+    {
+        return None;
+    }
+    Some(model)
 }
 
 #[cfg(test)]

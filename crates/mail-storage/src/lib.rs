@@ -3,6 +3,7 @@
 mod account_credentials;
 mod client_requests;
 pub use client_requests::{ClientRequests, PendingAccountRequest};
+mod draft_uploads;
 mod message_body;
 mod multi_account;
 mod mutations;
@@ -10,6 +11,7 @@ mod operations;
 mod parts;
 mod server_drafts;
 pub use account_credentials::AccountVersion;
+pub use draft_uploads::{DraftUpload, DraftUploadCandidate};
 pub use mutations::MutationClaim;
 mod objects;
 mod outbox;
@@ -33,7 +35,7 @@ use private_dir::PrivateDir;
 use rusqlite::{Connection, MAIN_DB, OpenFlags, OptionalExtension, params};
 use std::{fmt, fs::File, io, path::Path, time::Duration};
 
-const SCHEMA_VERSION: u32 = 14;
+const SCHEMA_VERSION: u32 = 15;
 const APPLICATION_ID: u32 = 0x514d4149;
 const SCHEMA: &str = include_str!("schema.sql");
 const SCHEMA_V2: &str = include_str!("schema-v2.sql");
@@ -308,6 +310,8 @@ impl Store {
             "DELETE FROM send_tasks WHERE account_id=?1",
             "DELETE FROM draft_attachments WHERE account_id=?1",
             "DELETE FROM local_editor WHERE account_id=?1",
+            "DELETE FROM draft_uploads WHERE account_id=?1",
+            "DELETE FROM draft_sync WHERE account_id=?1",
             "DELETE FROM server_draft_sources WHERE account_id=?1",
             "DELETE FROM server_draft_folders WHERE account_id=?1",
             "DELETE FROM drafts WHERE account_id=?1",
@@ -667,6 +671,9 @@ fn migrate(
     }
     if version < 14 {
         tx.execute_batch(include_str!("schema-v14.sql"))?;
+    }
+    if version < 15 {
+        tx.execute_batch(include_str!("schema-v15.sql"))?;
     }
     tx.pragma_update(None, "application_id", APPLICATION_ID)?;
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;

@@ -184,6 +184,7 @@ impl Store {
                 },
             )?;
             self.connection.execute("UPDATE server_draft_sources SET converted=?1,baseline_revision=?2 WHERE id=?3 AND account_id=?4 AND converted IS NULL",params![draft.id.0,draft.revision,id,account.0])?;
+            self.connection.execute("UPDATE draft_sync SET base_source=?1,base_revision=?2,state='synced',detail='已转换，等待本地编辑' WHERE account_id=?3 AND draft_id=?4", params![id,draft.revision,account.0,draft.id.0])?;
             Ok(draft)
         })();
         if result.is_ok() {
@@ -348,7 +349,7 @@ mod tests {
                 },
             )
             .unwrap();
-        s.connection.execute_batch("DROP TABLE server_draft_sources; DROP TABLE server_draft_folders; PRAGMA user_version=13;").unwrap();
+        s.connection.execute_batch("DROP TRIGGER track_server_draft_insert; DROP TRIGGER track_server_draft_update; DROP TABLE draft_uploads; DROP TABLE draft_sync; DROP TABLE server_draft_sources; DROP TABLE server_draft_folders; PRAGMA user_version=13;").unwrap();
         drop(s);
         let s = Store::open(&data).unwrap();
         assert_eq!(s.draft(&a, &draft.id).unwrap(), draft);
@@ -356,7 +357,7 @@ mod tests {
             s.connection
                 .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
                 .unwrap(),
-            14
+            15
         );
         assert!(std::fs::read_dir(&data).unwrap().any(|p| {
             p.unwrap()

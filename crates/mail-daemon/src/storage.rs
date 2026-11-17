@@ -33,6 +33,44 @@ pub struct StorageWorker {
 }
 
 enum Request {
+    DeferDraftUpload {
+        account: AccountId,
+        id: String,
+        reply: SyncSender<StorageResult<()>>,
+    },
+    NextDraftUpload {
+        reply: SyncSender<StorageResult<Option<mail_storage::DraftUploadCandidate>>>,
+    },
+    DraftSyncSnapshot {
+        draft: StoredDraft,
+        reply: SyncSender<StorageResult<mail_storage::OutgoingSnapshot>>,
+    },
+    PrepareDraftUpload {
+        draft: StoredDraft,
+        folder: String,
+        epoch: Option<u32>,
+        id: String,
+        raw: Vec<u8>,
+        reply: SyncSender<StorageResult<mail_storage::DraftUpload>>,
+    },
+    BeginDraftUpload {
+        account: AccountId,
+        id: String,
+        reply: SyncSender<StorageResult<bool>>,
+    },
+    CompleteDraftUpload {
+        upload: mail_storage::DraftUpload,
+        epoch: u32,
+        uid: u32,
+        reply: SyncSender<StorageResult<()>>,
+    },
+    FailDraftSync {
+        account: AccountId,
+        draft: mail_core::DraftId,
+        state: String,
+        detail: String,
+        reply: SyncSender<StorageResult<()>>,
+    },
     ServerDraftOriginal {
         account: AccountId,
         source: String,
@@ -374,6 +412,77 @@ impl Drop for StorageWorker {
 }
 
 impl StorageClient {
+    pub(crate) fn defer_draft_upload(
+        &self,
+        account: AccountId,
+        id: String,
+    ) -> StorageResult<Receiver<StorageResult<()>>> {
+        self.request(|reply| Request::DeferDraftUpload { account, id, reply })
+    }
+
+    pub(crate) fn next_draft_upload(
+        &self,
+    ) -> StorageResult<Receiver<StorageResult<Option<mail_storage::DraftUploadCandidate>>>> {
+        self.request(|reply| Request::NextDraftUpload { reply })
+    }
+    pub(crate) fn draft_sync_snapshot(
+        &self,
+        draft: StoredDraft,
+    ) -> StorageResult<Receiver<StorageResult<mail_storage::OutgoingSnapshot>>> {
+        self.request(|reply| Request::DraftSyncSnapshot { draft, reply })
+    }
+    pub(crate) fn prepare_draft_upload(
+        &self,
+        draft: StoredDraft,
+        folder: String,
+        epoch: Option<u32>,
+        id: String,
+        raw: Vec<u8>,
+    ) -> StorageResult<Receiver<StorageResult<mail_storage::DraftUpload>>> {
+        self.request(|reply| Request::PrepareDraftUpload {
+            draft,
+            folder,
+            epoch,
+            id,
+            raw,
+            reply,
+        })
+    }
+    pub(crate) fn begin_draft_upload(
+        &self,
+        account: AccountId,
+        id: String,
+    ) -> StorageResult<Receiver<StorageResult<bool>>> {
+        self.request(|reply| Request::BeginDraftUpload { account, id, reply })
+    }
+    pub(crate) fn complete_draft_upload(
+        &self,
+        upload: mail_storage::DraftUpload,
+        epoch: u32,
+        uid: u32,
+    ) -> StorageResult<Receiver<StorageResult<()>>> {
+        self.request(|reply| Request::CompleteDraftUpload {
+            upload,
+            epoch,
+            uid,
+            reply,
+        })
+    }
+    pub(crate) fn fail_draft_sync(
+        &self,
+        account: AccountId,
+        draft: mail_core::DraftId,
+        state: String,
+        detail: String,
+    ) -> StorageResult<Receiver<StorageResult<()>>> {
+        self.request(|reply| Request::FailDraftSync {
+            account,
+            draft,
+            state,
+            detail,
+            reply,
+        })
+    }
     pub(crate) fn server_draft_original(
         &self,
         account: AccountId,
@@ -1078,6 +1187,65 @@ fn run(path: Option<PathBuf>, receiver: Receiver<Request>) {
         })();
         let opened = opened.map(|()| store.as_mut().expect("opened"));
         match request {
+            Request::DeferDraftUpload { account, id, reply } => {
+                let _ = reply.send(opened.and_then(|s| {
+                    s.defer_draft_upload(&account, &id)
+                        .map_err(|e| e.to_string())
+                }));
+            }
+
+            Request::NextDraftUpload { reply } => {
+                let _ = reply
+                    .send(opened.and_then(|s| s.next_draft_upload().map_err(|e| e.to_string())));
+            }
+            Request::DraftSyncSnapshot { draft, reply } => {
+                let _ = reply.send(opened.and_then(|s| {
+                    s.draft_send_snapshot(&draft.account, &draft.id, draft.revision)
+                        .map_err(|e| e.to_string())
+                }));
+            }
+            Request::PrepareDraftUpload {
+                draft,
+                folder,
+                epoch,
+                id,
+                raw,
+                reply,
+            } => {
+                let _ = reply.send(opened.and_then(|s| {
+                    s.prepare_draft_upload(&draft, &folder, epoch, &id, &raw)
+                        .map_err(|e| e.to_string())
+                }));
+            }
+            Request::BeginDraftUpload { account, id, reply } => {
+                let _ = reply.send(opened.and_then(|s| {
+                    s.begin_draft_upload(&account, &id)
+                        .map_err(|e| e.to_string())
+                }));
+            }
+            Request::CompleteDraftUpload {
+                upload,
+                epoch,
+                uid,
+                reply,
+            } => {
+                let _ = reply.send(opened.and_then(|s| {
+                    s.complete_draft_upload(&upload, epoch, uid)
+                        .map_err(|e| e.to_string())
+                }));
+            }
+            Request::FailDraftSync {
+                account,
+                draft,
+                state,
+                detail,
+                reply,
+            } => {
+                let _ = reply.send(opened.and_then(|s| {
+                    s.fail_draft_sync(&account, &draft, &state, &detail)
+                        .map_err(|e| e.to_string())
+                }));
+            }
             Request::ServerDraftOriginal {
                 account,
                 source,

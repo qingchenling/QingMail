@@ -1446,3 +1446,88 @@ fn server_draft_original_conversion_replay_isolation_and_offline_restart() {
     let raw = store.server_draft_original(&account, &source.id).unwrap();
     assert!(String::from_utf8_lossy(&raw).contains("<script>blocked()</script>"));
 }
+
+#[test]
+fn draft_upload_intent_and_uncertain_status_survive_isolated_daemon_restart_without_smtp() {
+    use mail_core::*;
+    let root = private_root();
+    let (account, draft, id) = {
+        let mut s = mail_storage::Store::open(&root.path().join("data")).unwrap();
+        let server = ServerSettings {
+            host: "example.invalid".into(),
+            port: 993,
+            username: "fixture".into(),
+            security: ConnectionSecurity::Tls,
+        };
+        let a = s
+            .create_account(&AccountSettings {
+                display_name: "draft sync".into(),
+                address: "me@example.invalid".into(),
+                imap: server.clone(),
+                smtp: server,
+            })
+            .unwrap();
+        s.replace_remote_folders(
+            &a,
+            &[RemoteFolder {
+                name: "Drafts".into(),
+                display_name: "Drafts".into(),
+                delimiter: None,
+                selectable: true,
+            }],
+            0,
+        )
+        .unwrap();
+        s.set_server_draft_folder(&a, "Drafts").unwrap();
+        let draft = s
+            .create_draft(&a, &document("saved while offline"))
+            .unwrap();
+        let id = "e".repeat(32);
+        s.prepare_draft_upload(
+            &draft,
+            "Drafts",
+            Some(42),
+            &id,
+            b"Subject: fixed upload\r\n\r\nfrozen",
+        )
+        .unwrap();
+        assert!(!s.begin_draft_upload(&a, &id).unwrap());
+        (a, draft, id)
+    };
+    for _ in 0..2 {
+        let mut daemon = Daemon::start(root.path());
+        let client = daemon.ready(root.path());
+        let Reply::DraftSyncStatus(items) = client
+            .request(Command::DraftSyncStatus {
+                account: account.clone(),
+            })
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].draft, draft.id);
+        assert_eq!(items[0].state, "uncertain");
+        client
+            .request(Command::FlushDraftSync {
+                account: account.clone(),
+            })
+            .unwrap();
+        let Reply::Tasks(tasks) = client
+            .request(Command::Tasks {
+                account: account.clone(),
+            })
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert!(tasks.is_empty());
+        client.request(Command::PrepareShutdown).unwrap();
+        daemon.exited();
+        drop(daemon);
+    }
+    let s = mail_storage::Store::open(&root.path().join("data")).unwrap();
+    let intent = s.draft_upload(&account, &id).unwrap();
+    assert!(intent.probe_only);
+    assert_eq!(intent.raw, b"Subject: fixed upload\r\n\r\nfrozen");
+}

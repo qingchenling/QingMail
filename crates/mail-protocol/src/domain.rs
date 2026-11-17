@@ -94,6 +94,12 @@ mod server_draft_contract_tests {
     fn server_draft_commands_validate_and_roundtrip_without_paths_or_mime_payloads() {
         let account = AccountId("a".repeat(32));
         for command in [
+            Command::DraftSyncStatus {
+                account: account.clone(),
+            },
+            Command::FlushDraftSync {
+                account: account.clone(),
+            },
             Command::ServerDrafts {
                 account: account.clone(),
             },
@@ -148,4 +154,16 @@ mod server_draft_contract_tests {
             assert!(Request::new("d".repeat(32), command).validate().is_err());
         }
     }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DraftSyncInfo {
+    pub draft: DraftId,
+    pub subject: String,
+    pub revision: u32,
+    pub base_revision: u32,
+    pub state: String,
+    pub detail: String,
+    pub source: Option<String>,
 }

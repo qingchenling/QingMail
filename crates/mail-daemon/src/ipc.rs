@@ -87,6 +87,7 @@ struct Service {
     storage: StorageClient,
     sync: SyncEngine,
     operations: crate::operations::Operations,
+    drafts: crate::draft_sync::DraftSync,
     accounts: AccountGateway,
     epoch: String,
     revision: Arc<AtomicU64>,
@@ -121,6 +122,12 @@ impl Server {
             sync.pause_signal(),
             revision.clone(),
         )?;
+        let drafts = crate::draft_sync::DraftSync::start(
+            storage.client(),
+            config.network_enabled,
+            sync.pause_signal(),
+            revision.clone(),
+        )?;
         let resources = Arc::new(Mutex::new(resources::Resources::default()));
         let downloads = downloads::Downloads::start(
             storage.client(),
@@ -139,6 +146,7 @@ impl Server {
             ownership: Mutex::new(()),
             sync,
             operations,
+            drafts,
             accounts,
             epoch: transport::request_id()?,
             revision: revision.clone(),
@@ -272,6 +280,7 @@ impl Server {
         });
         let mut service = Arc::try_unwrap(self.service)
             .map_err(|_| io::Error::other("后台工作线程尚未释放状态"))?;
+        service.drafts.stop();
         service.downloads.stop();
         service.operations.stop();
         service.business.stop();

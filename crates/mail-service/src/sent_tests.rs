@@ -128,6 +128,7 @@ fn append_writes_the_exact_frozen_bytes_and_reports_appenduid() {
         r.get_mut().write_all(b"+ ready\r\n").unwrap();
         let mut literal = vec![0; expected.len()];
         r.read_exact(&mut literal).unwrap();
+        assert_eq!(line(&mut r), "\r\n");
         assert_eq!(literal, expected);
         r.get_mut()
             .write_all(b"QM6 OK [APPENDUID 42 7] appended\r\n")
@@ -277,6 +278,7 @@ fn refused_append_and_failed_search_are_reported_without_retry() {
                 r.get_mut().write_all(b"+ ready\r\n").unwrap();
                 let mut literal = vec![0; length];
                 r.read_exact(&mut literal).unwrap();
+                assert_eq!(line(&mut r), "\r\n");
                 assert_eq!(literal, frozen());
                 r.get_mut()
                     .write_all(b"QM6 NO [TOOBIG] too large\r\n")
@@ -335,6 +337,7 @@ fn disconnect_after_literal_is_reported_as_unknown_not_saved() {
         r.get_mut().write_all(b"+ ready\r\n").unwrap();
         let mut literal = vec![0; length];
         r.read_exact(&mut literal).unwrap();
+        assert_eq!(line(&mut r), "\r\n");
         // 读完正文后立即断开：客户端无法确认服务器是否已保存。
     });
     let result = save_copy_using(

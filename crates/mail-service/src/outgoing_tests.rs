@@ -442,3 +442,40 @@ fn smtp_total_deadline_stops_before_any_message_bytes() {
     worker.join().unwrap();
     assert!(matches!(delivery.outcome, SmtpOutcome::DefinitelyRejected));
 }
+
+#[test]
+fn draft_mime_accepts_empty_recipients_preserves_bcc_and_validated_rich_model_without_smtp() {
+    let mut input = snapshot();
+    input.headers.to.clear();
+    input.headers.cc.clear();
+    input.headers.bcc.clear();
+    input.attachments.clear();
+    let mut model = mail_content::draft::Draft::plain("中文 Bold\nsecond line").unwrap();
+    model.inline(7..11, |a| a.bold = true).unwrap();
+    input.plain = model.plain_export();
+    input.html = model.html();
+    let json = model.to_json().unwrap();
+    let raw = prepare_draft(&input, &json).unwrap();
+    assert_eq!(mail_content::server_draft_model(&raw), Some(model.clone()));
+    let copy = mail_content::editable_server_copy(&raw).unwrap();
+    assert_eq!(copy.body, model);
+    assert!(copy.attachments.is_empty());
+    assert!(matches!(
+        prepare(&input, true),
+        Err(PrepareError::NoRecipients)
+    ));
+    input.headers.bcc = vec!["hidden@example.invalid".into()];
+    let raw = prepare_draft(&input, &json).unwrap();
+    assert!(String::from_utf8_lossy(&raw).contains("Bcc: hidden@example.invalid"));
+    assert_eq!(
+        mail_content::editable_server_copy(&raw).unwrap().bcc,
+        vec!["hidden@example.invalid"]
+    );
+    input.headers.to = vec!["to@example.invalid".into()];
+    let smtp = prepare(&input, true).unwrap();
+    let mime = String::from_utf8_lossy(smtp.raw());
+    assert!(!mime.contains("Bcc:"));
+    assert!(!mime.contains("application/vnd.qingmail.draft+json"));
+    input.plain = "external modified body".into();
+    assert!(mail_content::server_draft_model(&prepare_draft(&input, &json).unwrap()).is_none());
+}

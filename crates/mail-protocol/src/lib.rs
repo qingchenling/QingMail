@@ -271,6 +271,12 @@ pub enum Command {
         folder: String,
         before: Option<u32>,
     },
+    DraftSyncStatus {
+        account: AccountId,
+    },
+    FlushDraftSync {
+        account: AccountId,
+    },
     ServerDrafts {
         account: AccountId,
     },
@@ -566,6 +572,8 @@ pub enum CommandName {
     AccountCheckStatus,
     SetDefaultAccount,
     SyncHistory,
+    DraftSyncStatus,
+    FlushDraftSync,
     ServerDrafts,
     ConvertServerDraft,
     DraftConflicts,
@@ -627,6 +635,8 @@ impl Command {
             Self::JobResult { .. } => CommandName::JobResult,
             Self::SetDefaultAccount { .. } => CommandName::SetDefaultAccount,
             Self::SyncHistory { .. } => CommandName::SyncHistory,
+            Self::DraftSyncStatus { .. } => CommandName::DraftSyncStatus,
+            Self::FlushDraftSync { .. } => CommandName::FlushDraftSync,
             Self::ServerDrafts { .. } => CommandName::ServerDrafts,
             Self::ConvertServerDraft { .. } => CommandName::ConvertServerDraft,
             Self::DraftConflicts { .. } => CommandName::DraftConflicts,
@@ -790,6 +800,7 @@ pub enum Reply {
         choices: Vec<RemoteFolder>,
     },
     ServerDraftSource(ServerDraftSource),
+    DraftSyncStatus(Vec<DraftSyncInfo>),
     DraftConflicts(Vec<DraftConflict>),
     Cache(CacheInfo),
     BrowserCopy {

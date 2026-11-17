@@ -78,9 +78,23 @@ pub fn prepare(
     snapshot: &OutgoingSnapshot,
     allow_empty_subject: bool,
 ) -> Result<PreparedMessage, PrepareError> {
+    prepare_inner(snapshot, allow_empty_subject, None)
+}
+/// 只生成草稿MIME，不返回SMTP可提交对象；空收件人合法，Bcc保留供其他客户端编辑。
+pub fn prepare_draft(snapshot: &OutgoingSnapshot, model: &[u8]) -> Result<Vec<u8>, PrepareError> {
+    if model.len() > 8 * 1024 * 1024 {
+        return Err(PrepareError::BodyLimit);
+    }
+    Ok(prepare_inner(snapshot, true, Some(model))?.raw)
+}
+fn prepare_inner(
+    snapshot: &OutgoingSnapshot,
+    allow_empty_subject: bool,
+    draft_model: Option<&[u8]>,
+) -> Result<PreparedMessage, PrepareError> {
     let sender = mailbox(&snapshot.sender).ok_or(PrepareError::Sender)?;
     let count = snapshot.headers.to.len() + snapshot.headers.cc.len() + snapshot.headers.bcc.len();
-    if count == 0 {
+    if count == 0 && draft_model.is_none() {
         return Err(PrepareError::NoRecipients);
     }
     if count > 100 {
@@ -122,6 +136,9 @@ pub fn prepare(
         .date(date)
         .message_id(Some(id.clone()))
         .subject(subject);
+    if draft_model.is_some() {
+        builder = builder.keep_bcc();
+    }
     let mut recipients = vec![];
     let mut seen = HashSet::new();
     for (field, values) in [
@@ -134,13 +151,18 @@ pub fn prepare(
             if seen.insert(address.to_string()) {
                 recipients.push(address.clone());
             }
-            // 密送只进信封；不通过Bcc头再删除，避免副本泄露。
+            // SMTP密送只进信封；只有草稿MIME保留Bcc供其他客户端编辑。
             if field == "收件人" {
                 builder = builder.to(Mailbox::new(None, address));
             } else if field == "抄送" {
                 builder = builder.cc(Mailbox::new(None, address));
+            } else if draft_model.is_some() {
+                builder = builder.bcc(Mailbox::new(None, address));
             }
         }
+    }
+    if draft_model.is_some() && recipients.is_empty() {
+        recipients.push(sender.clone());
     }
     let envelope =
         Envelope::new(Some(sender), recipients).map_err(|_| PrepareError::NoRecipients)?;
@@ -166,6 +188,17 @@ pub fn prepare(
     let mut mixed = MultiPart::mixed()
         .boundary(format!("qingmail-{boundary}-mixed"))
         .multipart(alternative);
+    if let Some(model) = draft_model {
+        mixed = mixed.singlepart(
+            SinglePart::builder()
+                .header(
+                    ContentType::parse("application/vnd.qingmail.draft+json")
+                        .map_err(|_| PrepareError::Metadata)?,
+                )
+                .header(ContentTransferEncoding::Base64)
+                .body(model.to_vec()),
+        );
+    }
     if snapshot.attachments.len() > 32 {
         return Err(PrepareError::MessageLimit);
     }
