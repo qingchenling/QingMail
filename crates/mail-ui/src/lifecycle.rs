@@ -62,7 +62,8 @@ pub(super) fn start(instance: Option<Instance>, cx: &mut App) -> Result<(), Stri
     let storage =
         mail_daemon::storage::StorageWorker::start(storage_path).map_err(|e| e.to_string())?;
     let worker = Background::start().map_err(|e| e.to_string())?;
-    let sync = mail_daemon::SyncEngine::start(storage.client());
+    let probe = std::env::args().any(|arg| arg.ends_with("-probe"));
+    let sync = mail_daemon::SyncEngine::start_enabled(storage.client(), !probe);
     let tray_enabled = !std::env::args().any(|arg| {
         matches!(
             arg.as_str(),
@@ -215,6 +216,9 @@ pub(super) fn storage(cx: &App) -> mail_daemon::storage::StorageClient {
 
 pub(super) fn sync_status(cx: &App) -> String {
     cx.global::<Lifecycle>().sync.status()
+}
+pub(super) fn sync_revision(cx: &App) -> u64 {
+    cx.global::<Lifecycle>().sync.revision()
 }
 pub(super) fn sync_paused(cx: &App) -> bool {
     cx.global::<Lifecycle>().sync.paused()

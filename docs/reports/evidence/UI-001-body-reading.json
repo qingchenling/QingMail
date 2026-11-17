@@ -1,0 +1,16 @@
+{
+  "passed": true,
+  "synthetic_only": true,
+  "schema": 8,
+  "process_runs": 2,
+  "body_sha256": "101048c2ef68749ec909859f9882dd03050ac476fee54a9cab13877be666c43a",
+  "cached_bodies": 3,
+  "sends": 0,
+  "checks": [
+    "SQLite worker to native Reader",
+    "offline reopen without credentials",
+    "CID and attachments",
+    "plain toggle and HTML restore",
+    "browser copy created; browser resource policy unchanged"
+  ]
+}
