@@ -41,12 +41,14 @@ pub struct CheckedAccount {
     pub settings: AccountSettings,
     pub credential_ref: String,
     pub credentials: Credentials,
+    pub baseline: Option<mail_storage::AccountVersion>,
 }
 struct Entry {
     request_id: String,
     account: Option<AccountId>,
     settings: AccountSettings,
     credential_ref: String,
+    baseline: Option<mail_storage::AccountVersion>,
     expires: Instant,
     state: State,
 }
@@ -165,6 +167,7 @@ impl CheckManager {
         account: Option<AccountId>,
         settings: AccountSettings,
         credential_ref: String,
+        baseline: Option<mail_storage::AccountVersion>,
     ) -> Result<Reply, RpcError> {
         if !self.enabled {
             return Err(error(
@@ -181,12 +184,16 @@ impl CheckManager {
             return Err(error(ErrorCode::InvalidRequest, "检查标识无效"));
         }
         accounts::validate(&settings).map_err(check_error)?;
+        if baseline.as_ref().map(|v| &v.account) != account.as_ref() {
+            return Err(error(ErrorCode::Conflict, "账号检查基线与目标不一致"));
+        }
         let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         entries.retain(|_, entry| entry.expires > Instant::now());
         if let Some((task, entry)) = entries.iter().find(|(_, e)| e.request_id == request) {
             if entry.account != account
                 || entry.settings != settings
                 || entry.credential_ref != credential_ref
+                || entry.baseline != baseline
             {
                 return Err(error(ErrorCode::Conflict, "原检查请求参数不一致"));
             }
@@ -203,6 +210,7 @@ impl CheckManager {
                 account,
                 settings,
                 credential_ref,
+                baseline,
                 expires: Instant::now() + TOKEN_TTL,
                 state: State::Pending,
             },
@@ -264,6 +272,7 @@ impl CheckManager {
                     settings: entry.settings.clone(),
                     credential_ref: entry.credential_ref.clone(),
                     credentials,
+                    baseline: entry.baseline.clone(),
                 })
             }
             State::Pending => Err(error(ErrorCode::Busy, "连接检查尚未完成")),
@@ -362,22 +371,39 @@ mod tests {
         let manager = CheckManager::with_backend(true, backend.clone()).unwrap();
         let id = "a".repeat(32);
         let target = Some(AccountId("b".repeat(32)));
+        let baseline = Some(mail_storage::AccountVersion {
+            account: target.clone().unwrap(),
+            settings: settings(),
+            credential_key: target.clone().unwrap(),
+        });
         let task = task(
             manager
-                .begin(&id, target.clone(), settings(), "c".repeat(32))
+                .begin(
+                    &id,
+                    target.clone(),
+                    settings(),
+                    "c".repeat(32),
+                    baseline.clone(),
+                )
                 .unwrap(),
         );
         assert_eq!(finished(&manager, &task).unwrap().check, Some(task.clone()));
         assert!(matches!(
             manager
-                .begin(&id, target.clone(), settings(), "c".repeat(32))
+                .begin(
+                    &id,
+                    target.clone(),
+                    settings(),
+                    "c".repeat(32),
+                    baseline.clone()
+                )
                 .unwrap(),
             Reply::AccountCheck(_)
         ));
         assert_eq!(backend.loads.load(Ordering::Relaxed), 1);
         assert_eq!(
             manager
-                .begin(&id, None, settings(), "c".repeat(32))
+                .begin(&id, None, settings(), "c".repeat(32), None)
                 .unwrap_err()
                 .code,
             ErrorCode::Conflict
@@ -424,18 +450,24 @@ mod tests {
         .unwrap();
         let first = task(
             manager
-                .begin(&"a".repeat(32), None, settings(), "f".repeat(32))
+                .begin(&"a".repeat(32), None, settings(), "f".repeat(32), None)
                 .unwrap(),
         );
         started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         for id in ['b', 'c'] {
             manager
-                .begin(&id.to_string().repeat(32), None, settings(), "f".repeat(32))
+                .begin(
+                    &id.to_string().repeat(32),
+                    None,
+                    settings(),
+                    "f".repeat(32),
+                    None,
+                )
                 .unwrap();
         }
         assert_eq!(
             manager
-                .begin(&"d".repeat(32), None, settings(), "f".repeat(32))
+                .begin(&"d".repeat(32), None, settings(), "f".repeat(32), None)
                 .unwrap_err()
                 .code,
             ErrorCode::Busy
@@ -460,7 +492,7 @@ mod tests {
             let manager = CheckManager::with_backend(true, backend.clone()).unwrap();
             let task = task(
                 manager
-                    .begin(&"a".repeat(32), None, settings(), "c".repeat(32))
+                    .begin(&"a".repeat(32), None, settings(), "c".repeat(32), None)
                     .unwrap(),
             );
             if missing {
@@ -491,7 +523,7 @@ mod tests {
         let manager = CheckManager::with_backend(false, backend.clone()).unwrap();
         assert_eq!(
             manager
-                .begin(&"a".repeat(32), None, settings(), "c".repeat(32))
+                .begin(&"a".repeat(32), None, settings(), "c".repeat(32), None)
                 .unwrap_err()
                 .code,
             ErrorCode::Unsupported

@@ -4,7 +4,7 @@ use gpui_kit::{
     prelude::*, px, size,
 };
 use gpui_kit_material::{prelude::*, theme};
-use mail_core::{AccountId, AccountSettings, SendState};
+use mail_core::{AccountId, SendState};
 use mail_daemon::storage::{StorageClient, receive};
 use mail_service::{
     credentials::{CredentialVault, SystemVault},
@@ -44,7 +44,6 @@ pub(super) struct SendTasks {
     store: StorageClient,
     account: Option<AccountId>,
     address: String,
-    settings: Option<AccountSettings>,
     tasks: Vec<SendTask>,
     status: String,
     busy: bool,
@@ -58,7 +57,6 @@ impl SendTasks {
             store: crate::lifecycle::storage(cx),
             account: None,
             address: String::new(),
-            settings: None,
             tasks: vec![],
             status: "正在读取发送任务…".into(),
             busy: false,
@@ -99,7 +97,6 @@ impl SendTasks {
                             .as_ref()
                             .map(|settings| settings.address.clone())
                             .unwrap_or_default();
-                        this.settings = settings;
                         this.tasks = tasks;
                         if this.account.is_none() {
                             this.status = "尚未添加邮箱".into();
@@ -185,7 +182,6 @@ impl SendTasks {
         }
         let task = task.clone();
         let store = self.store.clone();
-        let settings = self.settings.clone();
         self.busy = true;
         self.status = "正在准备发送内容…".into();
         let reader_account = self
@@ -196,14 +192,20 @@ impl SendTasks {
             // 已保存副本优先从服务器读取；失败或没有 UID 时退回冻结快照，
             // 两者是同一份 MIME（APPEND 的字节由同一快照确定性重建）。
             if task.state == SendState::Sent
-                && let (Some(settings), Some(copy), Some(uid)) = (
-                    settings,
+                && let (Some(copy), Some(uid)) = (
                     task.copy.clone(),
                     task.copy.as_ref().and_then(|copy| copy.uid),
                 )
             {
-                let credentials = match SystemVault.load(&task.account) {
-                    Ok(credentials) => credentials,
+                let access =
+                    receive(store.account_version(task.account.clone())).and_then(|access| {
+                        SystemVault
+                            .load(&access.credential_key)
+                            .map(|credentials| (access.settings, credentials))
+                            .map_err(|e| e.to_string())
+                    });
+                let (settings, credentials) = match access {
+                    Ok(access) => access,
                     Err(error) => {
                         let (raw, _) = local_content(&store, &task)?;
                         return Ok((

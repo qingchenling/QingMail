@@ -3953,6 +3953,7 @@ dependencies = [
  "mail-protocol",
  "mail-service",
  "mail-storage",
+ "rusqlite",
  "rustix",
  "serde_json",
  "tempfile",

@@ -1,7 +1,9 @@
 //! 本地索引与 P3 IPC 幂等记录：后台单写者、XDG 路径、事务迁移和 IMAP 定位隔离。
 //! 不保存密码/令牌；草稿与发送快照使用不可变对象和事务关联。
+mod account_credentials;
 mod message_body;
 mod mutations;
+pub use account_credentials::AccountVersion;
 pub use mutations::MutationClaim;
 mod objects;
 mod outbox;
@@ -25,7 +27,7 @@ use private_dir::PrivateDir;
 use rusqlite::{Connection, MAIN_DB, OpenFlags, OptionalExtension, params};
 use std::{fmt, fs::File, io, path::Path, time::Duration};
 
-const SCHEMA_VERSION: u32 = 9;
+const SCHEMA_VERSION: u32 = 10;
 const APPLICATION_ID: u32 = 0x514d4149;
 const SCHEMA: &str = include_str!("schema.sql");
 const SCHEMA_V2: &str = include_str!("schema-v2.sql");
@@ -194,6 +196,9 @@ impl Store {
     }
 
     pub fn insert_account(&mut self, id: &AccountId, settings: &AccountSettings) -> Result<()> {
+        self.insert_account_row(id, settings)
+    }
+    fn insert_account_row(&self, id: &AccountId, settings: &AccountSettings) -> Result<()> {
         validate_settings(settings)?;
         if id.0.len() != 32 || !id.0.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(Error::Invalid("无效账号 ID"));
@@ -231,6 +236,9 @@ impl Store {
 
     /// 修改同一账号的连接配置；账号 ID 与本地数据保持不变。
     pub fn update_account(&mut self, id: &AccountId, settings: &AccountSettings) -> Result<()> {
+        self.update_account_row(id, settings)
+    }
+    fn update_account_row(&self, id: &AccountId, settings: &AccountSettings) -> Result<()> {
         validate_settings(settings)?;
         let changed = self.connection.execute(
             "UPDATE accounts SET display_name=?1,address=?2,imap_host=?3,imap_port=?4,imap_username=?5,imap_security=?6,smtp_host=?7,smtp_port=?8,smtp_username=?9,smtp_security=?10 WHERE id=?11 AND kind='remote'",
@@ -624,6 +632,9 @@ fn migrate(
     }
     if version < 9 {
         tx.execute_batch(include_str!("schema-v9.sql"))?;
+    }
+    if version < 10 {
+        tx.execute_batch(include_str!("schema-v10.sql"))?;
     }
     tx.pragma_update(None, "application_id", APPLICATION_ID)?;
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;

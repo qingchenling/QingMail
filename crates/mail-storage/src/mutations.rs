@@ -62,20 +62,7 @@ impl Store {
         request: &Request,
         result: &std::result::Result<Reply, RpcError>,
     ) -> Result<()> {
-        let fingerprint = fingerprint(request)?;
-        let encoded =
-            serde_json::to_string(result).map_err(|_| Error::Invalid("IPC 结果无法编码"))?;
-        if encoded.len() > MAX_CONTROL_BYTES - 256 {
-            return Err(Error::Invalid("IPC 结果超过控制帧限制"));
-        }
-        let updated = self.connection.execute(
-            "UPDATE mutation_results SET state='finished',result=?1 WHERE request_id=?2 AND fingerprint=?3 AND state='in_progress'",
-            params![encoded,request.id,fingerprint],
-        )?;
-        if updated != 1 {
-            return Err(Error::Conflict);
-        }
-        Ok(())
+        finish_on(&self.connection, request, result)
     }
     pub fn mutation_result(&self, id: &str) -> Result<MutationStatus> {
         if !valid_id(id) {
@@ -94,6 +81,25 @@ impl Store {
             None => Ok(MutationStatus::NotFound),
         }
     }
+}
+pub(super) fn finish_on(
+    connection: &rusqlite::Connection,
+    request: &Request,
+    result: &std::result::Result<Reply, RpcError>,
+) -> Result<()> {
+    let fingerprint = fingerprint(request)?;
+    let encoded = serde_json::to_string(result).map_err(|_| Error::Invalid("IPC 结果无法编码"))?;
+    if encoded.len() > MAX_CONTROL_BYTES - 256 {
+        return Err(Error::Invalid("IPC 结果超过控制帧限制"));
+    }
+    let updated = connection.execute(
+        "UPDATE mutation_results SET state='finished',result=?1 WHERE request_id=?2 AND fingerprint=?3 AND state='in_progress'",
+        params![encoded,request.id,fingerprint],
+    )?;
+    if updated != 1 {
+        return Err(Error::Conflict);
+    }
+    Ok(())
 }
 pub(super) fn recover(connection: &rusqlite::Connection) -> Result<()> {
     connection.execute(
@@ -183,7 +189,7 @@ mod tests {
             .unwrap();
         store
             .connection
-            .execute_batch("DROP TABLE mutation_results; PRAGMA user_version=8;")
+            .execute_batch("DROP TRIGGER account_legacy_credential; DROP TABLE account_credentials; DROP TABLE mutation_results; PRAGMA user_version=8;")
             .unwrap();
         drop(store);
         let store = Store::open(&path).unwrap();
