@@ -38,6 +38,14 @@ enum Request {
         id: String,
         reply: SyncSender<StorageResult<()>>,
     },
+    NextDraftRefresh {
+        reply: SyncSender<StorageResult<Option<mail_storage::DraftRefresh>>>,
+    },
+    ObserveDraftRemote {
+        refresh: mail_storage::DraftRefresh,
+        raw: Option<Vec<u8>>,
+        reply: SyncSender<StorageResult<bool>>,
+    },
     NextDraftUpload {
         reply: SyncSender<StorageResult<Option<mail_storage::DraftUploadCandidate>>>,
     },
@@ -420,6 +428,22 @@ impl StorageClient {
         self.request(|reply| Request::DeferDraftUpload { account, id, reply })
     }
 
+    pub(crate) fn next_draft_refresh(
+        &self,
+    ) -> StorageResult<Receiver<StorageResult<Option<mail_storage::DraftRefresh>>>> {
+        self.request(|reply| Request::NextDraftRefresh { reply })
+    }
+    pub(crate) fn observe_draft_remote(
+        &self,
+        refresh: mail_storage::DraftRefresh,
+        raw: Option<Vec<u8>>,
+    ) -> StorageResult<Receiver<StorageResult<bool>>> {
+        self.request(|reply| Request::ObserveDraftRemote {
+            refresh,
+            raw,
+            reply,
+        })
+    }
     pub(crate) fn next_draft_upload(
         &self,
     ) -> StorageResult<Receiver<StorageResult<Option<mail_storage::DraftUploadCandidate>>>> {
@@ -1194,6 +1218,20 @@ fn run(path: Option<PathBuf>, receiver: Receiver<Request>) {
                 }));
             }
 
+            Request::NextDraftRefresh { reply } => {
+                let _ = reply
+                    .send(opened.and_then(|s| s.next_draft_refresh().map_err(|e| e.to_string())));
+            }
+            Request::ObserveDraftRemote {
+                refresh,
+                raw,
+                reply,
+            } => {
+                let _ = reply.send(opened.and_then(|s| {
+                    s.observe_draft_remote(&refresh, raw.as_deref())
+                        .map_err(|e| e.to_string())
+                }));
+            }
             Request::NextDraftUpload { reply } => {
                 let _ = reply
                     .send(opened.and_then(|s| s.next_draft_upload().map_err(|e| e.to_string())));
