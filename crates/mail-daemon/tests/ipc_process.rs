@@ -81,6 +81,191 @@ fn get_draft(reply: Reply) -> StoredDraft {
         _ => panic!("not a draft"),
     }
 }
+
+#[test]
+fn multi_account_inbox_search_read_drafts_and_options_survive_daemon_restart() {
+    use mail_core::*;
+    let root = private_root();
+    let mut ids = vec![];
+    let mut locations = vec![];
+    {
+        let mut store = mail_storage::Store::open(&root.path().join("data")).unwrap();
+        for n in 0..2 {
+            let server = ServerSettings {
+                host: "example.invalid".into(),
+                port: 993,
+                username: "fixture".into(),
+                security: ConnectionSecurity::Tls,
+            };
+            let id = store
+                .create_account(&AccountSettings {
+                    display_name: format!("Account {n}"),
+                    address: format!("{n}@example.invalid"),
+                    imap: server.clone(),
+                    smtp: server,
+                })
+                .unwrap();
+            let folder = store.upsert_folder(&id, "INBOX", 42).unwrap();
+            let location = MailUid {
+                account: id.clone(),
+                folder_id: folder.id.0,
+                uidvalidity: 42,
+                uid: 7,
+            };
+            store
+                .cache_message(
+                    &location,
+                    &MessageEnvelope {
+                        subject: format!("account-{n}"),
+                        sender: "same@example.invalid".into(),
+                        received_at: 100,
+                    },
+                )
+                .unwrap();
+            // 相同 UID/UIDVALIDITY/Message-ID，正文仍必须按完整身份读取。
+            store
+                .save_message_body(
+                    &location,
+                    format!(
+                        "Message-ID: <same@example.invalid>\r\nSubject: account-{n}\r\n\r\nbody-{n}"
+                    )
+                    .as_bytes(),
+                )
+                .unwrap();
+            ids.push(id);
+            locations.push(location);
+        }
+    }
+    let mut daemon = Daemon::start(root.path());
+    let client = daemon.ready(root.path());
+    let mut cursor = None;
+    let mut listed = vec![];
+    loop {
+        let Reply::Inbox(page) = client
+            .request(Command::UnifiedInbox {
+                before: cursor,
+                limit: 1,
+            })
+            .unwrap()
+        else {
+            panic!()
+        };
+        listed.extend(page.messages.into_iter().map(|m| m.location));
+        cursor = page.next;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(listed.len(), 2);
+    assert!(locations.iter().all(|loc| listed.contains(loc)));
+    for (n, location) in locations.iter().enumerate() {
+        let content = mail_daemon::client::content(
+            &client,
+            BusinessOperation::Read {
+                location: location.clone(),
+                folder: "INBOX".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(content.subject, format!("account-{n}"));
+    }
+    let Reply::Search(hits) = client
+        .request(Command::Search {
+            account: None,
+            query: SearchQuery {
+                text: "account".into(),
+                ..Default::default()
+            },
+        })
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(hits.len(), 2);
+    let Reply::Search(hits) = client
+        .request(Command::Search {
+            account: Some(ids[0].clone()),
+            query: SearchQuery::default(),
+        })
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].message.location.account, ids[0]);
+    let a = get_draft(
+        client
+            .request(Command::NewDraft {
+                account: Some(ids[0].clone()),
+                document: document("first-account"),
+            })
+            .unwrap(),
+    );
+    let b = get_draft(
+        client
+            .request(Command::NewDraft {
+                account: Some(ids[1].clone()),
+                document: document("second-account"),
+            })
+            .unwrap(),
+    );
+    assert_ne!(a.account, b.account);
+    assert!(
+        client
+            .request(Command::SaveDraft {
+                account: ids[1].clone(),
+                draft: a.id.clone(),
+                revision: a.revision,
+                document: document("wrong-account")
+            })
+            .is_err()
+    );
+    let default = Request::new(
+        "e".repeat(32),
+        Command::SetDefaultAccount {
+            account: ids[1].clone(),
+        },
+    );
+    client.call(&default).unwrap();
+    client.call(&default).unwrap();
+    let pause = Request::new(
+        "f".repeat(32),
+        Command::PauseSync {
+            account: Some(ids[0].clone()),
+            paused: true,
+        },
+    );
+    client.call(&pause).unwrap();
+    client.request(Command::PrepareShutdown).unwrap();
+    daemon.exited();
+    let mut restarted = Daemon::start(root.path());
+    let client = restarted.ready(root.path());
+    let Reply::Snapshot(snapshot) = client.request(Command::Snapshot).unwrap() else {
+        panic!()
+    };
+    assert_eq!(snapshot.default_account, Some(ids[1].clone()));
+    assert_eq!(snapshot.accounts.len(), 2);
+    let Reply::AccountOptions { default, paused } =
+        client.request(Command::AccountOptions).unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(default, Some(ids[1].clone()));
+    assert_eq!(paused, vec![ids[0].clone()]);
+    client.call(&pause).unwrap(); // 已完成的持久请求只返回原结果。
+    let remote = mail_daemon::storage::StorageWorker::connect(client.clone()).unwrap();
+    assert_eq!(
+        mail_daemon::storage::receive(remote.client().account_drafts(ids[0].clone())).unwrap(),
+        vec![a]
+    );
+    assert_eq!(
+        mail_daemon::storage::receive(remote.client().account_drafts(ids[1].clone())).unwrap(),
+        vec![b]
+    );
+    drop(remote);
+    client.request(Command::PrepareShutdown).unwrap();
+    restarted.exited();
+}
 #[test]
 fn independent_process_lost_reply_restart_and_existing_instance() {
     let root = private_root();

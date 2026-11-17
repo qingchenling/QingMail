@@ -16,7 +16,7 @@ use mail_service::{
 };
 use mail_storage::{SearchHit, SearchQuery};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     sync::Mutex,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -108,14 +108,21 @@ struct InlineReading {
 struct Mailbox {
     store: StorageClient,
     account: Option<(AccountId, AccountSettings)>,
-    expanded: bool,
+    accounts: Vec<(AccountId, AccountSettings)>,
+    catalogs: BTreeMap<String, (Vec<RemoteFolder>, Option<i64>)>,
+    closed_accounts: BTreeSet<String>,
+    default_account: Option<AccountId>,
+    unified: bool,
+    inbox: Option<mail_protocol::MessagePage>,
+    inbox_before: Option<mail_protocol::InboxCursor>,
+    search_scope: u8,
     collapsed: BTreeSet<String>,
     folders: Vec<RemoteFolder>,
     catalog_at: Option<i64>,
     selected_folder: Option<String>,
     cache: Option<FolderCache>,
     selected: Option<usize>,
-    checked: BTreeSet<u32>,
+    checked: HashSet<mail_core::MailUid>,
     undo_flags: Option<(Vec<u32>, Option<bool>, Option<bool>)>,
     confirm_delete: bool,
     history_exhausted: bool,
@@ -123,7 +130,6 @@ struct Mailbox {
     restore_selected: Option<usize>,
     search_text: Entity<InputState>,
     search_sender: Entity<InputState>,
-    search_current_folder: bool,
     search_attachments: bool,
     search_results: Option<Vec<SearchHit>>,
     search_selected: Option<usize>,
@@ -153,14 +159,21 @@ impl Mailbox {
         let mut this = Self {
             store: crate::lifecycle::storage(cx),
             account: None,
-            expanded: true,
+            accounts: vec![],
+            catalogs: BTreeMap::new(),
+            closed_accounts: BTreeSet::new(),
+            default_account: None,
+            unified: false,
+            inbox: None,
+            inbox_before: None,
+            search_scope: 0,
             collapsed: BTreeSet::new(),
             folders: vec![],
             catalog_at: None,
             selected_folder: None,
             cache: None,
             selected: None,
-            checked: BTreeSet::new(),
+            checked: HashSet::new(),
             undo_flags: None,
             confirm_delete: false,
             history_exhausted: false,
@@ -168,7 +181,6 @@ impl Mailbox {
             restore_selected: None,
             search_text: cx.new(|cx| InputState::new(window, cx)),
             search_sender: cx.new(|cx| InputState::new(window, cx)),
-            search_current_folder: true,
             search_attachments: false,
             search_results: None,
             search_selected: None,
@@ -304,6 +316,132 @@ impl Mailbox {
         }
         this
     }
+    fn position_key(&self, folder: &str) -> String {
+        format!(
+            "{}:{folder}",
+            self.account
+                .as_ref()
+                .map(|(id, _)| id.0.as_str())
+                .unwrap_or("")
+        )
+    }
+    fn switch_account(&mut self, id: AccountId, folder: String, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        if self.account.as_ref().map(|(a, _)| a) != Some(&id) || self.unified {
+            if let Some(current) = self.selected_folder.as_ref() {
+                let uid = self.selected_location().map(|loc| loc.uid);
+                self.positions
+                    .insert(self.position_key(current), (uid, self.before));
+            }
+            self.selected_folder = None;
+            self.account = self.accounts.iter().find(|(a, _)| a == &id).cloned();
+            let (folders, at) = self.catalogs.get(&id.0).cloned().unwrap_or_default();
+            self.folders = folders;
+            self.catalog_at = at;
+        }
+        self.select_folder(folder, cx);
+    }
+    fn compose_account(&self) -> Option<(AccountId, AccountSettings)> {
+        if self.unified {
+            self.accounts
+                .iter()
+                .find(|(id, _)| Some(id) == self.default_account.as_ref())
+                .cloned()
+        } else {
+            self.account.clone()
+        }
+    }
+    fn select_unified(&mut self, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        self.unified = true;
+        self.selected_folder = None;
+        self.search_scope = 2;
+        self.selected = None;
+        self.checked.clear();
+        self.undo_flags = None;
+        self.search_results = None;
+        self.search_previous = None;
+        self.inbox_before = None;
+        self.invalidate_read();
+        self.load_unified(cx);
+    }
+    fn load_unified(&mut self, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        self.busy = true;
+        let store = self.store.clone();
+        let before = self.inbox_before.clone();
+        let revision = crate::lifecycle::sync_revision(cx);
+        let keep_status = std::mem::take(&mut self.quiet_reload);
+        let saved_status = self.status.clone();
+        let task = cx.background_executor().spawn(async move {
+            let accounts = receive(store.accounts())?;
+            let mut catalogs = BTreeMap::new();
+            for (id, _) in &accounts {
+                catalogs.insert(id.0.clone(), receive(store.catalog(id.clone()))?);
+            }
+            let default = match store.control(mail_protocol::Command::AccountOptions)? {
+                Reply::AccountOptions { default, .. } => default,
+                _ => None,
+            };
+            let page =
+                match store.control(mail_protocol::Command::UnifiedInbox { before, limit: 100 })? {
+                    Reply::Inbox(page) => page,
+                    _ => return Err("统一收件箱响应无效".to_string()),
+                };
+            Ok::<_, String>((page, accounts, catalogs, default))
+        });
+        cx.spawn(async move |entity, cx| {
+            let result = task.await;
+            let _ = entity.update(cx, |this, cx| {
+                this.busy = false;
+                this.quiet_reload = false;
+                this.sync_revision = revision;
+                match result {
+                    Ok((page, accounts, catalogs, default)) => {
+                        let location = this.selected_location().cloned();
+                        this.inbox = Some(page);
+                        let visible: HashSet<_> =
+                            this.messages().iter().map(|m| m.location.clone()).collect();
+                        this.checked.retain(|loc| visible.contains(loc));
+                        this.accounts = accounts;
+                        this.catalogs = catalogs;
+                        this.default_account = default;
+                        this.account = this
+                            .accounts
+                            .iter()
+                            .find(|(id, _)| Some(id) == this.default_account.as_ref())
+                            .cloned();
+                        this.selected = location
+                            .and_then(|loc| this.messages().iter().position(|m| m.location == loc));
+                        this.status = if keep_status {
+                            saved_status
+                        } else {
+                            format!(
+                                "统一收件箱 · 本页 {} 封 · {} 个账号",
+                                this.messages().len(),
+                                this.accounts.len()
+                            )
+                        };
+                        if this.selected.is_some() {
+                            this.read_message(cx);
+                        } else {
+                            this.invalidate_read();
+                        }
+                    }
+                    Err(e) => this.status = e,
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
     fn reload(&mut self, cx: &mut Context<Self>) {
         if self.busy {
             return;
@@ -312,20 +450,31 @@ impl Mailbox {
         let store = self.store.clone();
         let task = cx.background_executor().spawn(async move {
             let accounts = receive(store.accounts())?;
-            let account = accounts.into_iter().next();
+            let mut catalogs = BTreeMap::new();
+            for (id, _) in &accounts {
+                catalogs.insert(id.0.clone(), receive(store.catalog(id.clone()))?);
+            }
+            let default = match store.control(mail_protocol::Command::AccountOptions)? {
+                Reply::AccountOptions { default, .. } => default,
+                _ => None,
+            };
+            let account = accounts.first().cloned();
             let catalog = if let Some((id, _)) = &account {
                 receive(store.catalog(id.clone()))?
             } else {
                 (vec![], None)
             };
-            Ok::<_, String>((account, catalog))
+            Ok::<_, String>((account, catalog, accounts, catalogs, default))
         });
         cx.spawn(async move |entity, cx| {
             let result = task.await;
             let _ = entity.update(cx, |this, cx| {
                 this.busy = false;
                 match result {
-                    Ok((account, (folders, at))) => {
+                    Ok((account, (folders, at), accounts, catalogs, default)) => {
+                        this.accounts = accounts;
+                        this.catalogs = catalogs;
+                        this.default_account = default;
                         this.account = account;
                         this.folders = folders;
                         this.catalog_at = at;
@@ -343,7 +492,9 @@ impl Mailbox {
                     }
                     Err(e) => this.status = e,
                 };
-                if let Some(folder) = this
+                if this.accounts.len() > 1 {
+                    this.select_unified(cx);
+                } else if let Some(folder) = this
                     .folders
                     .iter()
                     .find(|f| f.selectable && f.name.eq_ignore_ascii_case("INBOX"))
@@ -357,21 +508,47 @@ impl Mailbox {
         cx.notify();
     }
     fn refresh_local(&mut self, cx: &mut Context<Self>) {
+        if self.unified {
+            self.load_unified(cx);
+            return;
+        }
         let Some((account, _)) = self.account.clone() else {
             self.reload(cx);
             return;
         };
         self.busy = true;
         let revision = crate::lifecycle::sync_revision(cx);
-        let request = self.store.catalog(account);
-        let task = cx
-            .background_executor()
-            .spawn(async move { receive(request) });
+        let store = self.store.clone();
+        let task = cx.background_executor().spawn(async move {
+            let accounts = receive(store.accounts())?;
+            let mut catalogs = BTreeMap::new();
+            for (id, _) in &accounts {
+                catalogs.insert(id.0.clone(), receive(store.catalog(id.clone()))?);
+            }
+            let catalog = catalogs.get(&account.0).cloned().unwrap_or_default();
+            Ok::<_, String>((accounts, catalogs, catalog))
+        });
         cx.spawn(async move |entity, cx| {
             let result = task.await;
             let _ = entity.update(cx, |this, cx| {
                 this.busy = false;
-                if let Ok((folders, at)) = result {
+                if let Ok((accounts, catalogs, (folders, at))) = result {
+                    this.accounts = accounts;
+                    this.catalogs = catalogs;
+                    this.account = this.account.as_ref().and_then(|(id, _)| {
+                        this.accounts
+                            .iter()
+                            .find(|(new_id, _)| id == new_id)
+                            .cloned()
+                    });
+                    if this.account.is_none() {
+                        this.selected_folder = None;
+                        this.cache = None;
+                        this.selected = None;
+                        this.invalidate_read();
+                        this.reload(cx);
+                        return;
+                    }
                     this.folders = folders;
                     this.catalog_at = at;
                     this.sync_revision = revision;
@@ -424,13 +601,19 @@ impl Mailbox {
                 .selected
                 .and_then(|index| self.messages().get(index))
                 .map(|message| message.location.uid);
-            self.positions.insert(current, (uid, self.before));
+            self.positions
+                .insert(self.position_key(&current), (uid, self.before));
         }
-        let (restore_uid, restore_before) =
-            self.positions.get(&name).copied().unwrap_or((None, None));
+        let (restore_uid, restore_before) = self
+            .positions
+            .get(&self.position_key(&name))
+            .copied()
+            .unwrap_or((None, None));
         self.invalidate_read();
         self.restore_uid = restore_uid;
         self.narrow_detail = false;
+        self.unified = false;
+        self.search_scope = 0;
         self.selected_folder = Some(name);
         self.before = restore_before;
         self.search_results = None;
@@ -443,6 +626,10 @@ impl Mailbox {
         self.load_cache(cx);
     }
     fn load_cache(&mut self, cx: &mut Context<Self>) {
+        if self.unified {
+            self.load_unified(cx);
+            return;
+        }
         let Some((account, _)) = self.account.clone() else {
             return;
         };
@@ -471,6 +658,9 @@ impl Mailbox {
                         // 静默刷新期间用户仍可选信，保留完成时的选择而非请求发起时的旧选择。
                         let selected_uid = this.selected_location().map(|location| location.uid);
                         this.cache = cache;
+                        let visible: HashSet<_> =
+                            this.messages().iter().map(|m| m.location.clone()).collect();
+                        this.checked.retain(|loc| visible.contains(loc));
                         this.scroll = UniformListScrollHandle::new();
                         let quiet = std::mem::take(&mut this.quiet_reload);
                         if let Some(index) = std::mem::take(&mut this.restore_selected) {
@@ -604,6 +794,22 @@ impl Mailbox {
         .detach();
     }
     fn sync_folder(&mut self, older: bool, cx: &mut Context<Self>) {
+        if self.unified && !older {
+            if let Some(client) = self.store.ipc_client() {
+                self.status = "已请求同步所有账号".into();
+                cx.background_executor()
+                    .spawn(async move {
+                        let _ = client.request(mail_protocol::Command::SyncNow {
+                            account: None,
+                            folder: None,
+                            before: None,
+                        });
+                    })
+                    .detach();
+                cx.notify();
+            }
+            return;
+        }
         if self.busy {
             return;
         }
@@ -725,7 +931,19 @@ impl Mailbox {
         else {
             return;
         };
-        let Some(name) = self.selected_folder.clone() else {
+        let name = if self.unified {
+            self.catalogs
+                .get(&message.location.account.0)
+                .and_then(|(folders, _)| {
+                    folders
+                        .iter()
+                        .find(|f| f.name.eq_ignore_ascii_case("INBOX"))
+                })
+                .map(|f| f.name.clone())
+        } else {
+            self.selected_folder.clone()
+        };
+        let Some(name) = name else {
             return;
         };
         self.read_location(message.location, name, cx);
@@ -749,12 +967,14 @@ impl Mailbox {
         folder: String,
         cx: &mut Context<Self>,
     ) {
-        let Some((account, settings)) = self.account.clone() else {
+        let Some((account, settings)) = self
+            .accounts
+            .iter()
+            .find(|(id, _)| *id == location.account)
+            .cloned()
+        else {
             return;
         };
-        if account != location.account {
-            return;
-        }
         self.reading = Some(location.clone());
         if self
             .inline
@@ -861,7 +1081,7 @@ impl Mailbox {
             cx.notify();
             return;
         }
-        let folder = if self.search_current_folder {
+        let folder = if self.search_scope == 0 {
             match self.selected_folder.clone() {
                 Some(folder) => Some(folder),
                 None => {
@@ -884,10 +1104,18 @@ impl Mailbox {
         };
         self.busy = true;
         self.status = "正在搜索本地缓存…".into();
-        let reply = self.store.search(account, query);
-        let task = cx
-            .background_executor()
-            .spawn(async move { receive(reply) });
+        let scope = self.search_scope;
+        let store = self.store.clone();
+        let reply = cx.background_executor().spawn(async move {
+            match store.control(mail_protocol::Command::Search {
+                account: (scope != 2).then_some(account),
+                query,
+            })? {
+                Reply::Search(hits) => Ok::<_, String>(hits),
+                _ => Err("搜索响应无效".into()),
+            }
+        });
+        let task = reply;
         cx.spawn(async move |entity, cx| {
             let result = task.await;
             let _ = entity.update(cx, |this, cx| {
@@ -897,7 +1125,9 @@ impl Mailbox {
                         this.status = format!(
                             "本地搜索：{} 封 · {} · 仅覆盖已缓存索引；附件筛选只统计已下载正文",
                             results.len(),
-                            if folder.is_some() {
+                            if scope == 2 {
+                                "全部本地缓存"
+                            } else if folder.is_some() {
                                 "当前文件夹"
                             } else {
                                 "整个账号"
@@ -933,21 +1163,148 @@ impl Mailbox {
 
     fn targets(&self) -> Vec<u32> {
         if !self.checked.is_empty() {
-            return self.checked.iter().copied().collect();
+            return self.checked.iter().map(|location| location.uid).collect();
         }
         self.selected
             .and_then(|index| self.messages().get(index))
             .map(|message| vec![message.location.uid])
             .unwrap_or_default()
     }
-    fn toggle_checked(&mut self, uid: u32, cx: &mut Context<Self>) {
+    fn toggle_checked(&mut self, uid: mail_core::MailUid, cx: &mut Context<Self>) {
         if !self.checked.remove(&uid) {
             self.checked.insert(uid);
         }
         self.confirm_delete = false;
         cx.notify();
     }
+    fn unified_action(
+        &mut self,
+        flags: Option<(Option<bool>, Option<bool>)>,
+        trash: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.busy {
+            return;
+        }
+        let locations: Vec<_> = if self.checked.is_empty() {
+            self.selected_location().cloned().into_iter().collect()
+        } else {
+            self.checked.iter().cloned().collect()
+        };
+        if locations.is_empty() {
+            return;
+        }
+        let store = self.store.clone();
+        let accounts = self.accounts.clone();
+        let catalogs = self.catalogs.clone();
+        self.busy = true;
+        self.confirm_delete = false;
+        self.undo_flags = None;
+        self.status = "正在分别处理各账号邮件…".into();
+        let task = cx.background_executor().spawn(async move {
+            let client = store.ipc_client().ok_or("统一操作需要独立后台")?;
+            let mut groups = BTreeMap::<(String, String, u32), Vec<u32>>::new();
+            for location in locations {
+                groups
+                    .entry((location.account.0, location.folder_id, location.uidvalidity))
+                    .or_default()
+                    .push(location.uid);
+            }
+            let mut count = 0u64;
+            let mut errors = vec![];
+            for ((id, folder_id, epoch), uids) in groups {
+                let account = AccountId(id.clone());
+                let label = accounts
+                    .iter()
+                    .find(|(a, _)| a == &account)
+                    .map(|(_, s)| s.address.as_str())
+                    .unwrap_or(&id);
+                let result: Result<u64, String> = (|| {
+                    let folders = receive(store.folders(account.clone()))?;
+                    let folder = folders
+                        .iter()
+                        .find(|f| f.id.0 == folder_id && f.uidvalidity == epoch)
+                        .ok_or("邮件定位已变化，请刷新")?;
+                    let operation = if let Some((seen, flagged)) = flags {
+                        Op::Flags {
+                            account: account.clone(),
+                            name: folder.remote_name.clone(),
+                            epoch,
+                            uids,
+                            seen,
+                            flagged,
+                        }
+                    } else {
+                        let catalog = catalogs.get(&id).ok_or("账号目录尚未缓存")?;
+                        let destination = if trash {
+                            folders::trash(&catalog.0, None)
+                        } else {
+                            folders::archive(&catalog.0, None)
+                        }
+                        .ok_or("未找到目标文件夹；此账号未移动")?;
+                        if destination == folder.remote_name {
+                            return Err("邮件已在目标文件夹".into());
+                        }
+                        Op::Move {
+                            account: account.clone(),
+                            name: folder.remote_name.clone(),
+                            epoch,
+                            uids,
+                            destination,
+                        }
+                    };
+                    match mail_daemon::client::run(&client, operation)? {
+                        Reply::Count(n)
+                        | Reply::Moved {
+                            count: n,
+                            copied_only: false,
+                            ..
+                        } => Ok(n),
+                        Reply::Moved {
+                            copied_only: true, ..
+                        } => Err(
+                            "服务器已复制并标记删除，但移动未完全确认；请先同步核对，勿重复移动"
+                                .into(),
+                        ),
+                        _ => Err("操作响应无效".into()),
+                    }
+                })();
+                match result {
+                    Ok(n) => count += n,
+                    Err(e) => errors.push(format!("{label}: {e}")),
+                }
+            }
+            Ok::<_, String>((count, errors))
+        });
+        cx.spawn(async move |entity, cx| {
+            let result = task.await;
+            let _ = entity.update(cx, |this, cx| {
+                this.busy = false;
+                this.checked.clear();
+                this.status = match result {
+                    Ok((n, errors)) => format!(
+                        "已处理 {n} 封{}",
+                        if errors.is_empty() {
+                            String::new()
+                        } else {
+                            format!("；{}", errors.join("；"))
+                        }
+                    ),
+                    Err(e) => e,
+                };
+                this.quiet_reload = true;
+                this.load_unified(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
     fn apply_flags(&mut self, seen: Option<bool>, flagged: Option<bool>, cx: &mut Context<Self>) {
+        if self.unified {
+            self.unified_action(Some((seen, flagged)), false, cx);
+            return;
+        }
         if self.busy {
             return;
         }
@@ -1054,10 +1411,19 @@ impl Mailbox {
         let Some((uids, seen, flagged)) = self.undo_flags.take() else {
             return;
         };
-        self.checked = uids.iter().copied().collect();
+        self.checked = self
+            .messages()
+            .iter()
+            .filter(|m| uids.contains(&m.location.uid))
+            .map(|m| m.location.clone())
+            .collect();
         self.apply_flags(seen, flagged, cx);
     }
     fn move_selected(&mut self, trash: bool, cx: &mut Context<Self>) {
+        if self.unified {
+            self.unified_action(None, trash, cx);
+            return;
+        }
         if self.busy {
             return;
         }
@@ -1252,6 +1618,13 @@ impl Mailbox {
     }
 
     fn messages(&self) -> &[CachedMessage] {
+        if self.unified {
+            return self
+                .inbox
+                .as_ref()
+                .map(|p| p.messages.as_slice())
+                .unwrap_or(&[]);
+        }
         self.cache
             .as_ref()
             .map(|cache| cache.messages.as_slice())
@@ -1386,7 +1759,9 @@ impl Mailbox {
                 assert_eq!(self.messages().len(), 200);
                 assert_eq!(self.messages()[0].envelope.subject, "合成主题 240");
                 self.selected = Some(1);
-                self.expanded = false;
+                if let Some((id, _)) = &self.account {
+                    self.closed_accounts.insert(id.0.clone());
+                }
                 assert_eq!(self.selected_folder.as_deref(), Some("INBOX"));
             }
             2 => {

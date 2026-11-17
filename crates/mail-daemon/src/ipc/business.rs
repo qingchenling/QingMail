@@ -233,6 +233,16 @@ impl Context {
     }
     fn execute(&mut self, operation: BusinessOperation) -> Result<Reply, RpcError> {
         use BusinessOperation::*;
+        let account = match &operation {
+            RefreshCatalog { account }
+            | SyncFolder { account, .. }
+            | Flags { account, .. }
+            | Move { account, .. }
+            | RemoveAccount { account } => Some(account),
+            Read { location, .. } => Some(&location.account),
+            _ => None,
+        };
+        let _permit = account.map(|id| crate::network_gate::acquire(id, true));
         match operation {
             RefreshCatalog { account } => {
                 let (settings, credentials) = self.credentials(account.clone())?;

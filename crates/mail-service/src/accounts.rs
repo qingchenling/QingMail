@@ -269,6 +269,17 @@ pub(crate) fn imap_response(
 ) -> Result<imap_proto::Response<'static>, CheckError> {
     response(stream, false)
 }
+pub(crate) fn idle_deadline(stream: &mut ImapStream, timeout: Duration) -> Result<(), CheckError> {
+    stream
+        .get_mut()
+        .reset_budget(1024 * 1024, timeout.as_secs().max(1));
+    stream
+        .get_mut()
+        .stream
+        .get_ref()
+        .set_read_timeout(Some(timeout))
+        .map_err(io_error)
+}
 pub(crate) fn response(
     stream: &mut impl BufRead,
     sync: bool,

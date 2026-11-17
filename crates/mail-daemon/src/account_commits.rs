@@ -200,6 +200,9 @@ fn perform<V: CredentialVault + CredentialStaging>(
     let Command::CommitAccount { check, account } = &request.command else {
         return Err(error(ErrorCode::InvalidRequest, "不是账号提交请求"));
     };
+    let _permit = account
+        .as_ref()
+        .map(|id| crate::network_gate::acquire(id, true));
     let checked = checks.take_checked(check, account)?;
     receive(storage.validate_account_commit(checked.baseline.clone()))
         .map_err(|e| error(ErrorCode::Storage, e))??;

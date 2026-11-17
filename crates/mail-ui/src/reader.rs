@@ -405,7 +405,9 @@ impl Reader {
         let Some((account, address)) = self.account.clone() else {
             return;
         };
-        let document = crate::reply::document(&self.content, &address, mode);
+        let mut document = crate::reply::document(&self.content, &address, mode);
+        let own = crate::lifecycle::own_addresses(cx);
+        crate::reply::exclude_own(&mut document.headers, &own);
         self.status = match mode {
             ReplyMode::Forward => "已创建转发草稿，请在写信窗口确认收件人".into(),
             ReplyMode::Reply => "已创建回复草稿".into(),

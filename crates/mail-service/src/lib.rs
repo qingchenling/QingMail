@@ -3,6 +3,7 @@ pub mod accounts;
 pub mod actions;
 pub mod credentials;
 pub mod folders;
+pub mod idle;
 pub mod sent;
 pub mod sync;
 

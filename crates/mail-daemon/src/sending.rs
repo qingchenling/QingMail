@@ -172,6 +172,7 @@ fn save_copy(
             return receive(store.task(account.clone(), task.clone()));
         }
     };
+    let _permit = crate::network_gate::acquire(account, true);
     let result = copy(
         &ready.imap,
         imap_password,

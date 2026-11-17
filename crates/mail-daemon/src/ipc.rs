@@ -278,6 +278,7 @@ impl Service {
     }
     fn status(&self, revision: u64) -> DaemonStatus {
         DaemonStatus {
+            account_sync: self.sync.account_states(),
             pid: std::process::id(),
             revision,
             sync_paused: self.sync.paused(),
@@ -594,14 +595,24 @@ impl Service {
             Command::Activate { target } => self.sessions().activate(*target, Instant::now()),
             Command::Events { after } => Ok(Reply::Events(self.sessions().events(*after))),
             Command::SyncNow {
-                account: None,
+                account,
                 folder: None,
                 before: None,
             } => {
-                if !self.sync.request_sync() {
+                if !self.sync.request_account(account.clone()) {
                     return Err(rpc_error(ErrorCode::Offline, "隔离后台禁止联网"));
                 }
                 Ok(Reply::Acknowledged)
+            }
+            Command::PauseSync {
+                account: Some(_), ..
+            } => {
+                let response = crate::storage::receive(self.storage.rpc(request))
+                    .map_err(|e| rpc_error(ErrorCode::Storage, e))?;
+                if response.result.is_ok() {
+                    self.revision.fetch_add(1, Ordering::Release);
+                }
+                response.result
             }
             Command::PauseSync {
                 account: None,
@@ -621,13 +632,21 @@ impl Service {
                         .recv_timeout(STORAGE_TIMEOUT)
                         .map_err(|_| rpc_error(ErrorCode::Busy, "快照读取超时"))?
                         .map_err(|e| rpc_error(ErrorCode::Storage, e))?;
+                    let default_account = match self
+                        .storage
+                        .control(Command::AccountOptions)
+                        .map_err(|e| rpc_error(ErrorCode::Storage, e))?
+                    {
+                        Reply::AccountOptions { default, .. } => default,
+                        _ => return Err(rpc_error(ErrorCode::Storage, "账号设置读取失败")),
+                    };
                     let after = self.sessions().revision();
                     if before == after {
                         return Ok(Reply::Snapshot(AppSnapshot {
                             epoch: self.epoch.clone(),
                             revision: after,
                             status: self.status(after),
-                            default_account: accounts.first().map(|(id, _)| id.clone()),
+                            default_account,
                             accounts,
                             pending_operations: 0,
                             draft_conflicts: 0,
@@ -685,7 +704,8 @@ impl Service {
             command if RPC_COMMANDS.contains(&command.name()) => {
                 let changes = matches!(
                     command,
-                    Command::OpenDraft { .. }
+                    Command::SetDefaultAccount { .. }
+                        | Command::OpenDraft { .. }
                         | Command::NewDraft { .. }
                         | Command::SelectDraft { .. }
                         | Command::SaveDraft { .. }

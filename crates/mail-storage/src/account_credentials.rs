@@ -45,9 +45,6 @@ impl Store {
                 Err(Error::Conflict)
             }
             Some(_) => Ok(()),
-            None if !self.accounts()?.is_empty() => {
-                Err(Error::Invalid("当前进程拆分阶段仍只支持一个远端账号"))
-            }
             None => Ok(()),
         }
     }
@@ -131,7 +128,7 @@ mod tests {
                 },
             )
             .unwrap();
-        store.connection.execute_batch("DROP TRIGGER account_legacy_credential; DROP TABLE account_credentials; PRAGMA user_version=9;").unwrap();
+        store.connection.execute_batch("DROP TRIGGER account_default_options; DROP TABLE account_options; DROP TRIGGER account_legacy_credential; DROP TABLE account_credentials; PRAGMA user_version=9;").unwrap();
         drop(store);
         let store = Store::open(&data).unwrap();
         let version = store.account_version(&account).unwrap();

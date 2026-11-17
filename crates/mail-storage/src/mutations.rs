@@ -189,7 +189,7 @@ mod tests {
             .unwrap();
         store
             .connection
-            .execute_batch("DROP TRIGGER account_legacy_credential; DROP TABLE account_credentials; DROP TABLE mutation_results; PRAGMA user_version=8;")
+            .execute_batch("DROP TRIGGER account_default_options; DROP TABLE account_options; DROP TRIGGER account_legacy_credential; DROP TABLE account_credentials; DROP TABLE mutation_results; PRAGMA user_version=8;")
             .unwrap();
         drop(store);
         let store = Store::open(&path).unwrap();
