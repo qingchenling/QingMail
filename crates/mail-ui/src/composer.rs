@@ -230,10 +230,10 @@ impl InputHighlighter for RichStyles {
 }
 
 pub(super) fn open(cx: &mut App) {
-    open_scoped(crate::lifecycle::default_sender(cx), None, cx);
+    open_scoped(crate::lifecycle::default_sender(cx), None, false, cx);
 }
 pub(super) fn open_account(account: mail_core::AccountId, address: String, cx: &mut App) {
-    open_scoped(Some((account, address)), None, cx);
+    open_scoped(Some((account, address)), None, false, cx);
 }
 /// 回复/转发总是新建草稿窗口，不覆盖用户正在编辑的草稿。
 pub(super) fn open_document(
@@ -242,14 +242,20 @@ pub(super) fn open_document(
     document: mail_storage::DraftDocument,
     cx: &mut App,
 ) {
-    open_scoped(Some((account, address)), Some(document), cx);
+    open_scoped(Some((account, address)), Some(document), false, cx);
+}
+pub(super) fn open_saved(account: mail_core::AccountId, address: String, cx: &mut App) {
+    open_scoped(Some((account, address)), None, true, cx);
 }
 fn open_scoped(
     account: Option<(mail_core::AccountId, String)>,
     document: Option<mail_storage::DraftDocument>,
+    force: bool,
     cx: &mut App,
 ) {
-    if document.is_none() && crate::lifecycle::reuse_editor(account.as_ref().map(|(id, _)| id), cx)
+    if !force
+        && document.is_none()
+        && crate::lifecycle::reuse_editor(account.as_ref().map(|(id, _)| id), cx)
     {
         return;
     }

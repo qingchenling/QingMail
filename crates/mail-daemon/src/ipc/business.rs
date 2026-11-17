@@ -107,7 +107,9 @@ impl Business {
                     }
                     if matches!(
                         operation,
-                        BusinessOperation::RefreshCatalog { .. }
+                        BusinessOperation::ScanServerDrafts { .. }
+                            | BusinessOperation::ImportServerDraft { .. }
+                            | BusinessOperation::RefreshCatalog { .. }
                             | BusinessOperation::SyncFolder { .. }
                             | BusinessOperation::Flags { .. }
                             | BusinessOperation::Move { .. }
@@ -287,7 +289,9 @@ impl Context {
     fn execute(&mut self, operation: BusinessOperation) -> Result<Reply, RpcError> {
         use BusinessOperation::*;
         let account = match &operation {
-            RefreshCatalog { account }
+            ScanServerDrafts { account }
+            | ImportServerDraft { account, .. }
+            | RefreshCatalog { account }
             | SyncFolder { account, .. }
             | Flags { account, .. }
             | Move { account, .. }
@@ -300,6 +304,85 @@ impl Context {
             return Err(rpc_error(ErrorCode::Offline, "阅读已取消"));
         }
         match operation {
+            ReadServerDraft { account, source } => {
+                let raw =
+                    receive(self.store.server_draft_original(account, source)).map_err(fail)?;
+                let content = mail_content::parse(&raw).map_err(fail)?;
+                self.publish(content, None)
+            }
+
+            ScanServerDrafts { account } => {
+                let (settings, credentials) = self.credentials(account.clone())?;
+                let found = mail_service::server_drafts::folders(&settings.imap, &credentials.imap)
+                    .map_err(fail)?;
+                receive(
+                    self.store
+                        .publish_catalog(account.clone(), found.folders.clone(), now()),
+                )
+                .map_err(fail)?;
+                let folder = receive(self.store.discover_draft_folder(account, found.special))
+                    .map_err(fail)?;
+                let index = folder
+                    .as_deref()
+                    .map(|folder| {
+                        mail_service::server_drafts::index(
+                            &settings.imap,
+                            &credentials.imap,
+                            folder,
+                        )
+                    })
+                    .transpose()
+                    .map_err(fail)?;
+                Ok(Reply::ServerDraftIndex {
+                    folder,
+                    uidvalidity: index.as_ref().map_or(0, |i| i.uidvalidity),
+                    uids: index.as_ref().map_or_else(Vec::new, |i| i.uids.clone()),
+                    has_more: index.is_some_and(|i| i.has_more),
+                    choices: found.folders,
+                })
+            }
+            ImportServerDraft {
+                account,
+                folder,
+                uidvalidity,
+                uid,
+            } => {
+                let configured = match self
+                    .store
+                    .control(Command::ServerDrafts {
+                        account: account.clone(),
+                    })
+                    .map_err(fail)?
+                {
+                    Reply::ServerDrafts { folder, .. } => folder,
+                    _ => return Err(fail("草稿目录状态无效")),
+                };
+                if configured.as_deref() != Some(&folder) {
+                    return Err(rpc_error(ErrorCode::Conflict, "草稿目录已变化，请重新扫描"));
+                }
+                let baseline =
+                    receive(self.store.account_version(account.clone())).map_err(fail)?;
+                let (settings, credentials) = self.credentials(account.clone())?;
+                let raw =
+                    sync::message(&settings.imap, &credentials.imap, &folder, uidvalidity, uid)
+                        .map_err(fail)?;
+                if receive(self.store.account_version(account.clone())).map_err(fail)? != baseline {
+                    return Err(rpc_error(
+                        ErrorCode::Conflict,
+                        "账号配置已变化，未关联旧服务器原件",
+                    ));
+                }
+                let source = receive(self.store.archive_server_draft(
+                    account,
+                    folder,
+                    uidvalidity,
+                    uid,
+                    raw,
+                ))
+                .map_err(fail)?;
+                Ok(Reply::ServerDraftSource(source))
+            }
+
             RefreshCatalog { account } => {
                 let (settings, credentials) = self.credentials(account.clone())?;
                 let folders = sync::folders(&settings.imap, &credentials.imap).map_err(fail)?;

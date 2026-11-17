@@ -21,6 +21,7 @@ mod remote;
 mod reply;
 mod send_labels;
 mod send_tasks;
+mod server_drafts;
 mod settings;
 mod ui;
 

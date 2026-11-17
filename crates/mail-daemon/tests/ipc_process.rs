@@ -1300,3 +1300,149 @@ fn parts_deferred_large_attachment_offline_body_browser_and_file_resource_stream
     client.request(Command::PrepareShutdown).unwrap();
     daemon.exited();
 }
+
+#[test]
+fn server_draft_original_conversion_replay_isolation_and_offline_restart() {
+    use mail_core::*;
+    let root = private_root();
+    let (account, other, source, second) = {
+        let mut store = mail_storage::Store::open(&root.path().join("data")).unwrap();
+        let server = ServerSettings {
+            host: "example.invalid".into(),
+            port: 993,
+            username: "fixture".into(),
+            security: ConnectionSecurity::Tls,
+        };
+        let settings = AccountSettings {
+            display_name: "drafts".into(),
+            address: "me@example.invalid".into(),
+            imap: server.clone(),
+            smtp: server,
+        };
+        let a = store.create_account(&settings).unwrap();
+        let b = store.create_account(&settings).unwrap();
+        for id in [&a, &b] {
+            store
+                .replace_remote_folders(
+                    id,
+                    &[RemoteFolder {
+                        name: "Drafts".into(),
+                        display_name: "Drafts".into(),
+                        delimiter: Some("/".into()),
+                        selectable: true,
+                    }],
+                    0,
+                )
+                .unwrap();
+            store.set_server_draft_folder(id, "Drafts").unwrap();
+        }
+        let raw=b"Subject: preserved original\r\nBcc: hidden@example.invalid\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<p>draft content</p><script>blocked()</script>";
+        let source = store
+            .archive_server_draft(&a, "Drafts", 42, 7, raw)
+            .unwrap();
+        let second = store
+            .archive_server_draft(&b, "Drafts", 42, 7, b"Subject: second\r\n\r\nother account")
+            .unwrap();
+        (a, b, source, second)
+    };
+    let mut daemon = Daemon::start(root.path());
+    let client = daemon.ready(root.path());
+    let Reply::Hello { commands, .. } = client.request(Command::Hello).unwrap() else {
+        panic!()
+    };
+    assert!(commands.contains(&CommandName::ServerDrafts));
+    assert!(commands.contains(&CommandName::ConvertServerDraft));
+    let Reply::ServerDrafts { folder, items } = client
+        .request(Command::ServerDrafts {
+            account: account.clone(),
+        })
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(folder.as_deref(), Some("Drafts"));
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].id, source.id);
+    assert!(
+        client
+            .request(Command::ConvertServerDraft {
+                account: other.clone(),
+                source: source.id.clone()
+            })
+            .is_err()
+    );
+    let request = Request::new(
+        transport::request_id().unwrap(),
+        Command::ConvertServerDraft {
+            account: account.clone(),
+            source: source.id.clone(),
+        },
+    );
+    let draft = get_draft(client.call(&request).unwrap());
+    let again = get_draft(client.call(&request).unwrap());
+    assert_eq!(draft, again);
+    assert!(draft.document.body.text().contains("draft content"));
+    assert_eq!(draft.document.headers.bcc, vec!["hidden@example.invalid"]);
+    let content = mail_daemon::client::content(
+        &client,
+        BusinessOperation::ReadServerDraft {
+            account: account.clone(),
+            source: source.id.clone(),
+        },
+    )
+    .unwrap();
+    assert_eq!(content.subject, "preserved original");
+    assert!(!content.document.native_html().contains("<script"));
+    assert!(
+        mail_daemon::client::run(
+            &client,
+            BusinessOperation::ScanServerDrafts {
+                account: account.clone()
+            }
+        )
+        .is_err()
+    );
+    assert!(
+        mail_daemon::client::run(
+            &client,
+            BusinessOperation::ImportServerDraft {
+                account: account.clone(),
+                folder: "Drafts".into(),
+                uidvalidity: 42,
+                uid: 7
+            }
+        )
+        .is_err()
+    );
+    client.request(Command::PrepareShutdown).unwrap();
+    daemon.exited();
+    drop(daemon);
+    let mut daemon = Daemon::start(root.path());
+    let client = daemon.ready(root.path());
+    assert_eq!(
+        get_draft(
+            client
+                .request(Command::ConvertServerDraft {
+                    account: account.clone(),
+                    source: source.id.clone()
+                })
+                .unwrap()
+        )
+        .id,
+        draft.id
+    );
+    let Reply::ServerDrafts { items, .. } = client
+        .request(Command::ServerDrafts { account: other })
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(items[0].id, second.id);
+    assert!(items[0].converted.is_none());
+    client.request(Command::PrepareShutdown).unwrap();
+    daemon.exited();
+    drop(daemon);
+    let store = mail_storage::Store::open(&root.path().join("data")).unwrap();
+    let raw = store.server_draft_original(&account, &source.id).unwrap();
+    assert!(String::from_utf8_lossy(&raw).contains("<script>blocked()</script>"));
+}

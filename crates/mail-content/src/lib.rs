@@ -707,3 +707,64 @@ mod sections_tests {
         );
     }
 }
+
+/// Explicit lossy editing conversion; callers must retain the original before offering this action.
+pub struct EditableServerCopy {
+    pub subject: String,
+    pub to: Vec<String>,
+    pub cc: Vec<String>,
+    pub bcc: Vec<String>,
+    pub body: Draft,
+    pub attachments: Vec<Attachment>,
+}
+pub fn editable_server_copy(raw: &[u8]) -> Result<EditableServerCopy, ContentError> {
+    let content = parse(raw)?;
+    let body = Draft::plain(&content.plain).map_err(ContentError)?;
+    let parsed = MessageParser::new()
+        .max_depth(32)
+        .max_parts(256)
+        .max_encoded_nesting(4)
+        .parse(raw)
+        .ok_or_else(|| ContentError("无法转换损坏的MIME；原件保留".into()))?;
+    if parsed.parts().any(|p| {
+        p.has_problems()
+            || (p.is_multipart()
+                && (p.attachment_name().is_some()
+                    || p.content_disposition()
+                        .is_some_and(|d| d.ctype().eq_ignore_ascii_case("attachment"))))
+            || (!p.is_multipart() && !p.decoded_checked().1.is_empty())
+            || p.text_checked()
+                .is_some_and(|(_, problems)| !problems.is_empty())
+    }) {
+        return Err(ContentError("MIME损坏或超限，原件保留".into()));
+    }
+    Ok(EditableServerCopy {
+        subject: content.subject,
+        to: content.to,
+        cc: content.cc,
+        bcc: address_list(parsed.bcc()),
+        body,
+        attachments: content.attachments,
+    })
+}
+
+#[cfg(test)]
+mod server_copy_tests {
+    use super::*;
+    #[test]
+    fn conversion_is_explicit_plain_text_and_rejects_oversize_or_broken_encoding() {
+        let raw=b"Subject: copy\r\nBcc: hidden@example.invalid\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<p>Hello</p><script>bad()</script>";
+        let copy = editable_server_copy(raw).unwrap();
+        assert_eq!(copy.bcc, vec!["hidden@example.invalid"]);
+        assert!(copy.body.text().contains("Hello"));
+        assert!(!copy.body.text().contains("bad()"));
+        let too_long = format!("Subject: long\r\n\r\n{}", "x".repeat(draft::MAX_TEXT + 1));
+        assert!(editable_server_copy(too_long.as_bytes()).is_err());
+        assert!(
+            editable_server_copy(
+                b"Content-Type: text/plain\r\nContent-Transfer-Encoding: base64\r\n\r\n???"
+            )
+            .is_err()
+        );
+    }
+}

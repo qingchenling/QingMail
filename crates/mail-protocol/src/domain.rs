@@ -72,3 +72,80 @@ pub struct AccountImpact {
     pub pending_tasks: u64,
     pub object_bytes: u64,
 }
+
+/// 保留的不可变服务器原件；编辑副本不覆盖它。
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ServerDraftSource {
+    pub id: String,
+    pub account: AccountId,
+    pub folder: String,
+    pub uidvalidity: u32,
+    pub uid: u32,
+    pub subject: String,
+    pub size: u32,
+    pub converted: Option<DraftId>,
+}
+
+#[cfg(test)]
+mod server_draft_contract_tests {
+    use crate::*;
+    #[test]
+    fn server_draft_commands_validate_and_roundtrip_without_paths_or_mime_payloads() {
+        let account = AccountId("a".repeat(32));
+        for command in [
+            Command::ServerDrafts {
+                account: account.clone(),
+            },
+            Command::ConvertServerDraft {
+                account: account.clone(),
+                source: "b".repeat(32),
+            },
+            Command::DraftSyncFolder {
+                account: account.clone(),
+                folder: "自选草稿".into(),
+            },
+            Command::Business {
+                operation: BusinessOperation::ImportServerDraft {
+                    account: account.clone(),
+                    folder: "Drafts".into(),
+                    uidvalidity: 42,
+                    uid: 7,
+                },
+            },
+        ] {
+            let request = Request::new("c".repeat(32), command);
+            request.validate().unwrap();
+            let wire = serde_json::to_vec(&request).unwrap();
+            let decoded: Request = serde_json::from_slice(&wire).unwrap();
+            decoded.validate().unwrap();
+            assert_eq!(wire, serde_json::to_vec(&decoded).unwrap());
+        }
+        for command in [
+            Command::ConvertServerDraft {
+                account: account.clone(),
+                source: "../arbitrary-file".into(),
+            },
+            Command::DraftSyncFolder {
+                account: account.clone(),
+                folder: "Drafts\r\nDELETE INBOX".into(),
+            },
+            Command::Business {
+                operation: BusinessOperation::ReadServerDraft {
+                    account: account.clone(),
+                    source: "/tmp/raw.eml".into(),
+                },
+            },
+            Command::Business {
+                operation: BusinessOperation::ImportServerDraft {
+                    account,
+                    folder: "Drafts".into(),
+                    uidvalidity: 0,
+                    uid: 7,
+                },
+            },
+        ] {
+            assert!(Request::new("d".repeat(32), command).validate().is_err());
+        }
+    }
+}

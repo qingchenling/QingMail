@@ -128,7 +128,7 @@ mod tests {
                 },
             )
             .unwrap();
-        store.connection.execute_batch("DROP TABLE part_resources; DROP TABLE message_structures; DROP VIEW visible_folder_messages; DROP TABLE mail_operations; DROP TRIGGER account_default_options; DROP TABLE account_options; DROP TRIGGER account_legacy_credential; DROP TABLE account_credentials; PRAGMA user_version=9;").unwrap();
+        store.connection.execute_batch("DROP TABLE server_draft_sources; DROP TABLE server_draft_folders; DROP TABLE part_resources; DROP TABLE message_structures; DROP VIEW visible_folder_messages; DROP TABLE mail_operations; DROP TRIGGER account_default_options; DROP TABLE account_options; DROP TRIGGER account_legacy_credential; DROP TABLE account_credentials; PRAGMA user_version=9;").unwrap();
         drop(store);
         let store = Store::open(&data).unwrap();
         let version = store.account_version(&account).unwrap();

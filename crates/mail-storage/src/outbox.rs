@@ -94,7 +94,7 @@ impl Store {
             MAX_ATTACHMENT_BYTES,
         )?;
         let result = (|| {
-            let tx = self.connection.transaction()?;
+            let tx = self.connection.savepoint()?;
             object.insert(&tx)?;
             tx.execute(
                 "INSERT INTO attachments(id,account_id,name,media_type) VALUES (?1,?2,?3,?4)",
@@ -162,7 +162,7 @@ impl Store {
                 .unwrap_or(0)
                 .checked_add(1)
                 .ok_or(Error::Conflict)?;
-            let tx = self.connection.transaction()?;
+            let tx = self.connection.savepoint()?;
             object.insert(&tx)?;
             let recipients = encode_recipients(&document.headers)?;
             if let Some(previous) = expected {
@@ -640,7 +640,7 @@ impl Store {
         Ok(())
     }
 
-    fn cleanup_failed_object(&self, id: &str) {
+    pub(super) fn cleanup_failed_object(&self, id: &str) {
         // COMMIT 的 I/O 错误可能无法确定最终结果；仅确认无记录后才删文件。
         let exists = self.connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM objects WHERE id=?1)",

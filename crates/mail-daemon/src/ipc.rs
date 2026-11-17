@@ -768,6 +768,8 @@ impl Service {
                     Command::EnqueueOperation { .. }
                         | Command::RetryOperation { .. }
                         | Command::ResolveOperation { .. }
+                        | Command::DraftSyncFolder { .. }
+                        | Command::ConvertServerDraft { .. }
                         | Command::SetDefaultAccount { .. }
                         | Command::OpenDraft { .. }
                         | Command::NewDraft { .. }

@@ -33,6 +33,24 @@ pub struct StorageWorker {
 }
 
 enum Request {
+    ServerDraftOriginal {
+        account: AccountId,
+        source: String,
+        reply: SyncSender<StorageResult<Vec<u8>>>,
+    },
+    DiscoverDraftFolder {
+        account: AccountId,
+        special: Vec<String>,
+        reply: SyncSender<StorageResult<Option<String>>>,
+    },
+    ArchiveDraft {
+        account: AccountId,
+        folder: String,
+        epoch: u32,
+        uid: u32,
+        raw: Vec<u8>,
+        reply: SyncSender<StorageResult<mail_protocol::ServerDraftSource>>,
+    },
     MimeStructure {
         location: mail_core::MailUid,
         reply: SyncSender<StorageResult<Option<mail_core::MimeStructure>>>,
@@ -356,6 +374,47 @@ impl Drop for StorageWorker {
 }
 
 impl StorageClient {
+    pub(crate) fn server_draft_original(
+        &self,
+        account: AccountId,
+        source: String,
+    ) -> StorageResult<Receiver<StorageResult<Vec<u8>>>> {
+        self.request(|reply| Request::ServerDraftOriginal {
+            account,
+            source,
+            reply,
+        })
+    }
+
+    pub(crate) fn discover_draft_folder(
+        &self,
+        account: AccountId,
+        special: Vec<String>,
+    ) -> StorageResult<Receiver<StorageResult<Option<String>>>> {
+        self.request(|reply| Request::DiscoverDraftFolder {
+            account,
+            special,
+            reply,
+        })
+    }
+    pub(crate) fn archive_server_draft(
+        &self,
+        account: AccountId,
+        folder: String,
+        epoch: u32,
+        uid: u32,
+        raw: Vec<u8>,
+    ) -> StorageResult<Receiver<StorageResult<mail_protocol::ServerDraftSource>>> {
+        self.request(|reply| Request::ArchiveDraft {
+            account,
+            folder,
+            epoch,
+            uid,
+            raw,
+            reply,
+        })
+    }
+
     pub(crate) fn remove_local(
         &self,
         account: AccountId,
@@ -1019,6 +1078,41 @@ fn run(path: Option<PathBuf>, receiver: Receiver<Request>) {
         })();
         let opened = opened.map(|()| store.as_mut().expect("opened"));
         match request {
+            Request::ServerDraftOriginal {
+                account,
+                source,
+                reply,
+            } => {
+                let _ = reply.send(opened.and_then(|s| {
+                    s.server_draft_original(&account, &source)
+                        .map_err(|e| e.to_string())
+                }));
+            }
+
+            Request::DiscoverDraftFolder {
+                account,
+                special,
+                reply,
+            } => {
+                let _ = reply.send(opened.and_then(|s| {
+                    s.discover_server_draft_folder(&account, &special)
+                        .map_err(|e| e.to_string())
+                }));
+            }
+            Request::ArchiveDraft {
+                account,
+                folder,
+                epoch,
+                uid,
+                raw,
+                reply,
+            } => {
+                let _ = reply.send(opened.and_then(|s| {
+                    s.archive_server_draft(&account, &folder, epoch, uid, &raw)
+                        .map_err(|e| e.to_string())
+                }));
+            }
+
             Request::CredentialReferenced { key, reply } => {
                 let _ =
                     reply
