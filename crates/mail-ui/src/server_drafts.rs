@@ -6,7 +6,9 @@ use gpui_kit::{
 use gpui_kit_material::{prelude::*, theme};
 use mail_core::{AccountId, AccountSettings, RemoteFolder};
 use mail_daemon::storage::StorageClient;
-use mail_protocol::{BusinessOperation, Command, Reply, ServerDraftSource};
+use mail_protocol::{
+    BusinessOperation, Command, DraftConflict, DraftResolution, Reply, ServerDraftSource,
+};
 pub(super) fn open(cx: &mut App) {
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
@@ -34,10 +36,12 @@ struct ServerDrafts {
     uids: Vec<u32>,
     originals: Vec<ServerDraftSource>,
     sync_items: Vec<mail_protocol::DraftSyncInfo>,
+    conflicts: Vec<DraftConflict>,
     busy: bool,
     confirm: Option<String>,
     choosing_folder: bool,
     status: String,
+    notice: String,
 }
 struct Loaded {
     accounts: Vec<(AccountId, AccountSettings)>,
@@ -46,7 +50,9 @@ struct Loaded {
     choices: Vec<RemoteFolder>,
     originals: Vec<ServerDraftSource>,
     sync_items: Vec<mail_protocol::DraftSyncInfo>,
+    conflicts: Vec<DraftConflict>,
     index: Option<(u32, Vec<u32>, bool)>,
+    notice: String,
 }
 impl ServerDrafts {
     fn new(cx: &mut Context<Self>) -> Self {
@@ -60,10 +66,12 @@ impl ServerDrafts {
             uids: vec![],
             originals: vec![],
             sync_items: vec![],
+            conflicts: vec![],
             busy: false,
             confirm: None,
             choosing_folder: false,
             status: "正在读取…".into(),
+            notice: String::new(),
         };
         this.load(None, false, cx);
         cx.spawn(async move |entity, cx| {
@@ -107,7 +115,9 @@ impl ServerDrafts {
                 choices: vec![],
                 originals: vec![],
                 sync_items: vec![],
+                conflicts: vec![],
                 index: None,
+                notice: String::new(),
             };
             if let Some(account) = account {
                 result.choices = match store.control(Command::Catalog {
@@ -144,10 +154,21 @@ impl ServerDrafts {
                     Reply::DraftSyncStatus(items) => items,
                     _ => vec![],
                 };
+                result.conflicts = match store.control(Command::DraftConflicts {
+                    account: Some(account.clone()),
+                })? {
+                    Reply::DraftConflicts(items) => items,
+                    _ => return Err("冲突列表响应无效".into()),
+                };
                 match store.control(Command::ServerDrafts { account })? {
-                    Reply::ServerDrafts { folder, items } => {
+                    Reply::ServerDrafts {
+                        folder,
+                        items,
+                        notice,
+                    } => {
                         result.folder = folder;
                         result.originals = items;
+                        result.notice = notice;
                     }
                     _ => return Err("原件列表响应无效".into()),
                 }
@@ -158,12 +179,74 @@ impl ServerDrafts {
             let result=task.await;
             let _=entity.update(cx,|this,cx|{this.busy=false;match result {
                 Ok(result)=>{
-                    this.accounts=result.accounts;this.account=result.account;this.folder=result.folder;this.choices=result.choices;this.originals=result.originals;this.sync_items=result.sync_items;
+                    this.accounts=result.accounts;this.account=result.account;this.folder=result.folder;this.choices=result.choices;this.originals=result.originals;this.sync_items=result.sync_items;this.conflicts=result.conflicts;this.notice=result.notice;
                     if let Some((epoch,uids,more))=result.index {
                         this.epoch=epoch;this.uids=uids;this.status=if more{"仅显示最新200个UID，旧草稿仍在服务器；不会推断远端删除".into()}else{"扫描完成；点击保留原件后可离线查看，转换副本需明确确认".into()};
                     } else {this.status="编辑停止约5秒后上传新版本，关窗会合并调度。结果不明只查证；旧服务器版本保留。".into();}
                 },Err(e)=>this.status=e};cx.notify();});
         }).detach();
+        cx.notify();
+    }
+    fn resolve_conflict(
+        &mut self,
+        id: String,
+        resolution: DraftResolution,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(account) = self.account.clone() else {
+            return;
+        };
+        let key = format!("{id}-{resolution:?}");
+        if self.confirm.as_ref() != Some(&key) {
+            self.confirm = Some(key);
+            self.status="再次点击确认：所有选择保留原件及本地内容。保留两份会另存本地新版本；结果不明的旧上传将停止查证，绝不重放。选择远端会创建可编辑副本，外部HTML格式可能损失。".into();
+            cx.notify();
+            return;
+        }
+        self.confirm = None;
+        self.load(
+            Some(Command::ResolveDraftConflict {
+                account,
+                conflict: id,
+                resolution,
+            }),
+            false,
+            cx,
+        );
+    }
+    fn open_local(&mut self, draft: mail_core::DraftId, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        let Some((account, settings)) = self
+            .accounts
+            .iter()
+            .find(|(id, _)| Some(id) == self.account.as_ref())
+            .cloned()
+        else {
+            return;
+        };
+        self.busy = true;
+        let store = self.store.clone();
+        let selected = account.clone();
+        let task = cx.background_executor().spawn(async move {
+            store.control(Command::SelectDraft {
+                account: Some(selected),
+                draft,
+            })
+        });
+        cx.spawn(async move |entity, cx| {
+            let result = task.await;
+            let _ = entity.update(cx, |this, cx| {
+                this.busy = false;
+                match result {
+                    Ok(_) => crate::composer::open_saved(account, settings.address, cx),
+                    Err(e) => this.status = e,
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
     fn original_action(&mut self, source: String, convert: bool, cx: &mut Context<Self>) {
@@ -348,8 +431,68 @@ impl Render for ServerDrafts {
                     );
                 }
             }
+            list = list.child("冲突处理（保留原件，不静默覆盖）");
+            for conflict in &self.conflicts {
+                let local = conflict.local.clone();
+                let mut card = div()
+                    .p_3()
+                    .rounded_xl()
+                    .bg(theme::color(ColorRole::SURFACE_CONTAINER))
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(conflict.reason.clone())
+                    .child(
+                        MaterialButton::new(format!("conflict-local-{}", conflict.id))
+                            .variant(ButtonVariant::Outlined)
+                            .disabled(self.busy)
+                            .child("查看本地草稿")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.open_local(local.clone(), cx)
+                            })),
+                    );
+                if let Some(source) = conflict.original.clone() {
+                    card = card.child(
+                        MaterialButton::new(format!("conflict-original-{}", conflict.id))
+                            .variant(ButtonVariant::Outlined)
+                            .disabled(self.busy)
+                            .child("查看远端原件")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.original_action(source.clone(), false, cx)
+                            })),
+                    );
+                }
+                for (label, resolution) in [
+                    ("保留两份并另存新版本", DraftResolution::KeepBoth),
+                    ("使用本地版本", DraftResolution::KeepLocal),
+                    ("使用远端编辑副本", DraftResolution::KeepRemote),
+                ] {
+                    let id = conflict.id.clone();
+                    let key = format!("{id}-{resolution:?}");
+                    let text = if self.confirm.as_ref() == Some(&key) {
+                        format!("确认：{label}")
+                    } else {
+                        label.into()
+                    };
+                    card = card.child(
+                        MaterialButton::new(key)
+                            .variant(ButtonVariant::Outlined)
+                            .disabled(
+                                self.busy
+                                    || (matches!(resolution, DraftResolution::KeepRemote)
+                                        && conflict.original.is_none()),
+                            )
+                            .child(text)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.resolve_conflict(id.clone(), resolution, cx)
+                            })),
+                    );
+                }
+                list = list.child(card);
+            }
             list = list.child("本地草稿服务器同步状态");
             for item in &self.sync_items {
+                let draft = item.draft.clone();
                 let state = match item.state.as_str() {
                     "synced" => "已核验服务器版本",
                     "pending" => "待同步",
@@ -366,7 +509,16 @@ impl Render for ServerDrafts {
                         .child(format!(
                             "{} · {} · 本地版本 {} / 基线 {} · {}",
                             item.subject, state, item.revision, item.base_revision, item.detail
-                        )),
+                        ))
+                        .child(
+                            MaterialButton::new(format!("open-sync-{}", item.draft.0))
+                                .variant(ButtonVariant::Outlined)
+                                .disabled(self.busy)
+                                .child("打开草稿")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.open_local(draft.clone(), cx)
+                                })),
+                        ),
                 );
             }
             list = list.child("已保留原件（最近200份；转换不会覆盖原件）");
@@ -412,7 +564,8 @@ impl Render for ServerDrafts {
                         ),
                 );
             }
-            list = list.child("服务器扫描结果（点击后下载原件，当前原件上限8MiB）");
+            list =
+                list.child("服务器扫描结果（点击后下载原件，原件上限40MiB，超限保留服务器内容）");
             for &uid in &self.uids {
                 list = list.child(
                     MaterialButton::new(format!("draft-import-{uid}"))
@@ -448,6 +601,7 @@ impl Render for ServerDrafts {
                     .on_click(cx.listener(|this, _, _, cx| this.load(None, false, cx))),
             )
             .child(self.status.clone())
+            .child(self.notice.clone())
             .child(list)
     }
 }

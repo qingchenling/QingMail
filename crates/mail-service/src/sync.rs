@@ -423,6 +423,18 @@ pub(crate) fn message_using(
     uid: u32,
     tls: &native_tls::TlsConnector,
 ) -> Result<Vec<u8>, CheckError> {
+    message_bounded_using(server, password, name, epoch, uid, tls, 8 * 1024 * 1024)
+}
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn message_bounded_using(
+    server: &ServerSettings,
+    password: &str,
+    name: &str,
+    epoch: u32,
+    uid: u32,
+    tls: &native_tls::TlsConnector,
+    limit: usize,
+) -> Result<Vec<u8>, CheckError> {
     if name.is_empty()
         || name.len() > 4096
         || name.chars().any(char::is_control)
@@ -449,7 +461,7 @@ pub(crate) fn message_using(
     if !seen_epoch {
         return Err(CheckError::Protocol);
     }
-    stream.get_mut().reset_budget(9 * 1024 * 1024, 60);
+    stream.get_mut().reset_budget(limit + 1024 * 1024, 60);
     command(
         &mut stream,
         format!("QM4 UID FETCH {uid} (UID BODY.PEEK[])\r\n").as_bytes(),
@@ -457,7 +469,7 @@ pub(crate) fn message_using(
     let mut raw = None;
     let mut complete = false;
     for _ in 0..64 {
-        let item = accounts::response_limited(&mut stream, true, 9 * 1024 * 1024, 8 * 1024 * 1024)?;
+        let item = accounts::response_limited(&mut stream, true, limit + 1024 * 1024, limit)?;
         ensure_epoch(&item, epoch)?;
         match item {
             Response::Done { tag, status, .. } => {
@@ -486,7 +498,7 @@ pub(crate) fn message_using(
                 if let Some(data) = data {
                     if received_uid != Some(uid)
                         || raw.is_some()
-                        || data.len() > 8 * 1024 * 1024
+                        || data.len() > limit
                         || data.is_empty()
                     {
                         return Err(CheckError::Protocol);
@@ -503,7 +515,7 @@ pub(crate) fn message_using(
     if !complete {
         return Err(CheckError::Limit);
     }
-    let raw = raw.ok_or(CheckError::Protocol)?;
+    let raw = raw.ok_or(CheckError::Missing)?;
     logout(&mut stream);
     Ok(raw)
 }

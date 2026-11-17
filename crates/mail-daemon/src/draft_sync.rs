@@ -31,12 +31,16 @@ impl DraftSync {
                 thread::Builder::new()
                     .name("qingmail-draft-sync".into())
                     .spawn(move || {
+                        let mut lane = 2;
                         while !signal.load(Ordering::Acquire) {
-                            if !paused.load(Ordering::Acquire)
+                            lane = (lane + 1) % 3;
+                            if lane == 0
+                                && !paused.load(Ordering::Acquire)
                                 && let Ok(Some(candidate)) = receive(store.next_draft_upload())
                             {
                                 let account = candidate.draft.account.clone();
                                 let id = candidate.draft.id.clone();
+                                let lineage = candidate.lineage.clone();
                                 let _permit = crate::network_gate::acquire(&account, false);
                                 if signal.load(Ordering::Acquire) {
                                     break;
@@ -45,12 +49,14 @@ impl DraftSync {
                                     let _ = receive(store.fail_draft_sync(
                                         account,
                                         id,
+                                        lineage,
                                         state.into(),
                                         detail,
                                     ));
                                 }
                                 revision.fetch_add(1, Ordering::Release);
-                            } else if !paused.load(Ordering::Acquire)
+                            } else if lane == 1
+                                && !paused.load(Ordering::Acquire)
                                 && let Ok(Some(refresh)) = receive(store.next_draft_refresh())
                             {
                                 let _permit =
@@ -61,6 +67,16 @@ impl DraftSync {
                                 if matches!(refresh_remote(&store, refresh), Ok(true)) {
                                     revision.fetch_add(1, Ordering::Release);
                                 }
+                            } else if lane == 2
+                                && !paused.load(Ordering::Acquire)
+                                && let Ok(Some(version)) = receive(store.next_draft_scan())
+                            {
+                                let _permit = crate::network_gate::acquire(&version.account, false);
+                                if signal.load(Ordering::Acquire) {
+                                    break;
+                                }
+                                let _ = discover_remote(&store, version, &signal);
+                                revision.fetch_add(1, Ordering::Release);
                             } else {
                                 thread::park_timeout(Duration::from_millis(500));
                             }
@@ -114,7 +130,7 @@ fn execute(
                 "草稿目录已变化；保留原件和本地副本，请核对".into(),
             ));
         }
-        let raw = mail_service::sync::message(
+        let raw = server_drafts::message(
             &baseline.settings.imap,
             &credentials.imap,
             &source.folder,
@@ -123,7 +139,7 @@ fn execute(
         )
         .map_err(|e| match e {
             mail_service::accounts::CheckError::EpochChanged
-            | mail_service::accounts::CheckError::Protocol => (
+            | mail_service::accounts::CheckError::Missing => (
                 "conflict",
                 format!("远端版本缺失或定位变化，保留本地副本：{e}"),
             ),
@@ -155,9 +171,13 @@ fn execute(
             snapshot.message_id = format!("<{id}@qingmail.invalid>");
             let model = candidate.draft.document.body.to_json().map_err(failed)?;
             let raw = mail_service::outgoing::prepare_draft(&snapshot, &model).map_err(failed)?;
-            if raw.len() > mail_content::MAX_MESSAGE_BYTES {
+            let lineage = &candidate.lineage;
+            let mut linked = format!("X-QingMail-Draft: {lineage}\r\n").into_bytes();
+            linked.extend(raw);
+            let raw = linked;
+            if raw.len() > mail_content::MAX_SERVER_DRAFT_BYTES {
                 return Err(failed(
-                    "服务器草稿MIME超过当前8MiB原件边界，已保留本地草稿；不会截断上传",
+                    "服务器草稿MIME超过当前40MiB原件边界，已保留本地草稿；不会截断上传",
                 ));
             }
             receive(store.prepare_draft_upload(
@@ -208,10 +228,16 @@ fn execute(
                 .map_err(|e| ("uncertain", e))?;
             Ok(())
         }
-        Ok(UploadResult::EpochChanged) => Err((
-            "conflict",
-            "服务器草稿目录UIDVALIDITY已变化，保留本地与原件，未APPEND".into(),
-        )),
+        Ok(UploadResult::EpochChanged) => {
+            if !probe_only {
+                receive(store.defer_draft_upload(account.clone(), upload.id.clone()))
+                    .map_err(pending)?;
+            }
+            Err((
+                "conflict",
+                "服务器草稿目录UIDVALIDITY已变化，保留本地与原件，未APPEND".into(),
+            ))
+        }
         Ok(UploadResult::Uncertain) => Err((
             "uncertain",
             "上传结果尚未查证；只查询原标识，禁止自动重复APPEND".into(),
@@ -263,7 +289,7 @@ fn refresh_remote(
         .load(&baseline.credential_key)
         .map_err(|e| e.to_string())?;
     let source = &refresh.source;
-    let raw = match mail_service::sync::message(
+    let raw = match server_drafts::message(
         &baseline.settings.imap,
         &credentials.imap,
         &source.folder,
@@ -271,10 +297,44 @@ fn refresh_remote(
         source.uid,
     ) {
         Ok(raw) => Some(raw),
-        Err(
-            mail_service::accounts::CheckError::EpochChanged
-            | mail_service::accounts::CheckError::Protocol,
-        ) => None,
+        Err(mail_service::accounts::CheckError::EpochChanged) => None,
+        Err(mail_service::accounts::CheckError::Missing) => {
+            let original =
+                receive(store.server_draft_original(account.clone(), source.id.clone()))?;
+            if let Some(identity) = mail_content::server_draft_identity(&original) {
+                let matches = server_drafts::matching(
+                    &baseline.settings.imap,
+                    &credentials.imap,
+                    &source.folder,
+                    source.uidvalidity,
+                    &identity,
+                )
+                .map_err(|e| draft_network(store, &account, e))?;
+                if !matches.is_empty() {
+                    let ambiguous = matches.len() != 1;
+                    for uid in matches.into_iter().take(4) {
+                        let raw = server_drafts::message(
+                            &baseline.settings.imap,
+                            &credentials.imap,
+                            &source.folder,
+                            source.uidvalidity,
+                            uid,
+                        )
+                        .map_err(|e| draft_network(store, &account, e))?;
+                        receive(store.import_discovered_draft(
+                            baseline.clone(),
+                            source.folder.clone(),
+                            source.uidvalidity,
+                            uid,
+                            raw,
+                            ambiguous,
+                        ))?;
+                    }
+                    return Ok(true);
+                }
+            }
+            None
+        }
         Err(e) => {
             if e == mail_service::accounts::CheckError::Authentication {
                 let _ = store.control(Command::PauseSync {
@@ -289,4 +349,104 @@ fn refresh_remote(
         return Ok(false);
     }
     receive(store.observe_draft_remote(refresh, raw))
+}
+
+fn draft_network(
+    store: &StorageClient,
+    account: &mail_core::AccountId,
+    error: mail_service::accounts::CheckError,
+) -> String {
+    if error == mail_service::accounts::CheckError::Authentication {
+        let _ = store.control(Command::PauseSync {
+            account: Some(account.clone()),
+            paused: true,
+        });
+    }
+    error.to_string()
+}
+fn discover_remote(
+    store: &StorageClient,
+    version: mail_storage::AccountVersion,
+    stop: &AtomicBool,
+) -> Result<(), String> {
+    let account = version.account.clone();
+    if matches!(store.control(Command::AccountOptions),Ok(Reply::AccountOptions{paused,..}) if paused.contains(&account))
+    {
+        return Ok(());
+    }
+    let credentials = SystemVault
+        .load(&version.credential_key)
+        .map_err(|e| e.to_string())?;
+    let result = (|| {
+        let found = server_drafts::folders(&version.settings.imap, &credentials.imap)
+            .map_err(|e| draft_network(store, &account, e))?;
+        if receive(store.account_version(account.clone()))? != version {
+            return Ok(());
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        receive(store.publish_catalog(account.clone(), found.folders, now))?;
+        let Some(folder) = receive(store.discover_draft_folder(account.clone(), found.special))?
+        else {
+            return Err("请选择服务器草稿目录，未猜测创建目录".into());
+        };
+        let index = server_drafts::all(&version.settings.imap, &credentials.imap, &folder)
+            .map_err(|e| draft_network(store, &account, e))?;
+        let missing = receive(store.draft_scan_missing(
+            version.clone(),
+            folder.clone(),
+            index.uidvalidity,
+            index.uids,
+        ))?;
+        for uid in missing {
+            if stop.load(Ordering::Acquire) {
+                break;
+            }
+            let item = (|| {
+                let raw = server_drafts::message(
+                    &version.settings.imap,
+                    &credentials.imap,
+                    &folder,
+                    index.uidvalidity,
+                    uid,
+                )
+                .map_err(|e| draft_network(store, &account, e))?;
+                let ambiguous = if let Some(identity) = mail_content::server_draft_identity(&raw) {
+                    server_drafts::matching(
+                        &version.settings.imap,
+                        &credentials.imap,
+                        &folder,
+                        index.uidvalidity,
+                        &identity,
+                    )
+                    .map_err(|e| draft_network(store, &account, e))?
+                    .len()
+                        != 1
+                } else {
+                    false
+                };
+                receive(store.import_discovered_draft(
+                    version.clone(),
+                    folder.clone(),
+                    index.uidvalidity,
+                    uid,
+                    raw,
+                    ambiguous,
+                ))
+            })();
+            if let Err(detail) = item {
+                receive(store.draft_scan_result(
+                    version.clone(),
+                    Some((folder.clone(), index.uidvalidity, uid)),
+                    detail,
+                ))?;
+            }
+        }
+        Ok(())
+    })();
+    let detail = result.as_ref().err().cloned().unwrap_or_default();
+    receive(store.draft_scan_result(version, None, detail))?;
+    result
 }

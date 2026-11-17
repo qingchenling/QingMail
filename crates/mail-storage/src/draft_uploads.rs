@@ -8,6 +8,7 @@ pub struct DraftUploadCandidate {
     pub source: Option<mail_protocol::ServerDraftSource>,
     pub folder: String,
     pub previous: Option<DraftUpload>,
+    pub lineage: String,
 }
 #[derive(Debug, Clone)]
 pub struct DraftUpload {
@@ -60,7 +61,22 @@ impl Store {
             return Ok(None);
         }
         let upload:Option<String>=self.connection.query_row("SELECT id FROM draft_uploads WHERE account_id=?1 AND draft_id=?2 AND state IN ('prepared','in_flight','uncertain') ORDER BY created_at,id LIMIT 1",params![account.0,id.0],|r|r.get(0)).optional()?;
+        let marker: Option<String> = self.connection.query_row(
+            "SELECT lineage FROM draft_sync WHERE account_id=?1 AND draft_id=?2",
+            params![account.0, id.0],
+            |r| r.get(0),
+        )?;
+        let lineage = if let Some(marker) = marker {
+            marker
+        } else if let Some(source) = &source {
+            mail_content::server_draft_identity(&self.server_draft_original(&account, source)?)
+                .map(|(_, v)| v)
+                .unwrap_or_else(|| id.0.clone())
+        } else {
+            id.0.clone()
+        };
         Ok(Some(DraftUploadCandidate {
+            lineage,
             source: source
                 .map(|s| self.server_draft_source(&account, &s))
                 .transpose()?,
@@ -81,7 +97,7 @@ impl Store {
     ) -> Result<DraftUpload> {
         if !mail_protocol::valid_id(id)
             || raw.is_empty()
-            || raw.len() > mail_content::MAX_MESSAGE_BYTES
+            || raw.len() > mail_content::MAX_SERVER_DRAFT_BYTES
             || self.draft(&draft.account, &draft.id)?.revision != draft.revision
             || self.server_draft_folder(&draft.account)?.as_deref() != Some(folder)
         {
@@ -103,7 +119,7 @@ impl Store {
             &draft.account,
             "attachment",
             &mut &raw[..],
-            mail_content::MAX_MESSAGE_BYTES as u64,
+            mail_content::MAX_SERVER_DRAFT_BYTES as u64,
         )?;
         let result: Result<()> = (|| {
             let tx = self.connection.transaction()?;
@@ -136,7 +152,7 @@ impl Store {
                 account,
                 &raw,
                 "attachment",
-                mail_content::MAX_MESSAGE_BYTES as u64,
+                mail_content::MAX_SERVER_DRAFT_BYTES as u64,
             )?,
             probe_only: state != "prepared",
         })
@@ -144,6 +160,10 @@ impl Store {
     /// 必须在发出第一个APPEND字节前成功持久化；返回的bool表示只能查询。
     pub fn begin_draft_upload(&mut self, account: &AccountId, id: &str) -> Result<bool> {
         let current = self.draft_upload(account, id)?;
+        let blocked: bool=self.connection.query_row("SELECT EXISTS(SELECT 1 FROM draft_sync WHERE account_id=?1 AND draft_id=?2 AND state='stopped') OR EXISTS(SELECT 1 FROM account_options WHERE account_id=?1 AND paused=1) OR EXISTS(SELECT 1 FROM send_tasks WHERE account_id=?1 AND source_draft=?2 AND source_revision>=?3)",params![account.0,current.draft.0,current.revision],|r|r.get(0))?;
+        if blocked {
+            return Err(Error::Conflict);
+        }
         let tx = self.connection.transaction()?;
         tx.execute("UPDATE draft_uploads SET state='in_flight' WHERE id=?1 AND account_id=?2 AND state='prepared'",params![id,account.0])?;
         tx.execute("UPDATE draft_sync SET state='uncertain',detail='上传执行中，等待服务器核验' WHERE account_id=?1 AND draft_id=?2",params![account.0,current.draft.0])?;
@@ -151,6 +171,28 @@ impl Store {
         Ok(current.probe_only)
     }
 
+    pub fn fail_draft_sync_branch(
+        &mut self,
+        account: &AccountId,
+        draft: &DraftId,
+        lineage: &str,
+        state: &str,
+        detail: &str,
+    ) -> Result<()> {
+        let branch: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT lineage FROM draft_sync WHERE account_id=?1 AND draft_id=?2",
+                params![account.0, draft.0],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        if branch.as_deref().is_some_and(|v| v != lineage) {
+            return Ok(());
+        }
+        self.fail_draft_sync(account, draft, state, detail)
+    }
     pub fn fail_draft_sync(
         &mut self,
         account: &AccountId,
@@ -161,6 +203,21 @@ impl Store {
         if !matches!(state, "pending" | "failed" | "conflict" | "uncertain") || detail.len() > 2048
         {
             return Err(Error::Invalid("草稿同步状态无效"));
+        }
+        let stopped: bool = self.connection.query_row(
+            "SELECT state='stopped' FROM draft_sync WHERE account_id=?1 AND draft_id=?2",
+            params![account.0, draft.0],
+            |r| r.get(0),
+        )?;
+        if stopped {
+            return Ok(());
+        }
+        if state == "conflict" {
+            let remote: Option<String> = self.connection.query_row("SELECT n.id FROM draft_sync d JOIN server_draft_sources b ON b.id=d.base_source JOIN server_draft_sources n ON n.account_id=b.account_id AND n.remote_name=b.remote_name AND n.uidvalidity=b.uidvalidity AND n.uid=b.uid AND n.id!=b.id WHERE d.account_id=?1 AND d.draft_id=?2 ORDER BY n.created_at DESC,n.rowid DESC LIMIT 1", params![account.0,draft.0],|r|r.get(0)).optional()?;
+            return self.record_draft_conflict(account, draft, remote.as_deref(), detail);
+        }
+        if state == "uncertain" {
+            self.record_draft_conflict(account, draft, None, detail)?;
         }
         self.connection.execute("UPDATE draft_sync SET state=?1,detail=?2,attempted_at=unixepoch() WHERE account_id=?3 AND draft_id=?4",params![state,detail,account.0,draft.0])?;
         Ok(())
@@ -175,6 +232,7 @@ impl Store {
             self.archive_server_draft(&upload.account, &upload.folder, epoch, uid, &upload.raw)?;
         let tx = self.connection.transaction()?;
         if tx.execute("UPDATE draft_uploads SET state='applied' WHERE id=?1 AND account_id=?2 AND state IN ('in_flight','uncertain')",params![upload.id,upload.account.0])?!=1{return Err(Error::Conflict);}
+        tx.execute("UPDATE draft_conflicts SET state='upload_verified' WHERE account_id=?1 AND draft_id=?2 AND state='open'",params![upload.account.0,upload.draft.0])?;
         tx.execute(
             "UPDATE server_draft_sources SET converted=?1,baseline_revision=?2 WHERE id=?3",
             params![upload.draft.0, upload.revision, source.id],
@@ -312,7 +370,7 @@ mod tests {
             .archive_server_draft(&a, "Drafts", 42, 7, b"Subject: remote\r\n\r\ncontent")
             .unwrap();
         let draft = s.convert_server_draft(&a, &source.id).unwrap();
-        s.connection.execute_batch("DROP TRIGGER track_server_draft_insert; DROP TRIGGER track_server_draft_update; DROP TABLE draft_uploads; DROP TABLE draft_sync; PRAGMA user_version=14;").unwrap();
+        s.connection.execute_batch("DROP TRIGGER stop_sent_draft_sync; DROP TRIGGER track_draft_scan_account; DROP TABLE draft_conflicts; DROP TABLE draft_scan_failures; DROP TABLE draft_scans; DROP TRIGGER track_server_draft_insert; DROP TRIGGER track_server_draft_update; DROP TABLE draft_uploads; DROP TABLE draft_sync; PRAGMA user_version=14;").unwrap();
         drop(s);
         let mut s = Store::open(&data).unwrap();
         let status = s.draft_sync_status(&a).unwrap();

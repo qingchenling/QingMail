@@ -38,6 +38,31 @@ enum Request {
         id: String,
         reply: SyncSender<StorageResult<()>>,
     },
+    DraftScanResult {
+        version: mail_storage::AccountVersion,
+        location: Option<(String, u32, u32)>,
+        detail: String,
+        reply: SyncSender<StorageResult<()>>,
+    },
+    NextDraftScan {
+        reply: SyncSender<StorageResult<Option<mail_storage::AccountVersion>>>,
+    },
+    DraftScanMissing {
+        version: mail_storage::AccountVersion,
+        folder: String,
+        epoch: u32,
+        uids: Vec<u32>,
+        reply: SyncSender<StorageResult<Vec<u32>>>,
+    },
+    ImportDiscoveredDraft {
+        version: mail_storage::AccountVersion,
+        folder: String,
+        epoch: u32,
+        uid: u32,
+        raw: Vec<u8>,
+        ambiguous: bool,
+        reply: SyncSender<StorageResult<()>>,
+    },
     NextDraftRefresh {
         reply: SyncSender<StorageResult<Option<mail_storage::DraftRefresh>>>,
     },
@@ -75,6 +100,7 @@ enum Request {
     FailDraftSync {
         account: AccountId,
         draft: mail_core::DraftId,
+        lineage: String,
         state: String,
         detail: String,
         reply: SyncSender<StorageResult<()>>,
@@ -428,6 +454,58 @@ impl StorageClient {
         self.request(|reply| Request::DeferDraftUpload { account, id, reply })
     }
 
+    pub(crate) fn draft_scan_result(
+        &self,
+        version: mail_storage::AccountVersion,
+        location: Option<(String, u32, u32)>,
+        detail: String,
+    ) -> StorageResult<Receiver<StorageResult<()>>> {
+        self.request(|reply| Request::DraftScanResult {
+            version,
+            location,
+            detail,
+            reply,
+        })
+    }
+    pub(crate) fn next_draft_scan(
+        &self,
+    ) -> StorageResult<Receiver<StorageResult<Option<mail_storage::AccountVersion>>>> {
+        self.request(|reply| Request::NextDraftScan { reply })
+    }
+    pub(crate) fn draft_scan_missing(
+        &self,
+        version: mail_storage::AccountVersion,
+        folder: String,
+        epoch: u32,
+        uids: Vec<u32>,
+    ) -> StorageResult<Receiver<StorageResult<Vec<u32>>>> {
+        self.request(|reply| Request::DraftScanMissing {
+            version,
+            folder,
+            epoch,
+            uids,
+            reply,
+        })
+    }
+    pub(crate) fn import_discovered_draft(
+        &self,
+        version: mail_storage::AccountVersion,
+        folder: String,
+        epoch: u32,
+        uid: u32,
+        raw: Vec<u8>,
+        ambiguous: bool,
+    ) -> StorageResult<Receiver<StorageResult<()>>> {
+        self.request(|reply| Request::ImportDiscoveredDraft {
+            version,
+            folder,
+            epoch,
+            uid,
+            raw,
+            ambiguous,
+            reply,
+        })
+    }
     pub(crate) fn next_draft_refresh(
         &self,
     ) -> StorageResult<Receiver<StorageResult<Option<mail_storage::DraftRefresh>>>> {
@@ -496,12 +574,14 @@ impl StorageClient {
         &self,
         account: AccountId,
         draft: mail_core::DraftId,
+        lineage: String,
         state: String,
         detail: String,
     ) -> StorageResult<Receiver<StorageResult<()>>> {
         self.request(|reply| Request::FailDraftSync {
             account,
             draft,
+            lineage,
             state,
             detail,
             reply,
@@ -1218,6 +1298,53 @@ fn run(path: Option<PathBuf>, receiver: Receiver<Request>) {
                 }));
             }
 
+            Request::DraftScanResult {
+                version,
+                location,
+                detail,
+                reply,
+            } => {
+                let _ = reply.send(opened.and_then(|s| {
+                    match location {
+                        Some((folder, epoch, uid)) => {
+                            s.draft_scan_failure(&version, &folder, epoch, uid, &detail)
+                        }
+                        None => s.finish_draft_scan(&version, &detail),
+                    }
+                    .map_err(|e| e.to_string())
+                }));
+            }
+            Request::NextDraftScan { reply } => {
+                let _ =
+                    reply.send(opened.and_then(|s| s.next_draft_scan().map_err(|e| e.to_string())));
+            }
+            Request::DraftScanMissing {
+                version,
+                folder,
+                epoch,
+                uids,
+                reply,
+            } => {
+                let _ = reply.send(opened.and_then(|s| {
+                    s.validate_account_commit(Some(&version))
+                        .and_then(|_| s.draft_scan_missing(&version.account, &folder, epoch, &uids))
+                        .map_err(|e| e.to_string())
+                }));
+            }
+            Request::ImportDiscoveredDraft {
+                version,
+                folder,
+                epoch,
+                uid,
+                raw,
+                ambiguous,
+                reply,
+            } => {
+                let _ = reply.send(opened.and_then(|s| {
+                    s.import_discovered_draft(&version, &folder, epoch, uid, &raw, ambiguous)
+                        .map_err(|e| e.to_string())
+                }));
+            }
             Request::NextDraftRefresh { reply } => {
                 let _ = reply
                     .send(opened.and_then(|s| s.next_draft_refresh().map_err(|e| e.to_string())));
@@ -1275,12 +1402,13 @@ fn run(path: Option<PathBuf>, receiver: Receiver<Request>) {
             Request::FailDraftSync {
                 account,
                 draft,
+                lineage,
                 state,
                 detail,
                 reply,
             } => {
                 let _ = reply.send(opened.and_then(|s| {
-                    s.fail_draft_sync(&account, &draft, &state, &detail)
+                    s.fail_draft_sync_branch(&account, &draft, &lineage, &state, &detail)
                         .map_err(|e| e.to_string())
                 }));
             }

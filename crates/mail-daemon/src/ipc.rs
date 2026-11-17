@@ -779,6 +779,7 @@ impl Service {
                         | Command::ResolveOperation { .. }
                         | Command::DraftSyncFolder { .. }
                         | Command::ConvertServerDraft { .. }
+                        | Command::ResolveDraftConflict { .. }
                         | Command::SetDefaultAccount { .. }
                         | Command::OpenDraft { .. }
                         | Command::NewDraft { .. }
