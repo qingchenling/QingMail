@@ -14,6 +14,7 @@ mod accounts;
 mod composer;
 mod lifecycle;
 mod mailbox;
+mod operations;
 mod perf_probe;
 mod reader;
 mod remote;

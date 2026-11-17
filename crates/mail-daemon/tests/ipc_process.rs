@@ -989,3 +989,138 @@ fn large_draft_chunked_write_lost_response_query_and_keyset_pages() {
     client.request(Command::PrepareShutdown).unwrap();
     daemon.exited();
 }
+
+#[test]
+fn offline_operations_lost_reply_restart_overlay_and_explicit_resolution() {
+    use mail_core::*;
+    let root = private_root();
+    let (loc, trash) = {
+        let mut store = mail_storage::Store::open(&root.path().join("data")).unwrap();
+        let server = ServerSettings {
+            host: "example.invalid".into(),
+            port: 993,
+            username: "fixture".into(),
+            security: ConnectionSecurity::Tls,
+        };
+        let account = store
+            .create_account(&AccountSettings {
+                display_name: "Offline fixture".into(),
+                address: "offline@example.invalid".into(),
+                imap: server.clone(),
+                smtp: server,
+            })
+            .unwrap();
+        store
+            .replace_remote_folders(
+                &account,
+                &[
+                    RemoteFolder {
+                        name: "INBOX".into(),
+                        display_name: "INBOX".into(),
+                        delimiter: None,
+                        selectable: true,
+                    },
+                    RemoteFolder {
+                        name: "Trash".into(),
+                        display_name: "Trash".into(),
+                        delimiter: None,
+                        selectable: true,
+                    },
+                ],
+                1,
+            )
+            .unwrap();
+        let inbox = store.upsert_folder(&account, "INBOX", 42).unwrap();
+        let trash = store.upsert_folder(&account, "Trash", 42).unwrap();
+        let loc = MailUid {
+            account,
+            folder_id: inbox.id.0,
+            uidvalidity: 42,
+            uid: 7,
+        };
+        store
+            .cache_message(
+                &loc,
+                &MessageEnvelope {
+                    subject: "offline".into(),
+                    sender: "fixture@example.invalid".into(),
+                    received_at: 1,
+                },
+            )
+            .unwrap();
+        (loc, trash.id)
+    };
+    let mut daemon = Daemon::start(root.path());
+    let client = daemon.ready(root.path());
+    let request = Request::new(
+        "e".repeat(32),
+        Command::EnqueueOperation {
+            locations: vec![loc.clone()],
+            operation: MailOperation::Flags {
+                seen: Some(true),
+                flagged: Some(true),
+            },
+        },
+    );
+    // 客户端丢弃响应；只查询原ID，不以新ID重新执行。
+    let mut socket = UnixStream::connect(root.path().join("runtime/qingmail/daemon.sock")).unwrap();
+    let mut bytes = serde_json::to_vec(&request).unwrap();
+    bytes.push(b'\n');
+    socket.write_all(&bytes).unwrap();
+    drop(socket);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if matches!(
+            client
+                .request(Command::MutationResult {
+                    mutation: request.id.clone()
+                })
+                .unwrap(),
+            Reply::Mutation(MutationStatus::Finished(_))
+        ) {
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(matches!(client.call(&request).unwrap(),Reply::Operations(v) if v.len()==1));
+    assert!(
+        matches!(client.request(Command::UnifiedInbox{before:None,limit:10}).unwrap(),Reply::Inbox(p) if p.messages[0].seen && p.messages[0].flagged)
+    );
+    // 模拟崩溃，后台重启不得丢失已确认入队的意图。
+    daemon.0.kill().unwrap();
+    daemon.0.wait().unwrap();
+    drop(daemon);
+    let mut daemon = Daemon::start(root.path());
+    let client = daemon.ready(root.path());
+    assert!(
+        matches!(client.request(Command::Operations{account:None}).unwrap(),Reply::Operations(v) if v.len()==1 && v[0].state==OperationState::Pending)
+    );
+    assert!(
+        matches!(client.request(Command::UnifiedInbox{before:None,limit:10}).unwrap(),Reply::Inbox(p) if p.messages[0].seen)
+    );
+    let moved = match client
+        .request(Command::EnqueueOperation {
+            locations: vec![loc.clone()],
+            operation: MailOperation::Move { destination: trash },
+        })
+        .unwrap()
+    {
+        Reply::Operations(v) => v[0].id.clone(),
+        _ => panic!(),
+    };
+    assert!(
+        matches!(client.request(Command::UnifiedInbox{before:None,limit:10}).unwrap(),Reply::Inbox(p) if p.messages.is_empty())
+    );
+    // 待同步移动不能以“重试”绕过持久顺序；SMTP不会被队列触发。
+    assert!(
+        client
+            .request(Command::RetryOperation { operation: moved })
+            .is_err()
+    );
+    assert!(
+        matches!(client.request(Command::Tasks{account:loc.account}).unwrap(),Reply::Tasks(v) if v.is_empty())
+    );
+    client.request(Command::PrepareShutdown).unwrap();
+    daemon.exited();
+}

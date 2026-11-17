@@ -8,6 +8,7 @@ use std::sync::{
 #[derive(Clone)]
 pub struct View {
     pub snapshot: AppSnapshot,
+    pub operations: Vec<OperationInfo>,
     pub error: Option<String>,
     pub activation: Option<Activation>,
     pub shutdown: bool,
@@ -39,6 +40,7 @@ impl Remote {
         let acknowledged = ack.clone();
         let view = Arc::new(Mutex::new(View {
             snapshot: front.snapshot.clone(),
+            operations: vec![],
             error: None,
             activation: None,
             shutdown: false,
@@ -147,9 +149,18 @@ impl Remote {
                         else {
                             return Err("后台快照响应无效".into());
                         };
+                        let operations = match front
+                            .client
+                            .request(Command::Operations { account: None })
+                            .map_err(|e| e.to_string())?
+                        {
+                            Reply::Operations(items) => items,
+                            _ => return Err("操作状态响应无效".into()),
+                        };
                         active.store(snapshot.status.account_saving, Ordering::Release);
                         let mut view = shared.lock().unwrap_or_else(|e| e.into_inner());
                         view.snapshot = snapshot;
+                        view.operations = operations;
                         view.activation = activation;
                         if !shutdown_requested {
                             cancelled.store(false, Ordering::Release);

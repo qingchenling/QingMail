@@ -24,6 +24,10 @@ pub(crate) const COMMANDS: &[mail_protocol::CommandName] = &[
     mail_protocol::CommandName::DraftPage,
     mail_protocol::CommandName::TaskPage,
     mail_protocol::CommandName::Accounts,
+    mail_protocol::CommandName::EnqueueOperation,
+    mail_protocol::CommandName::Operations,
+    mail_protocol::CommandName::RetryOperation,
+    mail_protocol::CommandName::ResolveOperation,
     mail_protocol::CommandName::AccountOptions,
     mail_protocol::CommandName::PauseSync,
     mail_protocol::CommandName::SetDefaultAccount,
@@ -48,7 +52,9 @@ pub(crate) const COMMANDS: &[mail_protocol::CommandName] = &[
 fn mutates(command: &Rpc) -> bool {
     matches!(
         command,
-        Rpc::SetDefaultAccount { .. }
+        Rpc::RetryOperation { .. }
+            | Rpc::ResolveOperation { .. }
+            | Rpc::SetDefaultAccount { .. }
             | Rpc::PauseSync {
                 account: Some(_),
                 ..
@@ -76,6 +82,30 @@ pub(super) fn dispatch(store: &mut Store, request: mail_protocol::Request) -> Re
         })?;
         if !COMMANDS.contains(&request.command.name()) {
             return Err(error(ErrorCode::Unsupported, "此命令尚未接入独立后台"));
+        }
+        if matches!(request.command, Rpc::EnqueueOperation { .. }) {
+            let mut trash = std::collections::BTreeMap::new();
+            if let Rpc::EnqueueOperation {
+                locations,
+                operation: mail_protocol::MailOperation::Delete,
+            } = &request.command
+            {
+                for loc in locations {
+                    let catalog = store.remote_folders(&loc.account).map_err(storage_error)?;
+                    if let Some(name) = mail_service::folders::trash(&catalog, None)
+                        && let Some(folder) = store
+                            .folders(&loc.account)
+                            .map_err(storage_error)?
+                            .into_iter()
+                            .find(|f| f.remote_name == name)
+                    {
+                        trash.insert(loc.account.0.clone(), folder.id);
+                    }
+                }
+            }
+            return store
+                .enqueue_operations_with_trash(&request, &trash)
+                .map_err(storage_error);
         }
         if !mutates(&request.command) {
             return execute(store, request.command);
@@ -177,6 +207,22 @@ fn execute(store: &mut Store, command: Rpc) -> Result<Reply, RpcError> {
                 .unified_inbox(before.as_ref(), limit)
                 .map_err(storage_error)?,
         ),
+        Rpc::Operations { account } => {
+            Reply::Operations(store.operations(account.as_ref()).map_err(storage_error)?)
+        }
+        Rpc::RetryOperation { operation } => {
+            store.retry_operation(&operation).map_err(storage_error)?;
+            Reply::Acknowledged
+        }
+        Rpc::ResolveOperation {
+            operation,
+            resolution,
+        } => {
+            store
+                .resolve_operation(&operation, resolution)
+                .map_err(storage_error)?;
+            Reply::Acknowledged
+        }
         Rpc::Accounts => Reply::Accounts(store.accounts().map_err(storage_error)?),
         Rpc::AccountImpact { account } => {
             if store.account(&account).map_err(storage_error)?.is_none() {

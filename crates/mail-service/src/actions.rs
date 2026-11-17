@@ -1,4 +1,4 @@
-//! 单账号在线邮件操作：标记已读/星标、移动归档/删除。P3 才做持久离线队列。
+//! IMAP 标记、移动和只读核对；持久队列由 daemon/storage 管理。
 use crate::accounts::{CheckError, ImapStream, authenticated, quoted, response};
 use crate::sync::{command, logout, until_done};
 use imap_proto::{Response, ResponseCode, Status};
@@ -193,49 +193,161 @@ pub(crate) fn move_messages_using(
     destination: &str,
     connector: &native_tls::TlsConnector,
 ) -> Result<MoveOutcome, CheckError> {
-    validate(server, password, source, uids)?;
-    if destination.is_empty()
-        || destination.len() > 4096
-        || destination.chars().any(char::is_control)
-    {
-        return Err(CheckError::Invalid);
-    }
+    move_checked_using(
+        server,
+        password,
+        source,
+        expected_epoch,
+        uids,
+        destination,
+        connector,
+    )
+    .map_err(|e| e.error)
+}
+#[derive(Debug, Clone, Copy)]
+pub struct MoveError {
+    pub error: CheckError,
+    pub may_have_changed: bool,
+}
+pub fn move_checked(
+    server: &ServerSettings,
+    password: &str,
+    source: &str,
+    epoch: u32,
+    uids: &[u32],
+    destination: &str,
+) -> Result<MoveOutcome, MoveError> {
+    let connector = tls().map_err(|error| MoveError {
+        error,
+        may_have_changed: false,
+    })?;
+    move_checked_using(
+        server,
+        password,
+        source,
+        epoch,
+        uids,
+        destination,
+        &connector,
+    )
+}
+fn move_checked_using(
+    server: &ServerSettings,
+    password: &str,
+    source: &str,
+    expected_epoch: u32,
+    uids: &[u32],
+    destination: &str,
+    connector: &native_tls::TlsConnector,
+) -> Result<MoveOutcome, MoveError> {
+    let mut may_have_changed = false;
+    let result = (|| {
+        validate(server, password, source, uids)?;
+        if destination.is_empty()
+            || destination.len() > 4096
+            || destination.chars().any(char::is_control)
+        {
+            return Err(CheckError::Invalid);
+        }
+        let mut stream = authenticated(server, password, connector)?;
+        let result = (|| {
+            select(&mut stream, source, expected_epoch)?;
+            let set = uid_set(uids);
+            let mut move_command = b"QM4 UID MOVE ".to_vec();
+            move_command.extend_from_slice(set.as_bytes());
+            move_command.push(b' ');
+            quoted(&mut move_command, destination);
+            move_command.extend_from_slice(b"\r\n");
+            may_have_changed = true;
+            command(&mut stream, &move_command)?;
+            match tagged(&mut stream, "QM4")? {
+                Status::Ok => return Ok(MoveOutcome::Moved),
+                Status::No | Status::Bad => {}
+                _ => return Err(CheckError::Protocol),
+            }
+            // 退化路径：复制成功后标记删除，再尝试 UID EXPUNGE。
+            let mut copy = b"QM4 UID COPY ".to_vec();
+            copy.extend_from_slice(set.as_bytes());
+            copy.push(b' ');
+            quoted(&mut copy, destination);
+            copy.extend_from_slice(b"\r\n");
+            command(&mut stream, &copy)?;
+            if tagged(&mut stream, "QM4")? != Status::Ok {
+                return Err(CheckError::Protocol);
+            }
+            command(
+                &mut stream,
+                format!("QM5 UID STORE {set} +FLAGS.SILENT (\\Deleted)\r\n").as_bytes(),
+            )?;
+            until_done(&mut stream, "QM5", |_| Ok(()))?;
+            command(&mut stream, format!("QM6 UID EXPUNGE {set}\r\n").as_bytes())?;
+            match tagged(&mut stream, "QM6")? {
+                Status::Ok => Ok(MoveOutcome::Moved),
+                // 副本已存在且源已标记删除，但没有确认真正移除。
+                _ => Ok(MoveOutcome::CopiedOnly),
+            }
+        })();
+        logout(&mut stream);
+        result
+    })();
+    result.map_err(|error| MoveError {
+        error,
+        may_have_changed,
+    })
+}
+
+/// 有界只读核对：不存在的 UID 不可当作移动成功证明。
+pub fn probe(
+    server: &ServerSettings,
+    password: &str,
+    folder: &str,
+    epoch: u32,
+    uid: u32,
+) -> Result<Option<FlagChange>, CheckError> {
+    probe_using(server, password, folder, epoch, uid, &tls()?)
+}
+fn probe_using(
+    server: &ServerSettings,
+    password: &str,
+    folder: &str,
+    epoch: u32,
+    uid: u32,
+    connector: &native_tls::TlsConnector,
+) -> Result<Option<FlagChange>, CheckError> {
+    validate(server, password, folder, &[uid])?;
     let mut stream = authenticated(server, password, connector)?;
     let result = (|| {
-        select(&mut stream, source, expected_epoch)?;
-        let set = uid_set(uids);
-        let mut move_command = b"QM4 UID MOVE ".to_vec();
-        move_command.extend_from_slice(set.as_bytes());
-        move_command.push(b' ');
-        quoted(&mut move_command, destination);
-        move_command.extend_from_slice(b"\r\n");
-        command(&mut stream, &move_command)?;
-        match tagged(&mut stream, "QM4")? {
-            Status::Ok => return Ok(MoveOutcome::Moved),
-            Status::No | Status::Bad => {}
-            _ => return Err(CheckError::Protocol),
-        }
-        // 退化路径：复制成功后标记删除，再尝试 UID EXPUNGE。
-        let mut copy = b"QM4 UID COPY ".to_vec();
-        copy.extend_from_slice(set.as_bytes());
-        copy.push(b' ');
-        quoted(&mut copy, destination);
-        copy.extend_from_slice(b"\r\n");
-        command(&mut stream, &copy)?;
-        if tagged(&mut stream, "QM4")? != Status::Ok {
-            return Err(CheckError::Protocol);
-        }
+        select(&mut stream, folder, epoch)?;
         command(
             &mut stream,
-            format!("QM5 UID STORE {set} +FLAGS.SILENT (\\Deleted)\r\n").as_bytes(),
+            format!("QM4 UID FETCH {uid} (UID FLAGS)\r\n").as_bytes(),
         )?;
-        until_done(&mut stream, "QM5", |_| Ok(()))?;
-        command(&mut stream, format!("QM6 UID EXPUNGE {set}\r\n").as_bytes())?;
-        match tagged(&mut stream, "QM6")? {
-            Status::Ok => Ok(MoveOutcome::Moved),
-            // 副本已存在且源已标记删除，但没有确认真正移除。
-            _ => Ok(MoveOutcome::CopiedOnly),
-        }
+        let mut found = None;
+        until_done(&mut stream, "QM4", |r| {
+            if let Response::Fetch(_, attrs) = r {
+                let mut matches = false;
+                let mut seen = false;
+                let mut flagged = false;
+                for a in attrs {
+                    match a {
+                        imap_proto::AttributeValue::Uid(value) => matches = value == uid,
+                        imap_proto::AttributeValue::Flags(flags) => {
+                            seen = flags.iter().any(|f| f.eq_ignore_ascii_case("\\Seen"));
+                            flagged = flags.iter().any(|f| f.eq_ignore_ascii_case("\\Flagged"));
+                        }
+                        _ => (),
+                    }
+                }
+                if matches {
+                    found = Some(FlagChange {
+                        seen: Some(seen),
+                        flagged: Some(flagged),
+                    });
+                }
+            }
+            Ok(())
+        })?;
+        Ok(found)
     })();
     logout(&mut stream);
     result

@@ -176,3 +176,88 @@ fn changed_epoch_or_invalid_input_never_stores() {
         Err(CheckError::Invalid)
     );
 }
+
+#[test]
+fn queued_move_distinguishes_preflight_epoch_failure_from_lost_move_response() {
+    for changed in [true, false] {
+        let (cert, key) = certificate();
+        let accept = acceptor(&cert, &key);
+        let listener = listener();
+        let settings = server(&listener, ConnectionSecurity::Tls);
+        let worker = thread::spawn(move || {
+            let mut r = BufReader::new(accept.accept(socket(listener)).unwrap());
+            r.get_mut().write_all(b"* OK synthetic\r\n").unwrap();
+            assert!(line(&mut r).starts_with("QM2 LOGIN "));
+            r.get_mut().write_all(b"QM2 OK login\r\n").unwrap();
+            assert!(line(&mut r).starts_with("QM3 SELECT "));
+            r.get_mut()
+                .write_all(if changed {
+                    b"* OK [UIDVALIDITY 43] new\r\nQM3 OK selected\r\n"
+                } else {
+                    b"* OK [UIDVALIDITY 42] old\r\nQM3 OK selected\r\n"
+                })
+                .unwrap();
+            if changed {
+                assert_eq!(line(&mut r), "QM9 LOGOUT\r\n");
+            } else {
+                assert_eq!(line(&mut r), "QM4 UID MOVE 7 \"Trash\"\r\n");
+            }
+            // 丢失确认，不能推断该 MOVE 未执行。
+        });
+        let failure = move_checked_using(
+            &settings,
+            "fixture",
+            "INBOX",
+            42,
+            &[7],
+            "Trash",
+            &tls(&cert),
+        )
+        .unwrap_err();
+        assert_eq!(failure.may_have_changed, !changed);
+        if changed {
+            assert_eq!(failure.error, CheckError::EpochChanged);
+        }
+        worker.join().unwrap();
+    }
+}
+
+#[test]
+fn reconciliation_probe_is_read_only_and_checks_uid_and_flags() {
+    for exists in [true, false] {
+        let (cert, key) = certificate();
+        let accept = acceptor(&cert, &key);
+        let listener = listener();
+        let settings = server(&listener, ConnectionSecurity::Tls);
+        let worker = thread::spawn(move || {
+            let mut r = BufReader::new(accept.accept(socket(listener)).unwrap());
+            r.get_mut().write_all(b"* OK synthetic\r\n").unwrap();
+            assert!(line(&mut r).starts_with("QM2 LOGIN "));
+            r.get_mut().write_all(b"QM2 OK login\r\n").unwrap();
+            assert_eq!(line(&mut r), "QM3 SELECT \"INBOX\"\r\n");
+            r.get_mut()
+                .write_all(b"* OK [UIDVALIDITY 42] stable\r\nQM3 OK selected\r\n")
+                .unwrap();
+            assert_eq!(line(&mut r), "QM4 UID FETCH 7 (UID FLAGS)\r\n");
+            if exists {
+                r.get_mut()
+                    .write_all(b"* 1 FETCH (UID 7 FLAGS (\\Seen \\Flagged))\r\n")
+                    .unwrap();
+            }
+            r.get_mut().write_all(b"QM4 OK fetched\r\n").unwrap();
+            assert_eq!(line(&mut r), "QM9 LOGOUT\r\n");
+        });
+        assert_eq!(
+            probe_using(&settings, "fixture", "INBOX", 42, 7, &tls(&cert)).unwrap(),
+            if exists {
+                Some(FlagChange {
+                    seen: Some(true),
+                    flagged: Some(true),
+                })
+            } else {
+                None
+            }
+        );
+        worker.join().unwrap();
+    }
+}

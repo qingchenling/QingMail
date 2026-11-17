@@ -97,7 +97,7 @@ fn schema10_upgrade_backs_up_and_removing_default_selects_remaining_account() {
     drop(store);
     let connection = Connection::open(path.join("state.sqlite3")).unwrap();
     connection
-        .execute_batch("DROP TRIGGER account_default_options; DROP TABLE account_options; PRAGMA user_version=10;")
+        .execute_batch("DROP VIEW visible_folder_messages; DROP TABLE mail_operations; DROP TRIGGER account_default_options; DROP TABLE account_options; PRAGMA user_version=10;")
         .unwrap();
     drop(connection);
     let mut store = Store::open(&path).unwrap();

@@ -1202,7 +1202,7 @@ impl Mailbox {
         self.undo_flags = None;
         self.status = "正在分别处理各账号邮件…".into();
         let task = cx.background_executor().spawn(async move {
-            let client = store.ipc_client().ok_or("统一操作需要独立后台")?;
+            store.ipc_client().ok_or("统一操作需要独立后台")?;
             let mut groups = BTreeMap::<(String, String, u32), Vec<u32>>::new();
             for location in locations {
                 groups
@@ -1253,7 +1253,7 @@ impl Mailbox {
                             destination,
                         }
                     };
-                    match mail_daemon::client::run(&client, operation)? {
+                    match enqueue_action(&store, operation)? {
                         Reply::Count(n)
                         | Reply::Moved {
                             count: n,
@@ -1283,7 +1283,7 @@ impl Mailbox {
                 this.checked.clear();
                 this.status = match result {
                     Ok((n, errors)) => format!(
-                        "已处理 {n} 封{}",
+                        "已保存 {n} 封操作 · 待同步{}",
                         if errors.is_empty() {
                             String::new()
                         } else {
@@ -1341,13 +1341,13 @@ impl Mailbox {
             )
         });
         self.busy = true;
-        self.status = "正在更新服务器标记…".into();
+        self.status = "正在保存标记操作…".into();
         let store = self.store.clone();
         let uids = targets.clone();
         let task = cx.background_executor().spawn(async move {
-            if let Some(client) = store.ipc_client() {
-                return match mail_daemon::client::run(
-                    &client,
+            if store.ipc_client().is_some() {
+                return match enqueue_action(
+                    &store,
                     Op::Flags {
                         account,
                         name,
@@ -1391,14 +1391,15 @@ impl Mailbox {
                 this.busy = false;
                 match result {
                     Ok(count) => {
-                        this.status = format!("已更新 {count} 封邮件的标记");
+                        this.status = format!("已保存 {count} 封标记操作 · 待同步");
                         this.checked.clear();
                         this.undo_flags = undo;
                         this.quiet_reload = true;
                         this.load_cache(cx);
                     }
                     Err(error) => {
-                        this.status = format!("标记更新失败，缓存未改动：{error}");
+                        this.status =
+                            format!("标记操作保存未确认，请查看待同步操作后再尝试：{error}");
                     }
                 }
                 cx.notify();
@@ -1467,9 +1468,9 @@ impl Mailbox {
         let store = self.store.clone();
         let uids = targets.clone();
         let task = cx.background_executor().spawn(async move {
-            if let Some(client) = store.ipc_client() {
-                return match mail_daemon::client::run(
-                    &client,
+            if store.ipc_client().is_some() {
+                return match enqueue_action(
+                    &store,
                     Op::Move {
                         account,
                         name,
@@ -1518,7 +1519,7 @@ impl Mailbox {
                 this.undo_flags = None;
                 match result {
                     Ok((actions::MoveOutcome::Moved, count, destination)) => {
-                        this.status = format!("已移动 {count} 封邮件到 {destination}");
+                        this.status = format!("已保存 {count} 封移至 {destination} 的操作 · 待同步");
                         this.checked.clear();
                         this.quiet_reload = true;
                         this.load_cache(cx);
@@ -1531,7 +1532,7 @@ impl Mailbox {
                         this.quiet_reload = true;
                         this.load_cache(cx);
                     }
-                    Err(error) => this.status = format!("移动失败，缓存未改动：{error}"),
+                    Err(error) => this.status = format!("移动操作保存未确认，请查看待同步操作后再尝试：{error}"),
                 }
                 cx.notify();
             });
@@ -1790,6 +1791,80 @@ impl Mailbox {
         cx.notify();
     }
 }
+// 复用控件的数量/目标响应，仅表示队列已落盘；调用方明确展示“待同步”。
+fn enqueue_action(store: &StorageClient, operation: Op) -> Result<Reply, String> {
+    use mail_protocol::{Command, MailOperation};
+    let (account, name, epoch, uids, op, destination) = match operation {
+        Op::Flags {
+            account,
+            name,
+            epoch,
+            uids,
+            seen,
+            flagged,
+        } => (
+            account,
+            name,
+            epoch,
+            uids,
+            MailOperation::Flags { seen, flagged },
+            None,
+        ),
+        Op::Move {
+            account,
+            name,
+            epoch,
+            uids,
+            destination,
+        } => {
+            let target = receive(store.folders(account.clone()))?
+                .into_iter()
+                .find(|f| f.remote_name == destination)
+                .ok_or("目标文件夹尚未同步，请先同步账号")?;
+            (
+                account,
+                name,
+                epoch,
+                uids,
+                MailOperation::Move {
+                    destination: target.id,
+                },
+                Some(destination),
+            )
+        }
+        _ => return Err("此入口仅处理邮件标记与移动".into()),
+    };
+    let folder = receive(store.folders(account.clone()))?
+        .into_iter()
+        .find(|f| f.remote_name == name && f.uidvalidity == epoch)
+        .ok_or("邮件定位已变化，请刷新")?;
+    let locations = uids
+        .into_iter()
+        .map(|uid| mail_core::MailUid {
+            account: account.clone(),
+            folder_id: folder.id.0.clone(),
+            uidvalidity: epoch,
+            uid,
+        })
+        .collect();
+    let Reply::Operations(records) = store.control(Command::EnqueueOperation {
+        locations,
+        operation: op,
+    })?
+    else {
+        return Err("操作落盘响应无效".into());
+    };
+    let count = records.len() as u64;
+    Ok(match destination {
+        Some(destination) => Reply::Moved {
+            count,
+            copied_only: false,
+            destination,
+        },
+        None => Reply::Count(count),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

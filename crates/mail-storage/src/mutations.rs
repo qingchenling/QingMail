@@ -10,7 +10,7 @@ pub enum MutationClaim {
     Acquired,
     Existing(MutationStatus),
 }
-fn fingerprint(request: &Request) -> Result<String> {
+pub(super) fn fingerprint(request: &Request) -> Result<String> {
     request
         .validate()
         .map_err(|_| Error::Invalid("IPC 请求无效"))?;
@@ -189,7 +189,7 @@ mod tests {
             .unwrap();
         store
             .connection
-            .execute_batch("DROP TRIGGER account_default_options; DROP TABLE account_options; DROP TRIGGER account_legacy_credential; DROP TABLE account_credentials; DROP TABLE mutation_results; PRAGMA user_version=8;")
+            .execute_batch("DROP VIEW visible_folder_messages; DROP TABLE mail_operations; DROP TRIGGER account_default_options; DROP TABLE account_options; DROP TRIGGER account_legacy_credential; DROP TABLE account_credentials; DROP TABLE mutation_results; PRAGMA user_version=8;")
             .unwrap();
         drop(store);
         let store = Store::open(&path).unwrap();

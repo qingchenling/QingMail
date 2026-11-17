@@ -128,7 +128,7 @@ mod tests {
                 },
             )
             .unwrap();
-        store.connection.execute_batch("DROP TRIGGER account_default_options; DROP TABLE account_options; DROP TRIGGER account_legacy_credential; DROP TABLE account_credentials; PRAGMA user_version=9;").unwrap();
+        store.connection.execute_batch("DROP VIEW visible_folder_messages; DROP TABLE mail_operations; DROP TRIGGER account_default_options; DROP TABLE account_options; DROP TRIGGER account_legacy_credential; DROP TABLE account_credentials; PRAGMA user_version=9;").unwrap();
         drop(store);
         let store = Store::open(&data).unwrap();
         let version = store.account_version(&account).unwrap();

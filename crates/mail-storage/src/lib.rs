@@ -6,6 +6,7 @@ pub use client_requests::{ClientRequests, PendingAccountRequest};
 mod message_body;
 mod multi_account;
 mod mutations;
+mod operations;
 pub use account_credentials::AccountVersion;
 pub use mutations::MutationClaim;
 mod objects;
@@ -30,7 +31,7 @@ use private_dir::PrivateDir;
 use rusqlite::{Connection, MAIN_DB, OpenFlags, OptionalExtension, params};
 use std::{fmt, fs::File, io, path::Path, time::Duration};
 
-const SCHEMA_VERSION: u32 = 11;
+const SCHEMA_VERSION: u32 = 12;
 const APPLICATION_ID: u32 = 0x514d4149;
 const SCHEMA: &str = include_str!("schema.sql");
 const SCHEMA_V2: &str = include_str!("schema-v2.sql");
@@ -128,6 +129,7 @@ impl Store {
         let objects = directory.child("objects")?;
         outbox::recover_interrupted(&mut connection)?;
         mutations::recover(&connection)?;
+        operations::recover(&connection)?;
         Ok(Self {
             objects,
             connection,
@@ -480,7 +482,7 @@ impl Store {
         let sender = like(&query.sender);
         let mut statement = self.connection.prepare(
             "SELECT m.id,fm.uid,fm.uidvalidity,m.subject,m.sender,m.received_at,fm.seen,fm.flagged,f.remote_name,f.id,fm.account_id \
-             FROM folder_messages fm \
+             FROM visible_folder_messages fm \
              JOIN messages m ON m.id=fm.message_id AND m.account_id=fm.account_id \
              JOIN folders f ON f.id=fm.folder_id AND f.account_id=fm.account_id \
              WHERE (?1 IS NULL OR fm.account_id=?1) \
@@ -537,7 +539,7 @@ impl Store {
             return Err(Error::Invalid("分页数量须为 1–200"));
         }
         let mut query = self.connection.prepare(
-            "SELECT m.id,fm.uid,m.subject,m.sender,m.received_at,fm.seen,fm.flagged FROM folder_messages fm JOIN messages m ON m.id=fm.message_id AND m.account_id=fm.account_id WHERE fm.account_id=?1 AND fm.folder_id=?2 AND fm.uidvalidity=?3 AND (?4 IS NULL OR fm.uid < ?4) ORDER BY fm.uid DESC LIMIT ?5",
+            "SELECT m.id,fm.uid,m.subject,m.sender,m.received_at,fm.seen,fm.flagged FROM visible_folder_messages fm JOIN messages m ON m.id=fm.message_id AND m.account_id=fm.account_id WHERE fm.account_id=?1 AND fm.folder_id=?2 AND fm.uidvalidity=?3 AND (?4 IS NULL OR fm.uid < ?4) ORDER BY fm.uid DESC LIMIT ?5",
         )?;
         Ok(query
             .query_map(
@@ -650,6 +652,9 @@ fn migrate(
     }
     if version < 11 {
         tx.execute_batch(include_str!("schema-v11.sql"))?;
+    }
+    if version < 12 {
+        tx.execute_batch(include_str!("schema-v12.sql"))?;
     }
     tx.pragma_update(None, "application_id", APPLICATION_ID)?;
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;

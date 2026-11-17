@@ -45,7 +45,7 @@ impl Store {
             return Err(Error::Invalid("分页数量须为 1–200"));
         }
         let mut query = self.connection.prepare(
-            "SELECT m.id,fm.account_id,fm.folder_id,fm.uidvalidity,fm.uid,m.subject,m.sender,m.received_at,fm.seen,fm.flagged FROM folder_messages fm JOIN messages m ON m.id=fm.message_id AND m.account_id=fm.account_id JOIN folders f ON f.id=fm.folder_id AND f.account_id=fm.account_id WHERE f.remote_name COLLATE NOCASE='INBOX' AND (?1 IS NULL OR (m.received_at,fm.account_id,m.id)<(?1,?2,?3)) ORDER BY m.received_at DESC,fm.account_id DESC,m.id DESC LIMIT ?4"
+            "SELECT m.id,fm.account_id,fm.folder_id,fm.uidvalidity,fm.uid,m.subject,m.sender,m.received_at,fm.seen,fm.flagged FROM visible_folder_messages fm JOIN messages m ON m.id=fm.message_id AND m.account_id=fm.account_id JOIN folders f ON f.id=fm.folder_id AND f.account_id=fm.account_id WHERE f.remote_name COLLATE NOCASE='INBOX' AND (?1 IS NULL OR (m.received_at,fm.account_id,m.id)<(?1,?2,?3)) ORDER BY m.received_at DESC,fm.account_id DESC,m.id DESC LIMIT ?4"
         )?;
         let mut messages = query
             .query_map(

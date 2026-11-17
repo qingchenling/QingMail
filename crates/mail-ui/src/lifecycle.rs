@@ -616,3 +616,43 @@ fn tick(cx: &mut App) {
         }
     });
 }
+
+pub(super) fn operation_label(location: &mail_core::MailUid, cx: &App) -> String {
+    let Some(remote) = cx.global::<Lifecycle>().remote.as_ref() else {
+        return String::new();
+    };
+    let view = remote.view.lock().unwrap_or_else(|e| e.into_inner());
+    view.operations
+        .iter()
+        .find(|o| &o.location == location && o.state != mail_protocol::OperationState::Applied)
+        .map(|o| format!(" · {}", crate::operations::state_label(o.state)))
+        .unwrap_or_default()
+}
+pub(super) fn operation_summary(cx: &App) -> String {
+    let Some(remote) = cx.global::<Lifecycle>().remote.as_ref() else {
+        return String::new();
+    };
+    let view = remote.view.lock().unwrap_or_else(|e| e.into_inner());
+    let active = view
+        .operations
+        .iter()
+        .filter(|o| o.state != mail_protocol::OperationState::Applied)
+        .count();
+    let issues = view
+        .operations
+        .iter()
+        .filter(|o| {
+            matches!(
+                o.state,
+                mail_protocol::OperationState::Failed
+                    | mail_protocol::OperationState::Conflict
+                    | mail_protocol::OperationState::Uncertain
+            )
+        })
+        .count();
+    if active == 0 {
+        "待同步操作".into()
+    } else {
+        format!("待同步操作 {active} · 待处理 {issues}")
+    }
+}
