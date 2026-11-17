@@ -243,7 +243,22 @@ impl Reader {
         self.status = "正在生成本地阅读副本…".into();
         cx.notify();
         let content = self.content.clone();
+        let client = crate::lifecycle::storage(cx).ipc_client();
         let task = cx.background_executor().spawn(async move {
+            if let (Some(client), Some(handle)) = (client, content.display_handle.clone()) {
+                let reply = mail_daemon::client::run(
+                    &client,
+                    mail_protocol::BusinessOperation::BrowserCopy { content: handle },
+                )
+                .map_err(std::io::Error::other)?;
+                let mail_protocol::Reply::BrowserCopy { url } = reply else {
+                    return Err(std::io::Error::other("副本响应无效"));
+                };
+                return url::Url::parse(&url)
+                    .map_err(std::io::Error::other)?
+                    .to_file_path()
+                    .map_err(|_| std::io::Error::other("副本URL无效"));
+            }
             let parent = cache_parent()?;
             CopyStore::open(&parent)?.write(&content)
         });
@@ -276,7 +291,20 @@ impl Reader {
         self.status = "仅为当前邮件加载远程图片…".into();
         cx.notify();
         let mut content = self.content.clone();
+        let client = crate::lifecycle::storage(cx).ipc_client();
         let task = cx.background_executor().spawn(async move {
+            if let (Some(client), Some(handle)) = (client, content.display_handle.clone()) {
+                return match mail_daemon::client::content(
+                    &client,
+                    mail_protocol::BusinessOperation::RemoteImages { content: handle },
+                ) {
+                    Ok(loaded) => {
+                        let count = loaded.images.len();
+                        (loaded, Ok(count))
+                    }
+                    Err(e) => (content, Err(mail_content::ContentError(e))),
+                };
+            }
             let result = content.load_remote_images_after_consent();
             (content, result)
         });
@@ -303,9 +331,21 @@ impl Reader {
         }
         self.busy = true;
         cx.notify();
-        let task = cx
-            .background_executor()
-            .spawn(async { CopyStore::open(&cache_parent()?)?.clear() });
+        let client = crate::lifecycle::storage(cx).ipc_client();
+        let task = cx.background_executor().spawn(async move {
+            if let Some(client) = client {
+                return match mail_daemon::client::run(
+                    &client,
+                    mail_protocol::BusinessOperation::ClearCopies,
+                )
+                .map_err(std::io::Error::other)?
+                {
+                    mail_protocol::Reply::Count(count) => Ok(count as usize),
+                    _ => Err(std::io::Error::other("清理响应无效")),
+                };
+            }
+            CopyStore::open(&cache_parent()?)?.clear()
+        });
         cx.spawn(async move |entity, cx| {
             let result = task.await;
             let _ = entity.update(cx, |this, cx| {

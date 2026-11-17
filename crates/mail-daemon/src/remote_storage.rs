@@ -85,7 +85,15 @@ fn run_remote(client: Client, receiver: Receiver<Request>) {
                 answer!(reply,Rpc::AccountImpact{account},Reply::AccountImpact(v)=>v)
             }
             Request::RemoveAccount { account, reply } => {
-                answer!(reply,Rpc::RemoveAccount{account},Reply::AccountImpact(v)=>v)
+                let result = crate::client::run(
+                    &client,
+                    mail_protocol::BusinessOperation::RemoveAccount { account },
+                )
+                .and_then(|r| match r {
+                    Reply::AccountImpact(v) => Ok(v),
+                    _ => Err("账号移除响应无效".into()),
+                });
+                let _ = reply.send(result);
             }
             Request::Catalog { account, reply } => {
                 answer!(reply,Rpc::Catalog{account},Reply::Catalog{folders,synced_at}=>(folders,synced_at))
@@ -140,7 +148,31 @@ fn run_remote(client: Client, receiver: Receiver<Request>) {
                 answer!(reply,Rpc::SaveDraft{account:previous.account,draft:previous.id,revision:previous.revision,document},Reply::Draft(v)=>v)
             }
             Request::List { account, reply } => {
-                answer!(reply,Rpc::Drafts{account},Reply::Drafts(v)=>v)
+                let result = (|| {
+                    let mut items = vec![];
+                    let mut after = None;
+                    loop {
+                        let Reply::DraftPage { items: page, next } = call(
+                            &client,
+                            Rpc::DraftPage {
+                                account: account.clone(),
+                                after: after.clone(),
+                            },
+                        )?
+                        else {
+                            return Err("草稿分页响应无效".into());
+                        };
+                        items.extend(page);
+                        if next.is_none() {
+                            return Ok(items);
+                        }
+                        if next == after {
+                            return Err("草稿分页游标无效".into());
+                        }
+                        after = next;
+                    }
+                })();
+                let _ = reply.send(result);
             }
             Request::Select { account, id, reply } => {
                 answer!(reply,Rpc::SelectDraft{account,draft:id},Reply::Draft(v)=>v)
@@ -154,7 +186,32 @@ fn run_remote(client: Client, receiver: Receiver<Request>) {
                 reply,
             } => answer!(reply,Rpc::AttachmentInfos{account,ids},Reply::Attachments(v)=>v),
             Request::Tasks { account, reply } => {
-                answer!(reply,Rpc::Tasks{account},Reply::Tasks(v)=>v)
+                let result = (|| {
+                    let mut items = vec![];
+                    let mut after = None;
+                    loop {
+                        let Reply::TaskPage { items: page, next } = call(
+                            &client,
+                            Rpc::TaskPage {
+                                account: account.clone(),
+                                after: after.clone(),
+                            },
+                        )?
+                        else {
+                            return Err("任务分页响应无效".into());
+                        };
+                        items.extend(page);
+                        if next.is_none() {
+                            items.sort_by_key(|t| std::cmp::Reverse(t.created_at));
+                            return Ok(items);
+                        }
+                        if next == after {
+                            return Err("任务分页游标无效".into());
+                        }
+                        after = next;
+                    }
+                })();
+                let _ = reply.send(result);
             }
             Request::DraftTasks { account, id, reply } => {
                 answer!(reply,Rpc::DraftTasks{account,draft:id},Reply::Tasks(v)=>v)

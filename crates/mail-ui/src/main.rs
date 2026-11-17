@@ -16,6 +16,7 @@ mod lifecycle;
 mod mailbox;
 mod perf_probe;
 mod reader;
+mod remote;
 mod reply;
 mod send_labels;
 mod send_tasks;
@@ -332,8 +333,15 @@ fn main() {
     use mail_daemon::{Command, Instance, Launch};
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "--version") {
-        println!("QingMail {} (P2 test build)", env!("CARGO_PKG_VERSION"));
+        println!("QingMail {} (P3 test build)", env!("CARGO_PKG_VERSION"));
         return;
+    }
+    if (std::env::var_os("QINGMAIL_IPC_TEST_EDITOR").is_some()
+        || std::env::var_os("QINGMAIL_IPC_TEST_MAILBOX").is_some())
+        && std::env::var_os("QINGMAIL_IPC_ROOT").is_none()
+    {
+        eprintln!("IPC 编辑测试必须使用隔离 QINGMAIL_IPC_ROOT");
+        std::process::exit(1);
     }
     let command = if args.iter().any(|arg| arg == "--quit") {
         Command::Quit
@@ -411,7 +419,56 @@ fn main() {
         eprintln!("账号探针需要独立运行与数据目录");
         std::process::exit(1);
     }
-    let instance = if isolated_probe {
+    let production = !isolated_probe
+        && !home_demo
+        && !args
+            .iter()
+            .any(|arg| arg.ends_with("-probe") || arg.ends_with("-demo"))
+        && std::env::var_os("QINGMAIL_P0_RUNTIME_ROOT").is_none();
+    if !production && std::env::var_os("QINGMAIL_P0_DRAFT_ROOT").is_none() {
+        eprintln!("诊断模式必须设置隔离 QINGMAIL_P0_DRAFT_ROOT，避免与正式后台共用数据库");
+        std::process::exit(1);
+    }
+    let frontend = if production {
+        if matches!(command, Command::Quit | Command::Status) {
+            let result = mail_daemon::launcher::runtime_root()
+                .map(mail_protocol::transport::Client::new)
+                .map_err(|e| e.to_string())
+                .and_then(|client| {
+                    client
+                        .request(if command == Command::Quit {
+                            mail_protocol::Command::PrepareShutdown
+                        } else {
+                            mail_protocol::Command::Status
+                        })
+                        .map_err(|e| e.to_string())
+                });
+            match result {
+                Ok(reply) => println!("{reply:?}"),
+                Err(error) => {
+                    eprintln!("后台控制失败：{error}");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
+        let target = match command {
+            Command::Accounts => mail_protocol::WindowTarget::Accounts,
+            Command::SendTasks => mail_protocol::WindowTarget::SendTasks,
+            _ => mail_protocol::WindowTarget::Mailbox,
+        };
+        match mail_daemon::launcher::connect(target) {
+            Ok(Some(frontend)) => Some(frontend),
+            Ok(None) => return,
+            Err(error) => {
+                eprintln!("QingMail启动失败：{error}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
+    let instance = if isolated_probe || production {
         None
     } else {
         let root = std::env::var_os("QINGMAIL_P0_RUNTIME_ROOT")
@@ -439,7 +496,7 @@ fn main() {
             gpui_kit::init(cx);
             gpui_kit_material::init(cx);
             settings::init(cx);
-            if let Err(e) = lifecycle::start(instance, cx) {
+            if let Err(e) = lifecycle::start(instance, frontend, cx) {
                 eprintln!("无法启动合成后台：{e}");
                 cx.quit();
                 return;
@@ -469,6 +526,7 @@ fn main() {
                 reader::open(cx);
             }
             if command == Command::Editor
+                || std::env::var_os("QINGMAIL_IPC_TEST_EDITOR").is_some()
                 || args
                     .iter()
                     .any(|arg| matches!(arg.as_str(), "--editor-probe" | "--editor-style-demo"))

@@ -189,56 +189,69 @@ impl SendTasks {
             .clone()
             .map(|account| (account, self.address.clone()));
         let job = cx.background_executor().spawn(async move {
-            // 已保存副本优先从服务器读取；失败或没有 UID 时退回冻结快照，
-            // 两者是同一份 MIME（APPEND 的字节由同一快照确定性重建）。
-            if task.state == SendState::Sent
-                && let (Some(copy), Some(uid)) = (
-                    task.copy.clone(),
-                    task.copy.as_ref().and_then(|copy| copy.uid),
+            if let Some(client) = store.ipc_client() {
+                return mail_daemon::client::content(
+                    &client,
+                    mail_protocol::BusinessOperation::TaskContent {
+                        account: task.account,
+                        task: task.id,
+                    },
                 )
-            {
-                let access =
-                    receive(store.account_version(task.account.clone())).and_then(|access| {
-                        SystemVault
-                            .load(&access.credential_key)
-                            .map(|credentials| (access.settings, credentials))
-                            .map_err(|e| e.to_string())
-                    });
-                let (settings, credentials) = match access {
-                    Ok(access) => access,
-                    Err(error) => {
-                        let (raw, _) = local_content(&store, &task)?;
-                        return Ok((
-                            raw,
-                            format!("读取服务器副本的凭据不可用：{error}；已显示本地冻结内容"),
-                        ));
-                    }
-                };
-                match sync::message(
-                    &settings.imap,
-                    &credentials.imap,
-                    &copy.folder,
-                    copy.uidvalidity,
-                    uid,
-                ) {
-                    Ok(raw) => return Ok((raw, "已从服务器读取已保存副本".to_string())),
-                    Err(error) => {
-                        let (raw, _) = local_content(&store, &task)?;
-                        return Ok((
-                            raw,
-                            format!("服务器副本读取失败：{error}；已显示本地冻结内容"),
-                        ));
+                .map(|content| (content, "已读取后台发送内容".into()));
+            }
+            let result = (|| {
+                // 已保存副本优先从服务器读取；失败或没有 UID 时退回冻结快照，
+                // 两者是同一份 MIME（APPEND 的字节由同一快照确定性重建）。
+                if task.state == SendState::Sent
+                    && let (Some(copy), Some(uid)) = (
+                        task.copy.clone(),
+                        task.copy.as_ref().and_then(|copy| copy.uid),
+                    )
+                {
+                    let access =
+                        receive(store.account_version(task.account.clone())).and_then(|access| {
+                            SystemVault
+                                .load(&access.credential_key)
+                                .map(|credentials| (access.settings, credentials))
+                                .map_err(|e| e.to_string())
+                        });
+                    let (settings, credentials) = match access {
+                        Ok(access) => access,
+                        Err(error) => {
+                            let (raw, _) = local_content(&store, &task)?;
+                            return Ok((
+                                raw,
+                                format!("读取服务器副本的凭据不可用：{error}；已显示本地冻结内容"),
+                            ));
+                        }
+                    };
+                    match sync::message(
+                        &settings.imap,
+                        &credentials.imap,
+                        &copy.folder,
+                        copy.uidvalidity,
+                        uid,
+                    ) {
+                        Ok(raw) => return Ok((raw, "已从服务器读取已保存副本".to_string())),
+                        Err(error) => {
+                            let (raw, _) = local_content(&store, &task)?;
+                            return Ok((
+                                raw,
+                                format!("服务器副本读取失败：{error}；已显示本地冻结内容"),
+                            ));
+                        }
                     }
                 }
-            }
-            local_content(&store, &task)
-        });
-        cx.spawn(async move |entity, cx| {
-            let result = job.await.and_then(|(raw, note)| {
+                local_content(&store, &task)
+            })();
+            result.and_then(|(raw, note)| {
                 mail_content::parse(&raw)
                     .map(|content| (content, note))
                     .map_err(|e| e.to_string())
-            });
+            })
+        });
+        cx.spawn(async move |entity, cx| {
+            let result = job.await;
             let _ = entity.update(cx, |this, cx| {
                 this.busy = false;
                 match result {

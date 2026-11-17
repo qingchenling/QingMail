@@ -1,9 +1,10 @@
 //! 与 UI 框架无关的受控阅读树。原生渲染只接受这棵树导出的 HTML。
 use scraper::{ElementRef, Html, Node as HtmlNode};
+use serde::{Deserialize, Serialize};
 
 use crate::{InlineImage, escape};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Element {
     Container,
     Paragraph,
@@ -33,13 +34,13 @@ pub enum Element {
     Rule,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Node {
     Text(String),
     Element { kind: Element, children: Vec<Node> },
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Document {
     pub nodes: Vec<Node>,
 }

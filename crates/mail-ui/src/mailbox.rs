@@ -8,6 +8,7 @@ use gpui_kit::{
 };
 use mail_core::{AccountId, AccountSettings, CachedMessage, FolderCache, RemoteFolder};
 use mail_daemon::storage::{StorageClient, receive};
+use mail_protocol::{BusinessOperation as Op, Reply};
 use mail_service::{
     actions,
     credentials::{CredentialVault, SystemVault},
@@ -212,12 +213,25 @@ impl Mailbox {
             }
         })
         .detach();
-        if std::env::args().any(|a| a == "--mailbox-ui-probe") {
+        if std::env::args().any(|a| a == "--mailbox-ui-probe")
+            || std::env::var_os("QINGMAIL_IPC_TEST_MAILBOX").is_some()
+        {
             cx.spawn_in(window, async move |entity, cx| {
                 for step in 0..12 {
                     cx.background_executor()
                         .timer(std::time::Duration::from_millis(900))
                         .await;
+                    for _ in 0..40 {
+                        if !entity
+                            .update(cx, |this, _| this.busy)
+                            .expect("mailbox UI state")
+                        {
+                            break;
+                        }
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(150))
+                            .await;
+                    }
                     entity
                         .update_in(cx, |this, window, cx| this.ui_probe(step, window, cx))
                         .expect("mailbox UI probe");
@@ -512,6 +526,13 @@ impl Mailbox {
         self.status = "正在获取服务器文件夹…".into();
         let store = self.store.clone();
         let task = cx.background_executor().spawn(async move {
+            if let Some(client) = store.ipc_client() {
+                return match mail_daemon::client::run(&client, Op::RefreshCatalog { account: id })?
+                {
+                    Reply::Catalog { folders, .. } => Ok(folders),
+                    _ => Err("目录响应无效".into()),
+                };
+            }
             let _guard = NETWORK
                 .try_lock()
                 .map_err(|_| "另一个同步检查仍在结束，请稍后重试".to_owned())?;
@@ -541,12 +562,17 @@ impl Mailbox {
             return;
         };
         let at = now();
-        let request = self
-            .store
-            .publish_catalog(account.clone(), folders.clone(), at);
-        let task = cx
-            .background_executor()
-            .spawn(async move { receive(request) });
+        let remote = self.store.ipc_client().is_some();
+        let request = (!remote).then(|| {
+            self.store
+                .publish_catalog(account.clone(), folders.clone(), at)
+        });
+        let task = cx.background_executor().spawn(async move {
+            match request {
+                Some(request) => receive(request),
+                None => Ok(()),
+            }
+        });
         cx.spawn(async move |entity, cx| {
             let result = task.await;
             let _ = entity.update(cx, |this, cx| {
@@ -596,6 +622,40 @@ impl Mailbox {
             None
         };
         if older && before.is_none() {
+            return;
+        }
+        if let Some(client) = self.store.ipc_client() {
+            self.busy = true;
+            self.status = "正在同步文件夹…".into();
+            let task = cx.background_executor().spawn(async move {
+                mail_daemon::client::run(
+                    &client,
+                    Op::SyncFolder {
+                        account: id,
+                        name,
+                        before,
+                        history: false,
+                    },
+                )
+            });
+            cx.spawn(async move |entity, cx| {
+                let result = task.await;
+                let _ = entity.update(cx, |this, cx| {
+                    this.busy = false;
+                    match result {
+                        Ok(_) => {
+                            this.before = before;
+                            this.load_cache(cx);
+                        }
+                        Err(e) => {
+                            this.status = format!("同步失败：{e}，缓存保留");
+                            cx.notify();
+                        }
+                    }
+                });
+            })
+            .detach();
+            cx.notify();
             return;
         }
         let expected_epoch = self.cache.as_ref().map(|cache| cache.folder.uidvalidity);
@@ -716,6 +776,10 @@ impl Mailbox {
         let inline_location = location.clone();
         let store = self.store.clone();
         let task = cx.background_executor().spawn(async move {
+            if let Some(client) = store.ipc_client() {
+                let content = mail_daemon::client::content(&client, Op::Read { location, folder })?;
+                return Ok((content, account, reader_account));
+            }
             let raw = match receive(store.message_body(location.clone()))? {
                 Some(raw) => raw,
                 None => {
@@ -924,6 +988,22 @@ impl Mailbox {
         let store = self.store.clone();
         let uids = targets.clone();
         let task = cx.background_executor().spawn(async move {
+            if let Some(client) = store.ipc_client() {
+                return match mail_daemon::client::run(
+                    &client,
+                    Op::Flags {
+                        account,
+                        name,
+                        epoch,
+                        uids,
+                        seen,
+                        flagged,
+                    },
+                )? {
+                    Reply::Count(count) => Ok(count as usize),
+                    _ => Err("标记响应无效".into()),
+                };
+            }
             let access = receive(store.account_version(account.clone()))?;
             let settings = access.settings;
             let credentials = SystemVault
@@ -1021,6 +1101,33 @@ impl Mailbox {
         let store = self.store.clone();
         let uids = targets.clone();
         let task = cx.background_executor().spawn(async move {
+            if let Some(client) = store.ipc_client() {
+                return match mail_daemon::client::run(
+                    &client,
+                    Op::Move {
+                        account,
+                        name,
+                        epoch,
+                        uids,
+                        destination,
+                    },
+                )? {
+                    Reply::Moved {
+                        count,
+                        copied_only,
+                        destination,
+                    } => Ok((
+                        if copied_only {
+                            actions::MoveOutcome::CopiedOnly
+                        } else {
+                            actions::MoveOutcome::Moved
+                        },
+                        count as usize,
+                        destination,
+                    )),
+                    _ => Err("移动响应无效".into()),
+                };
+            }
             let access = receive(store.account_version(account.clone()))?;
             let settings = access.settings;
             let credentials = SystemVault
@@ -1088,6 +1195,20 @@ impl Mailbox {
         self.status = "正在加载最近90天之前的历史…".into();
         let store = self.store.clone();
         let task = cx.background_executor().spawn(async move {
+            if let Some(client) = store.ipc_client() {
+                return match mail_daemon::client::run(
+                    &client,
+                    Op::SyncFolder {
+                        account,
+                        name,
+                        before,
+                        history: true,
+                    },
+                )? {
+                    Reply::History { count, has_more } => Ok((count as usize, has_more)),
+                    _ => Err("历史响应无效".into()),
+                };
+            }
             let access = receive(store.account_version(account.clone()))?;
             let settings = access.settings;
             let credentials = SystemVault
@@ -1244,7 +1365,9 @@ impl Mailbox {
                 eprintln!(
                     "QINGMAIL_MAILBOX_UI_PROBE: PASS · auto inbox / direct reading / latest selection wins / folder switch discards stale result / search / restore / pagination / light dark narrow"
                 );
-                cx.quit();
+                if std::env::var_os("QINGMAIL_IPC_TEST_MAILBOX").is_none() {
+                    cx.quit();
+                }
             }
         }
         cx.notify();

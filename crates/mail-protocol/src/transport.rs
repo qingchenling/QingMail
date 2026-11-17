@@ -109,6 +109,37 @@ impl Client {
     /// 调用者保留 request.id；结果丢失先 MutationResult，不能生成新 ID 重放写操作。
     pub fn call(&self, request: &Request) -> Result<Reply, ClientError> {
         request.validate()?;
+        let bytes = serde_json::to_vec(request).map_err(|_| ProtocolError::Invalid)?;
+        if bytes.len() > crate::MAX_CONTROL_BYTES / 2 {
+            if bytes.len() as u64 > crate::MAX_STORAGE_PAYLOAD {
+                return Err(ProtocolError::TooLarge.into());
+            }
+            let Reply::ResourceCreated(resource) = self.request(Command::CreateStorageRequest {
+                size: bytes.len() as u64,
+            })?
+            else {
+                return Err(ClientError::MismatchedResponse);
+            };
+            let result = (|| {
+                for (index, chunk) in bytes.chunks(crate::MAX_CHUNK_BYTES as usize).enumerate() {
+                    self.write_chunk(
+                        &resource.id,
+                        (index * crate::MAX_CHUNK_BYTES as usize) as u64,
+                        chunk,
+                    )?;
+                }
+                self.call(&Request::new(
+                    request.id.clone(),
+                    Command::StorageRequest {
+                        resource: resource.id.clone(),
+                    },
+                ))
+            })();
+            let _ = self.request(Command::CancelResource {
+                resource: resource.id,
+            });
+            return result;
+        }
         let path = checked_socket_path(&self.runtime_root)?;
         let stream = UnixStream::connect(path)?;
         let mut stream = DeadlineStream::new(stream)?;
@@ -117,7 +148,21 @@ impl Client {
         if response.version != PROTOCOL_VERSION || response.id != request.id {
             return Err(ClientError::MismatchedResponse);
         }
-        response.result.map_err(ClientError::Remote)
+        match response.result.map_err(ClientError::Remote)? {
+            Reply::Encoded(resource) => {
+                let bytes = self.read_resource(&resource, crate::MAX_STORAGE_PAYLOAD);
+                let _ = self.request(Command::CancelResource {
+                    resource: resource.id,
+                });
+                let reply: Reply =
+                    serde_json::from_slice(&bytes?).map_err(|_| ProtocolError::Invalid)?;
+                if matches!(reply, Reply::Encoded(_)) {
+                    return Err(ClientError::MismatchedResponse);
+                }
+                Ok(reply)
+            }
+            reply => Ok(reply),
+        }
     }
     /// 二进制数据紧接类型化控制响应；不把资源字节放入 JSON。
     pub fn read_chunk(

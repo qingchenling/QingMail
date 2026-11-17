@@ -21,6 +21,8 @@ fn local_error(message: String) -> RpcError {
     error(ErrorCode::Storage, message)
 }
 pub(crate) const COMMANDS: &[mail_protocol::CommandName] = &[
+    mail_protocol::CommandName::DraftPage,
+    mail_protocol::CommandName::TaskPage,
     mail_protocol::CommandName::Accounts,
     mail_protocol::CommandName::AccountImpact,
     mail_protocol::CommandName::Catalog,
@@ -99,6 +101,41 @@ pub(super) fn dispatch(store: &mut Store, request: mail_protocol::Request) -> Re
 }
 fn execute(store: &mut Store, command: Rpc) -> Result<Reply, RpcError> {
     Ok(match command {
+        Rpc::DraftPage { account, after } => {
+            let account = editor_account(store, account).map_err(local_error)?;
+            let ids = store
+                .draft_ids_page(&account, after.as_deref())
+                .map_err(storage_error)?;
+            let next = if ids.len() > 1 {
+                Some(ids[0].0.clone())
+            } else {
+                None
+            };
+            let items = ids
+                .iter()
+                .take(1)
+                .map(|id| store.draft(&account, id))
+                .collect::<mail_storage::Result<_>>()
+                .map_err(storage_error)?;
+            Reply::DraftPage { items, next }
+        }
+        Rpc::TaskPage { account, after } => {
+            let ids = store
+                .task_ids_page(&account, after.as_deref())
+                .map_err(storage_error)?;
+            let next = if ids.len() > 32 {
+                Some(ids[31].0.clone())
+            } else {
+                None
+            };
+            let items = ids
+                .iter()
+                .take(32)
+                .map(|id| store.task(&account, id))
+                .collect::<mail_storage::Result<_>>()
+                .map_err(storage_error)?;
+            Reply::TaskPage { items, next }
+        }
         Rpc::Accounts => Reply::Accounts(store.accounts().map_err(storage_error)?),
         Rpc::AccountImpact { account } => {
             if store.account(&account).map_err(storage_error)?.is_none() {

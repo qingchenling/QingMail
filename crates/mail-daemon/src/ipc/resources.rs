@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 const MAX_BYTES: u64 = 64 * 1024 * 1024;
-const MAX_ENTRIES: usize = 128;
+const MAX_ENTRIES: usize = 1024;
 const TTL: Duration = Duration::from_secs(600);
 struct Entry {
     touched: Instant,
