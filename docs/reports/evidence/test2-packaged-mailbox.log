@@ -1,0 +1,4 @@
+QINGMAIL_UI_CAPTURE: light
+QINGMAIL_UI_CAPTURE: dark
+QINGMAIL_UI_CAPTURE: narrow
+QINGMAIL_MAILBOX_UI_PROBE: PASS · auto inbox / direct reading / latest selection wins / folder switch discards stale result / search / restore / pagination / light dark narrow
