@@ -802,6 +802,14 @@ impl Composer {
             return;
         }
         if self.closing && !self.saving && self.saved == Some(self.session.borrow().revision) {
+            if let (Some(store), Some(draft)) = (self.store.clone(), self.stored.as_ref()) {
+                let account = draft.account.clone();
+                cx.background_executor()
+                    .spawn(async move {
+                        let _ = store.control(mail_protocol::Command::FlushDraftSync { account });
+                    })
+                    .detach();
+            }
             window.remove_window();
             return;
         }

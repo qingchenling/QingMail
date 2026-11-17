@@ -4,6 +4,7 @@ pub mod account_checks;
 mod account_commits;
 pub mod account_gateway;
 pub mod client;
+mod draft_sync;
 mod instance;
 pub mod ipc;
 pub mod launcher;

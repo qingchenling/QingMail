@@ -70,7 +70,7 @@ pub enum CopyResult {
     Failed(CopyError),
 }
 
-fn map_error(error: CheckError) -> CopyError {
+pub(crate) fn map_error(error: CheckError) -> CopyError {
     match error {
         CheckError::Invalid => CopyError::Invalid,
         CheckError::Dns | CheckError::Connect => CopyError::Connection,
@@ -258,7 +258,7 @@ fn logout(stream: &mut ImapStream) {
     let _ = command(stream, b"QM9 LOGOUT\r\n");
 }
 
-fn examine(stream: &mut ImapStream, folder: &str) -> Result<u32, CopyError> {
+pub(crate) fn examine(stream: &mut ImapStream, folder: &str) -> Result<u32, CopyError> {
     let mut command_bytes = b"QM4 EXAMINE ".to_vec();
     quoted(&mut command_bytes, folder);
     command_bytes.extend_from_slice(b"\r\n");
@@ -294,7 +294,7 @@ fn examine(stream: &mut ImapStream, folder: &str) -> Result<u32, CopyError> {
 }
 
 /// 只读查重：返回同一 Message-ID 的最小 UID。
-fn search_existing(
+pub(crate) fn search_existing(
     stream: &mut ImapStream,
     epoch: u32,
     message_id: &str,
@@ -354,9 +354,19 @@ fn append(
     raw: &[u8],
     deadline: Instant,
 ) -> Result<CopiedMessage, CopyError> {
+    append_flags(stream, folder, epoch, raw, deadline, "\\Seen")
+}
+pub(crate) fn append_flags(
+    stream: &mut ImapStream,
+    folder: &str,
+    epoch: u32,
+    raw: &[u8],
+    deadline: Instant,
+    flags: &str,
+) -> Result<CopiedMessage, CopyError> {
     let mut command_bytes = b"QM6 APPEND ".to_vec();
     quoted(&mut command_bytes, folder);
-    command_bytes.extend_from_slice(format!(" (\\Seen) {{{}}}\r\n", raw.len()).as_bytes());
+    command_bytes.extend_from_slice(format!(" ({flags}) {{{}}}\r\n", raw.len()).as_bytes());
     command(stream, &command_bytes)?;
     // 同步字面量：服务器确认前一个正文字节都没有发送，失败是明确未保存。
     let mut ready = false;
@@ -387,6 +397,7 @@ fn append(
     if stream
         .get_mut()
         .write_all(raw)
+        .and_then(|()| stream.get_mut().write_all(b"\r\n"))
         .and_then(|()| stream.get_mut().flush())
         .is_err()
     {

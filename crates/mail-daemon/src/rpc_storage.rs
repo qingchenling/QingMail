@@ -21,6 +21,8 @@ fn local_error(message: String) -> RpcError {
     error(ErrorCode::Storage, message)
 }
 pub(crate) const COMMANDS: &[mail_protocol::CommandName] = &[
+    mail_protocol::CommandName::DraftSyncStatus,
+    mail_protocol::CommandName::FlushDraftSync,
     mail_protocol::CommandName::ServerDrafts,
     mail_protocol::CommandName::DraftSyncFolder,
     mail_protocol::CommandName::ConvertServerDraft,
@@ -55,7 +57,8 @@ pub(crate) const COMMANDS: &[mail_protocol::CommandName] = &[
 fn mutates(command: &Rpc) -> bool {
     matches!(
         command,
-        Rpc::DraftSyncFolder { .. }
+        Rpc::FlushDraftSync { .. }
+            | Rpc::DraftSyncFolder { .. }
             | Rpc::ConvertServerDraft { .. }
             | Rpc::RetryOperation { .. }
             | Rpc::ResolveOperation { .. }
@@ -145,6 +148,14 @@ pub(super) fn dispatch(store: &mut Store, request: mail_protocol::Request) -> Re
 }
 fn execute(store: &mut Store, command: Rpc) -> Result<Reply, RpcError> {
     Ok(match command {
+        Rpc::DraftSyncStatus { account } => {
+            Reply::DraftSyncStatus(store.draft_sync_status(&account).map_err(storage_error)?)
+        }
+        Rpc::FlushDraftSync { account } => {
+            store.flush_draft_sync(&account).map_err(storage_error)?;
+            Reply::Acknowledged
+        }
+
         Rpc::ServerDrafts { account } => Reply::ServerDrafts {
             folder: store.server_draft_folder(&account).map_err(storage_error)?,
             items: store

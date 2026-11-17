@@ -33,6 +33,7 @@ struct ServerDrafts {
     epoch: u32,
     uids: Vec<u32>,
     originals: Vec<ServerDraftSource>,
+    sync_items: Vec<mail_protocol::DraftSyncInfo>,
     busy: bool,
     confirm: Option<String>,
     choosing_folder: bool,
@@ -44,6 +45,7 @@ struct Loaded {
     folder: Option<String>,
     choices: Vec<RemoteFolder>,
     originals: Vec<ServerDraftSource>,
+    sync_items: Vec<mail_protocol::DraftSyncInfo>,
     index: Option<(u32, Vec<u32>, bool)>,
 }
 impl ServerDrafts {
@@ -57,12 +59,27 @@ impl ServerDrafts {
             epoch: 0,
             uids: vec![],
             originals: vec![],
+            sync_items: vec![],
             busy: false,
             confirm: None,
             choosing_folder: false,
             status: "正在读取…".into(),
         };
         this.load(None, false, cx);
+        cx.spawn(async move |entity, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(3))
+                    .await;
+                if entity
+                    .update(cx, |this, cx| this.load(None, false, cx))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
         this
     }
     fn load(&mut self, command: Option<Command>, scan: bool, cx: &mut Context<Self>) {
@@ -89,6 +106,7 @@ impl ServerDrafts {
                 folder: None,
                 choices: vec![],
                 originals: vec![],
+                sync_items: vec![],
                 index: None,
             };
             if let Some(account) = account {
@@ -120,6 +138,12 @@ impl ServerDrafts {
                         _ => return Err("扫描响应无效".into()),
                     }
                 }
+                result.sync_items = match store.control(Command::DraftSyncStatus {
+                    account: account.clone(),
+                })? {
+                    Reply::DraftSyncStatus(items) => items,
+                    _ => vec![],
+                };
                 match store.control(Command::ServerDrafts { account })? {
                     Reply::ServerDrafts { folder, items } => {
                         result.folder = folder;
@@ -134,10 +158,10 @@ impl ServerDrafts {
             let result=task.await;
             let _=entity.update(cx,|this,cx|{this.busy=false;match result {
                 Ok(result)=>{
-                    this.accounts=result.accounts;this.account=result.account;this.folder=result.folder;this.choices=result.choices;this.originals=result.originals;
+                    this.accounts=result.accounts;this.account=result.account;this.folder=result.folder;this.choices=result.choices;this.originals=result.originals;this.sync_items=result.sync_items;
                     if let Some((epoch,uids,more))=result.index {
                         this.epoch=epoch;this.uids=uids;this.status=if more{"仅显示最新200个UID，旧草稿仍在服务器；不会推断远端删除".into()}else{"扫描完成；点击保留原件后可离线查看，转换副本需明确确认".into()};
-                    } else {this.status="原件已保留。此轮仅支持只读扫描与显式转换；不会上传或删除服务器草稿。".into();}
+                    } else {this.status="编辑停止约5秒后上传新版本，关窗会合并调度。结果不明只查证；旧服务器版本保留。".into();}
                 },Err(e)=>this.status=e};cx.notify();});
         }).detach();
         cx.notify();
@@ -323,6 +347,27 @@ impl Render for ServerDrafts {
                             })),
                     );
                 }
+            }
+            list = list.child("本地草稿服务器同步状态");
+            for item in &self.sync_items {
+                let state = match item.state.as_str() {
+                    "synced" => "已核验服务器版本",
+                    "pending" => "待同步",
+                    "uncertain" => "结果不确定（只查证）",
+                    "conflict" => "冲突（已暂停）",
+                    "failed" => "失败（修正后再编辑）",
+                    _ => "已停止",
+                };
+                list = list.child(
+                    div()
+                        .p_3()
+                        .rounded_xl()
+                        .bg(theme::color(ColorRole::SURFACE_CONTAINER))
+                        .child(format!(
+                            "{} · {} · 本地版本 {} / 基线 {} · {}",
+                            item.subject, state, item.revision, item.base_revision, item.detail
+                        )),
+                );
             }
             list = list.child("已保留原件（最近200份；转换不会覆盖原件）");
             for source in &self.originals {

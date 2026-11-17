@@ -415,7 +415,7 @@ pub fn message(
 ) -> Result<Vec<u8>, CheckError> {
     message_using(server, password, name, epoch, uid, &connector()?)
 }
-fn message_using(
+pub(crate) fn message_using(
     server: &ServerSettings,
     password: &str,
     name: &str,
