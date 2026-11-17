@@ -144,7 +144,7 @@ enum Request {
         location: mail_core::MailUid,
         part: mail_core::MimePart,
         file: std::fs::File,
-        reply: SyncSender<StorageResult<()>>,
+        reply: SyncSender<StorageResult<std::fs::File>>,
     },
     ClaimOperation {
         reply: SyncSender<StorageResult<OperationClaim>>,
@@ -763,7 +763,7 @@ impl StorageClient {
         location: mail_core::MailUid,
         part: mail_core::MimePart,
         file: std::fs::File,
-    ) -> StorageResult<Receiver<StorageResult<()>>> {
+    ) -> StorageResult<Receiver<StorageResult<std::fs::File>>> {
         self.request(|reply| Request::SavePart {
             location,
             part,
@@ -1273,7 +1273,24 @@ pub fn receive<T>(reply: StorageResult<Receiver<StorageResult<T>>>) -> StorageRe
 
 fn run(path: Option<PathBuf>, receiver: Receiver<Request>) {
     let mut store: Option<Store> = None;
-    for request in receiver {
+    let mut maintenance = std::time::Instant::now();
+    loop {
+        let request = match receiver.recv_timeout(std::time::Duration::from_secs(60)) {
+            Ok(request) => Some(request),
+            Err(mpsc::RecvTimeoutError::Timeout) => None,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+        if maintenance.elapsed() >= std::time::Duration::from_secs(60) {
+            if let Some(store) = store.as_mut()
+                && let Err(error) = store.trim_cache(false)
+            {
+                eprintln!("缓存整理失败，保留用户内容：{error}");
+            }
+            maintenance = std::time::Instant::now();
+        }
+        let Some(request) = request else {
+            continue;
+        };
         if matches!(request, Request::Stop) {
             break;
         }

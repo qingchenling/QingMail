@@ -66,6 +66,20 @@ pub(super) struct Resources {
     entries: HashMap<String, Entry>,
 }
 impl Resources {
+    pub fn downloading_bytes(&self) -> u64 {
+        self.entries
+            .values()
+            .filter_map(|entry| match &entry.data {
+                Data::Download {
+                    progress,
+                    state: ResourceState::Downloading,
+                    ..
+                } => Some(progress.received.load(Ordering::Acquire)),
+                _ => None,
+            })
+            .sum()
+    }
+
     fn reserve(&mut self, size: u64) -> Result<String, RpcError> {
         self.entries.retain(|_, entry| {
             let keep = entry.touched.elapsed() < TTL;

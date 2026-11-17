@@ -43,7 +43,7 @@ impl Store {
             &mut std::io::Cursor::new(raw),
             MAX,
         )?;
-        let result = (|| {
+        let result: Result<()> = (|| {
             let tx = self.connection.transaction()?;
             object.insert(&tx)?;
             tx.execute("INSERT INTO message_bodies(account_id,folder_id,uidvalidity,uid,object_id) VALUES (?1,?2,?3,?4,?5)",params![location.account.0,location.folder_id,location.uidvalidity,location.uid,object.id])?;
@@ -51,7 +51,8 @@ impl Store {
             Ok(())
         })();
         // 与既有对象存储一致，未知提交结果不擅自移除文件；孤立对象待统一回收。
-        result
+        result?;
+        self.trim_cache(false)
     }
 }
 #[cfg(test)]
@@ -98,7 +99,7 @@ mod tests {
         let (root, store, location) = setup();
         store
             .connection
-            .execute_batch("DROP TRIGGER stop_sent_draft_sync; DROP TRIGGER track_draft_scan_account; DROP TABLE draft_conflicts; DROP TABLE draft_scan_failures; DROP TABLE draft_scans; DROP TRIGGER track_server_draft_insert; DROP TRIGGER track_server_draft_update; DROP TABLE draft_uploads; DROP TABLE draft_sync; DROP TABLE server_draft_sources; DROP TABLE server_draft_folders; DROP TABLE part_resources; DROP TABLE message_structures; DROP VIEW visible_folder_messages; DROP TABLE mail_operations; DROP TRIGGER account_default_options; DROP TABLE account_options; DROP TRIGGER account_legacy_credential; DROP TABLE account_credentials; DROP TABLE mutation_results; DROP TABLE message_bodies; ALTER TABLE send_tasks DROP COLUMN copy_folder; ALTER TABLE send_tasks DROP COLUMN copy_uidvalidity; ALTER TABLE send_tasks DROP COLUMN copy_uid; ALTER TABLE folder_messages DROP COLUMN seen; ALTER TABLE folder_messages DROP COLUMN flagged; ALTER TABLE messages DROP COLUMN has_attachments; PRAGMA user_version=4;")
+            .execute_batch("DROP VIEW protected_objects; DROP TRIGGER cache_body_insert; DROP TRIGGER cache_part_insert; DROP TABLE cache_access; DROP TABLE cache_settings; DROP TRIGGER stop_sent_draft_sync; DROP TRIGGER track_draft_scan_account; DROP TABLE draft_conflicts; DROP TABLE draft_scan_failures; DROP TABLE draft_scans; DROP TRIGGER track_server_draft_insert; DROP TRIGGER track_server_draft_update; DROP TABLE draft_uploads; DROP TABLE draft_sync; DROP TABLE server_draft_sources; DROP TABLE server_draft_folders; DROP TABLE part_resources; DROP TABLE message_structures; DROP VIEW visible_folder_messages; DROP TABLE mail_operations; DROP TRIGGER account_default_options; DROP TABLE account_options; DROP TRIGGER account_legacy_credential; DROP TABLE account_credentials; DROP TABLE mutation_results; DROP TABLE message_bodies; ALTER TABLE send_tasks DROP COLUMN copy_folder; ALTER TABLE send_tasks DROP COLUMN copy_uidvalidity; ALTER TABLE send_tasks DROP COLUMN copy_uid; ALTER TABLE folder_messages DROP COLUMN seen; ALTER TABLE folder_messages DROP COLUMN flagged; ALTER TABLE messages DROP COLUMN has_attachments; PRAGMA user_version=4;")
             .unwrap();
         drop(store);
         let mut store = Store::open(&root.path().join("data")).unwrap();

@@ -133,7 +133,5 @@ fn download(
     if receive(store.account_version(spec.location.account.clone()))? != access {
         return Err("账号配置已变化，下载未发布".into());
     }
-    receive(store.save_part(spec.location.clone(), spec.part.clone(), file))?;
-    receive(store.part_file(spec.location.clone(), spec.part.clone()))?
-        .ok_or("下载完成但缓存未确认".into())
+    receive(store.save_part(spec.location.clone(), spec.part.clone(), file))
 }

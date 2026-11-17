@@ -118,6 +118,17 @@ with tempfile.TemporaryDirectory(prefix='qingmail-p3-split-') as directory, evid
         close_front(first)
         assert status()['pid'] == backend
         record('main window close exits GPUI; daemon survives')
+        cache = reply('cache_status')['data']
+        assert cache['budget_bytes'] == 1073741824
+        assert cache['evictable_bytes'] > 0
+        cleared = reply('set_cache_budget', dict(bytes=0))['data']
+        assert cleared['evictable_bytes'] == 0
+        assert cleared['protected_bytes'] > 0
+        assert saved()['text'] == draft['text']
+        reply('clear_cache')
+        reply('set_cache_budget', dict(bytes=1073741824))
+        record('cache IPC budget and clear preserve formatted draft, indexes and send safety', protected_bytes=cleared['protected_bytes'])
+
         tray_state = until(lambda: s if '正在检查' not in (s := status())['tray_status'] else None)['tray_status']
         tray_available = '已注册' in tray_state
         if tray_available:

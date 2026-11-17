@@ -592,7 +592,7 @@ mod tests {
     #[test]
     fn paused_account_bounded_retry_and_schema11_upgrade() {
         let (root, store, loc, _) = setup();
-        store.connection.execute_batch("DROP TRIGGER stop_sent_draft_sync; DROP TRIGGER track_draft_scan_account; DROP TABLE draft_conflicts; DROP TABLE draft_scan_failures; DROP TABLE draft_scans; DROP TRIGGER track_server_draft_insert; DROP TRIGGER track_server_draft_update; DROP TABLE draft_uploads; DROP TABLE draft_sync; DROP TABLE server_draft_sources; DROP TABLE server_draft_folders; DROP TABLE part_resources; DROP TABLE message_structures; DROP VIEW visible_folder_messages; DROP TABLE mail_operations; PRAGMA user_version=11;").unwrap();
+        store.connection.execute_batch("DROP VIEW protected_objects; DROP TRIGGER cache_body_insert; DROP TRIGGER cache_part_insert; DROP TABLE cache_access; DROP TABLE cache_settings; DROP TRIGGER stop_sent_draft_sync; DROP TRIGGER track_draft_scan_account; DROP TABLE draft_conflicts; DROP TABLE draft_scan_failures; DROP TABLE draft_scans; DROP TRIGGER track_server_draft_insert; DROP TRIGGER track_server_draft_update; DROP TABLE draft_uploads; DROP TABLE draft_sync; DROP TABLE server_draft_sources; DROP TABLE server_draft_folders; DROP TABLE part_resources; DROP TABLE message_structures; DROP VIEW visible_folder_messages; DROP TABLE mail_operations; PRAGMA user_version=11;").unwrap();
         drop(store);
         let mut store = Store::open(&root.path().join("data")).unwrap();
         assert!(

@@ -699,7 +699,9 @@ impl Context {
         let structure = match receive(self.store.mime_structure(location.clone())).map_err(fail)? {
             Some(value) => value,
             None => {
-                let (settings, credentials) = self.credentials(location.account.clone())?;
+                let (settings, credentials) = self
+                    .credentials(location.account.clone())
+                    .map_err(|e| fail(format!("未缓存，需要联网下载：{}", e.message)))?;
                 let size = mail_service::parts::size(
                     &settings.imap,
                     &credentials.imap,
@@ -885,7 +887,9 @@ impl Context {
         if u64::from(part.encoded_size) > max * 3 {
             return Err(fail("正文或CID超过安全获取限制"));
         }
-        let (settings, credentials) = self.credentials(location.account.clone())?;
+        let (settings, credentials) = self
+            .credentials(location.account.clone())
+            .map_err(|e| fail(format!("未缓存，需要联网下载：{}", e.message)))?;
         let mut file = receive(self.store.part_temporary()).map_err(fail)?;
         mail_service::parts::fetch(
             &settings.imap,

@@ -95,5 +95,9 @@ pub(crate) fn read(
     if bytes.len() as u64 != u64::from(size) || format!("{:x}", Sha256::digest(&bytes)) != hash {
         return Err(Error::Invalid("对象完整性校验失败，保留原文件"));
     }
+    connection.execute(
+        "UPDATE cache_access SET accessed_at=unixepoch() WHERE object_id=?1",
+        [id],
+    )?;
     Ok(bytes)
 }

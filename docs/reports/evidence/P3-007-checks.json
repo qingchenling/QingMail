@@ -1,0 +1,34 @@
+{
+  "full_workspace": {
+    "passed": 252,
+    "failed": 0,
+    "groups": [
+      16,
+      5,
+      1,
+      56,
+      0,
+      17,
+      7,
+      57,
+      81,
+      12,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "command": "cargo test --workspace --locked",
+    "environment": "normal local execution; restricted attempt could not create sockets"
+  },
+  "post_compatibility_fix": {
+    "upload_tests": 5,
+    "draft_process_tests": 5
+  },
+  "fmt": true,
+  "check": true,
+  "clippy": true,
+  "real_smtp_commands": 0
+}

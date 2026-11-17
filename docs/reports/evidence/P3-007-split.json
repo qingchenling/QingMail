@@ -1,0 +1,74 @@
+{
+  "passed": true,
+  "synthetic_only": true,
+  "mail_network": false,
+  "keyring": false,
+  "sends": 0,
+  "checks": [
+    {
+      "check": "production IPC editor immediate close, IME veto, formatted draft saved",
+      "passed": true,
+      "backend_pid": 95178,
+      "frontend_pid": 95177
+    },
+    {
+      "check": "production IPC cached reading, selection races, folder/search/pages and native M3E rendering",
+      "passed": true,
+      "xwayland": false
+    },
+    {
+      "check": "main window close exits GPUI; daemon survives",
+      "passed": true
+    },
+    {
+      "check": "cache IPC budget and clear preserve formatted draft, indexes and send safety",
+      "passed": true,
+      "protected_bytes": 1160
+    },
+    {
+      "check": "daemon tray opens frontend after GPUI exit",
+      "passed": true,
+      "tray_status": "后台托盘已注册"
+    },
+    {
+      "check": "reopen and second instance activate the existing frontend",
+      "passed": true
+    },
+    {
+      "check": "frontend crash preserves backend and saved draft; expired lease can reopen",
+      "passed": true
+    },
+    {
+      "check": "daemon crash/restart reconnects existing UI without resubmitting writes",
+      "passed": true,
+      "restarted_pid": 95550
+    },
+    {
+      "check": "incompatible protocol rejects writes before dispatch",
+      "passed": true
+    },
+    {
+      "check": "save failure retains editor and vetoes main close; last confirmed draft unchanged",
+      "passed": true
+    },
+    {
+      "check": "explicit close after backend recovery saves retained edits",
+      "passed": true
+    },
+    {
+      "check": "backend baseline after frontend close",
+      "passed": true,
+      "pss": "Pss:                8181 kB",
+      "idle_cpu_percent": 0.0,
+      "interval_seconds": 2.0
+    },
+    {
+      "check": "explicit shutdown stops daemon and removes socket",
+      "passed": true
+    }
+  ],
+  "limits": [
+    "No real IMAP/SMTP/Secret Service credentials used",
+    "Native event/entity integration, not physical pointer typing"
+  ]
+}

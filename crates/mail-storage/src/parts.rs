@@ -50,11 +50,16 @@ impl Store {
         self.objects.remove(&id);
         Ok(file)
     }
-    pub fn save_part(&mut self, location: &MailUid, part: &MimePart, mut file: File) -> Result<()> {
+    pub fn save_part(
+        &mut self,
+        location: &MailUid,
+        part: &MimePart,
+        mut file: File,
+    ) -> Result<File> {
         self.check_part(location, part)?;
         file.rewind()?;
-        if self.part_file(location, part)?.is_some() {
-            return Ok(());
+        if let Some(existing) = self.part_file(location, part)? {
+            return Ok(existing);
         }
         let object = objects::Object::write(
             &self.objects,
@@ -77,7 +82,10 @@ impl Store {
             ],
         )?;
         tx.commit()?;
-        Ok(())
+        // 在淘汰前持有已校验的fd；即使预算为零，本次下载仍可完整导出。
+        let ready = self.part_file(location, part)?.ok_or(Error::Conflict)?;
+        self.trim_cache(false)?;
+        Ok(ready)
     }
     /// 文件描述符只在后台内部传递；完整流校验后供有界IPC逐块读取。
     pub fn part_file(&self, location: &MailUid, part: &MimePart) -> Result<Option<File>> {
@@ -107,6 +115,7 @@ impl Store {
             return Err(Error::Invalid("资源完整性校验失败"));
         }
         file.seek(SeekFrom::Start(0))?;
+        self.touch_cache(&id)?;
         self.connection.execute(
             "UPDATE part_resources SET accessed_at=unixepoch() WHERE object_id=?1",
             [id],
@@ -167,6 +176,27 @@ mod tests {
             ],
         };
         (root, store, location, manifest)
+    }
+    #[test]
+    fn cache_zero_budget_keeps_current_download_fd_readable_and_manifest() {
+        let (_root, mut store, location, manifest) = fixture();
+        store.save_mime_structure(&location, &manifest).unwrap();
+        store.set_cache_budget(0).unwrap();
+        let mut temporary = store.part_temporary().unwrap();
+        temporary.write_all(b"complete attachment").unwrap();
+        let mut ready = store
+            .save_part(&location, &manifest.parts[1], temporary)
+            .unwrap();
+        let mut bytes = vec![];
+        ready.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"complete attachment");
+        assert!(
+            store
+                .part_file(&location, &manifest.parts[1])
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(store.mime_structure(&location).unwrap(), Some(manifest));
     }
     #[test]
     fn parts_manifest_and_complete_resource_restart_without_fetching_attachment() {
@@ -241,7 +271,7 @@ mod tests {
         store
             .connection
             .execute_batch(
-                "DROP TRIGGER stop_sent_draft_sync; DROP TRIGGER track_draft_scan_account; DROP TABLE draft_conflicts; DROP TABLE draft_scan_failures; DROP TABLE draft_scans; DROP TRIGGER track_server_draft_insert; DROP TRIGGER track_server_draft_update; DROP TABLE draft_uploads; DROP TABLE draft_sync; DROP TABLE server_draft_sources; DROP TABLE server_draft_folders; DROP TABLE part_resources; DROP TABLE message_structures; PRAGMA user_version=12;",
+                "DROP VIEW protected_objects; DROP TRIGGER cache_body_insert; DROP TRIGGER cache_part_insert; DROP TABLE cache_access; DROP TABLE cache_settings; DROP TRIGGER stop_sent_draft_sync; DROP TRIGGER track_draft_scan_account; DROP TABLE draft_conflicts; DROP TABLE draft_scan_failures; DROP TABLE draft_scans; DROP TRIGGER track_server_draft_insert; DROP TRIGGER track_server_draft_update; DROP TABLE draft_uploads; DROP TABLE draft_sync; DROP TABLE server_draft_sources; DROP TABLE server_draft_folders; DROP TABLE part_resources; DROP TABLE message_structures; PRAGMA user_version=12;",
             )
             .unwrap();
         drop(store);
