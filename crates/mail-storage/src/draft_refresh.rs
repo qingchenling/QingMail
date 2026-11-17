@@ -35,6 +35,14 @@ impl Store {
         refresh: &DraftRefresh,
         raw: Option<&[u8]>,
     ) -> Result<bool> {
+        self.observe_draft_remote_at(refresh, raw, None)
+    }
+    pub(super) fn observe_draft_remote_at(
+        &mut self,
+        refresh: &DraftRefresh,
+        raw: Option<&[u8]>,
+        remote: Option<&mail_protocol::ServerDraftSource>,
+    ) -> Result<bool> {
         let account = &refresh.draft.account;
         let id = &refresh.draft.id;
         if self.account_version(account)? != refresh.version {
@@ -63,42 +71,53 @@ impl Store {
             return Ok(false);
         }
         if self.server_draft_folder(account)?.as_deref() != Some(&refresh.source.folder) {
-            self.fail_draft_sync(
+            self.record_draft_conflict(
                 account,
                 id,
-                "conflict",
+                remote.map(|s| s.id.as_str()),
                 "草稿目录已变化；原件与本地副本保留",
             )?;
             return Ok(true);
         }
         let Some(raw) = raw else {
-            self.fail_draft_sync(
+            self.record_draft_conflict(
                 account,
                 id,
-                "conflict",
+                remote.map(|s| s.id.as_str()),
                 "远端定位无法验证；可能已删除或UIDVALIDITY变化，保留本地与原件，请核对",
             )?;
             return Ok(true);
         };
         if raw == self.server_draft_original(account, &base)? {
+            if let Some(remote) = remote {
+                self.connection.execute("UPDATE server_draft_sources SET converted=?1,baseline_revision=(SELECT base_revision FROM draft_sync WHERE account_id=?2 AND draft_id=?1) WHERE id=?3 AND account_id=?2",params![id.0,account.0,remote.id])?;
+                self.connection.execute(
+                    "UPDATE draft_sync SET base_source=?1 WHERE account_id=?2 AND draft_id=?3",
+                    params![remote.id, account.0, id.0],
+                )?;
+                return Ok(true);
+            }
             return Ok(false);
         }
-        let source = self.archive_server_draft(
-            account,
-            &refresh.source.folder,
-            refresh.source.uidvalidity,
-            refresh.source.uid,
-            raw,
-        )?;
+        let source = if let Some(remote) = remote {
+            remote.clone()
+        } else {
+            self.archive_server_draft(
+                account,
+                &refresh.source.folder,
+                refresh.source.uidvalidity,
+                refresh.source.uid,
+                raw,
+            )?
+        };
         let local = self.draft(account, id)?;
         // 外部HTML等转换可能丢格式，只保留原件，等待用户明确转换。
-        let copy = mail_content::server_draft_model(raw)
-            .and_then(|_| mail_content::editable_server_copy(raw).ok());
+        let copy = mail_content::lossless_server_copy(raw);
         if local.revision != refresh.draft.revision || state != "synced" || copy.is_none() {
-            self.fail_draft_sync(
+            self.record_draft_conflict(
                 account,
                 id,
-                "conflict",
+                Some(&source.id),
                 "远端已变化；已保留新原件和本地副本，请在服务器草稿中查看，未自动覆盖",
             )?;
             return Ok(true);
@@ -118,10 +137,10 @@ impl Store {
         } else {
             self.connection
                 .execute_batch("ROLLBACK TO refresh_server_draft; RELEASE refresh_server_draft")?;
-            self.fail_draft_sync(
+            self.record_draft_conflict(
                 account,
                 id,
-                "conflict",
+                Some(&source.id),
                 "远端更新无法导入；新原件与本地副本保留",
             )?;
             return Ok(true);
@@ -131,9 +150,9 @@ impl Store {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
-    fn setup(s: &mut Store) -> AccountId {
+    pub(crate) fn setup(s: &mut Store) -> AccountId {
         let server = ServerSettings {
             host: "example.invalid".into(),
             port: 993,
@@ -162,11 +181,11 @@ mod tests {
         s.set_server_draft_folder(&a, "Drafts").unwrap();
         a
     }
-    fn raw(text: &str) -> Vec<u8> {
+    pub(crate) fn raw(text: &str) -> Vec<u8> {
         let model = mail_content::draft::Draft::plain(text).unwrap();
-        format!("Subject: remote\r\nBcc: hidden@example.invalid\r\nContent-Type: multipart/mixed; boundary=fixture\r\n\r\n--fixture\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n{}\r\n--fixture\r\nContent-Type: text/html; charset=utf-8\r\n\r\n{}\r\n--fixture\r\nContent-Type: application/vnd.qingmail.draft+json\r\n\r\n{}\r\n--fixture--\r\n", model.plain_export(),model.html(),String::from_utf8(model.to_json().unwrap()).unwrap()).into_bytes()
+        format!("Message-ID: <fixture@example.invalid>\r\nSubject: remote\r\nBcc: hidden@example.invalid\r\nContent-Type: multipart/mixed; boundary=fixture\r\n\r\n--fixture\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n{}\r\n--fixture\r\nContent-Type: text/html; charset=utf-8\r\n\r\n{}\r\n--fixture\r\nContent-Type: application/vnd.qingmail.draft+json\r\n\r\n{}\r\n--fixture--\r\n", model.plain_export(),model.html(),String::from_utf8(model.to_json().unwrap()).unwrap()).into_bytes()
     }
-    fn linked(s: &mut Store, a: &AccountId) -> DraftRefresh {
+    pub(crate) fn linked(s: &mut Store, a: &AccountId) -> DraftRefresh {
         let source = s
             .archive_server_draft(a, "Drafts", 42, 7, &raw("first"))
             .unwrap();

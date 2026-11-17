@@ -78,6 +78,7 @@ pub(crate) fn map_error(error: CheckError) -> CopyError {
         CheckError::Tls => CopyError::Tls,
         CheckError::Authentication => CopyError::Authentication,
         CheckError::Protocol
+        | CheckError::Missing
         | CheckError::EpochChanged
         | CheckError::Cancelled
         | CheckError::Storage => CopyError::Protocol,

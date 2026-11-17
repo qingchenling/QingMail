@@ -21,6 +21,8 @@ fn local_error(message: String) -> RpcError {
     error(ErrorCode::Storage, message)
 }
 pub(crate) const COMMANDS: &[mail_protocol::CommandName] = &[
+    mail_protocol::CommandName::DraftConflicts,
+    mail_protocol::CommandName::ResolveDraftConflict,
     mail_protocol::CommandName::DraftSyncStatus,
     mail_protocol::CommandName::FlushDraftSync,
     mail_protocol::CommandName::ServerDrafts,
@@ -57,7 +59,8 @@ pub(crate) const COMMANDS: &[mail_protocol::CommandName] = &[
 fn mutates(command: &Rpc) -> bool {
     matches!(
         command,
-        Rpc::FlushDraftSync { .. }
+        Rpc::ResolveDraftConflict { .. }
+            | Rpc::FlushDraftSync { .. }
             | Rpc::DraftSyncFolder { .. }
             | Rpc::ConvertServerDraft { .. }
             | Rpc::RetryOperation { .. }
@@ -148,6 +151,21 @@ pub(super) fn dispatch(store: &mut Store, request: mail_protocol::Request) -> Re
 }
 fn execute(store: &mut Store, command: Rpc) -> Result<Reply, RpcError> {
     Ok(match command {
+        Rpc::DraftConflicts { account } => Reply::DraftConflicts(
+            store
+                .draft_conflicts(account.as_ref())
+                .map_err(storage_error)?,
+        ),
+        Rpc::ResolveDraftConflict {
+            account,
+            conflict,
+            resolution,
+        } => {
+            store
+                .resolve_draft_conflict(&account, &conflict, resolution)
+                .map_err(storage_error)?;
+            Reply::Acknowledged
+        }
         Rpc::DraftSyncStatus { account } => {
             Reply::DraftSyncStatus(store.draft_sync_status(&account).map_err(storage_error)?)
         }
@@ -157,6 +175,7 @@ fn execute(store: &mut Store, command: Rpc) -> Result<Reply, RpcError> {
         }
 
         Rpc::ServerDrafts { account } => Reply::ServerDrafts {
+            notice: store.draft_scan_notice(&account).map_err(storage_error)?,
             folder: store.server_draft_folder(&account).map_err(storage_error)?,
             items: store
                 .server_draft_sources(&account)

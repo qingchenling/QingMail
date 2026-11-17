@@ -19,6 +19,7 @@ pub enum CheckError {
     Protocol,
     Limit,
     EpochChanged,
+    Missing,
     Cancelled,
     Storage,
 }
@@ -35,6 +36,7 @@ impl fmt::Display for CheckError {
             Self::Authentication => "认证失败，请检查用户名及应用专用密码",
             Self::Protocol => "服务器协议响应不符合预期",
             Self::Limit => "服务器响应超过检查上限",
+            Self::Missing => "该UID已不在远端文件夹中",
             Self::EpochChanged => "文件夹 UIDVALIDITY 已变化，请先同步最新邮件",
         })
     }

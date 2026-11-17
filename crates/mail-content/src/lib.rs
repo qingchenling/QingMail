@@ -20,6 +20,8 @@ use std::{collections::BTreeMap, fmt, io::Cursor, sync::Arc};
 use url::Url;
 
 pub const MAX_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
+/// 仅服务器草稿原件路径；覆盖25MiB附件的base64开销，普通阅读仍为8MiB。
+pub const MAX_SERVER_DRAFT_BYTES: usize = 40 * 1024 * 1024;
 pub const MAX_BODY_BYTES: usize = 512 * 1024;
 pub const MAX_IMAGE_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_IMAGES: usize = 32;
@@ -83,8 +85,14 @@ pub struct MailContent {
 }
 
 pub fn parse(raw: &[u8]) -> Result<MailContent, ContentError> {
-    if raw.len() > MAX_MESSAGE_BYTES {
-        return Err(ContentError("邮件超过 8 MiB 的原型解析上限".into()));
+    parse_bounded(raw, MAX_MESSAGE_BYTES)
+}
+pub fn parse_server_draft(raw: &[u8]) -> Result<MailContent, ContentError> {
+    parse_bounded(raw, MAX_SERVER_DRAFT_BYTES)
+}
+fn parse_bounded(raw: &[u8], limit: usize) -> Result<MailContent, ContentError> {
+    if raw.len() > limit {
+        return Err(ContentError("原件超过当前路径的有界解析上限".into()));
     }
     let mut result = MailContent {
         display_handle: None,
@@ -728,7 +736,7 @@ pub struct EditableServerCopy {
     pub attachments: Vec<Attachment>,
 }
 pub fn editable_server_copy(raw: &[u8]) -> Result<EditableServerCopy, ContentError> {
-    let content = parse(raw)?;
+    let content = parse_server_draft(raw)?;
     let model = server_draft_model(raw);
     let body = match &model {
         Some(model) => model.clone(),
@@ -767,7 +775,7 @@ pub fn editable_server_copy(raw: &[u8]) -> Result<EditableServerCopy, ContentErr
 }
 /// 仅当受控模型和实际plain/HTML正文完全一致时恢复格式，不能让过期元数据覆盖外部修改。
 pub fn server_draft_model(raw: &[u8]) -> Option<Draft> {
-    if raw.len() > MAX_MESSAGE_BYTES {
+    if raw.len() > MAX_SERVER_DRAFT_BYTES {
         return None;
     }
     let parsed = MessageParser::new()
@@ -829,5 +837,90 @@ mod server_copy_tests {
             )
             .is_err()
         );
+    }
+}
+
+/// 纯文本外部草稿也可无损导入；HTML必须有实际正文匹配的受控模型，否则显式转换。
+pub fn lossless_server_copy(raw: &[u8]) -> Option<EditableServerCopy> {
+    if server_draft_model(raw).is_none() {
+        let parsed = MessageParser::new()
+            .max_depth(32)
+            .max_parts(256)
+            .max_encoded_nesting(4)
+            .parse(raw)?;
+        if parsed
+            .html_body()
+            .any(|part| matches!(part.kind(), PartKind::Html))
+        {
+            return None;
+        }
+    }
+    editable_server_copy(raw).ok()
+}
+
+/// 只接受单值、ASCII、无控制字符的关联头；重复/过长头不参与自动关联。
+pub fn server_draft_identity(raw: &[u8]) -> Option<(String, String)> {
+    if raw.len() > MAX_SERVER_DRAFT_BYTES {
+        return None;
+    }
+    let end = raw.windows(4).position(|v| v == b"\r\n\r\n")?;
+    if end > 64 * 1024 {
+        return None;
+    }
+    let headers = std::str::from_utf8(&raw[..end]).ok()?;
+    for name in ["X-QingMail-Draft", "Message-ID"] {
+        let mut values = vec![];
+        let mut target = false;
+        for line in headers.split("\r\n") {
+            if line.starts_with([' ', '\t']) {
+                if target {
+                    return None;
+                }
+                continue;
+            }
+            target = false;
+            if let Some((key, value)) = line.split_once(':')
+                && key.eq_ignore_ascii_case(name)
+            {
+                target = true;
+                values.push(value.trim());
+            }
+        }
+        if values.len() == 1 {
+            let value = values[0];
+            if !value.is_empty()
+                && value.len() <= 256
+                && value.is_ascii()
+                && !value.chars().any(|c| c.is_control() || c.is_whitespace())
+            {
+                return Some((name.into(), value.into()));
+            }
+        } else if values.len() > 1 {
+            return None;
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+mod draft_identity_tests {
+    use super::*;
+    #[test]
+    fn duplicated_folded_or_controlled_identity_is_never_used_for_automatic_association() {
+        assert_eq!(
+            server_draft_identity(b"Message-ID: <a@example.invalid>\r\n\r\nbody"),
+            Some(("Message-ID".into(), "<a@example.invalid>".into()))
+        );
+        assert!(
+            server_draft_identity(
+                b"Message-ID: <a@example.invalid>\r\nMessage-ID: <b@example.invalid>\r\n\r\nbody"
+            )
+            .is_none()
+        );
+        assert!(
+            server_draft_identity(b"Message-ID: <a@example.invalid>\r\n hidden\r\n\r\nbody")
+                .is_none()
+        );
+        assert!(server_draft_identity(b"X-QingMail-Draft: a\r\nX-QingMail-Draft: b\r\nMessage-ID: <a@example.invalid>\r\n\r\nbody").is_none());
     }
 }

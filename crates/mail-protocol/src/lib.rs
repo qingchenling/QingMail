@@ -308,6 +308,9 @@ impl Command {
             Self::CreateStorageRequest { size } if *size == 0 || *size > MAX_STORAGE_PAYLOAD => {
                 Err(ProtocolError::Invalid)
             }
+            Self::ResolveDraftConflict { conflict, .. } if !valid_id(conflict) => {
+                Err(ProtocolError::Invalid)
+            }
             Self::DraftPage {
                 after: Some(after), ..
             }
@@ -791,6 +794,8 @@ pub enum Reply {
     ServerDrafts {
         folder: Option<String>,
         items: Vec<ServerDraftSource>,
+        #[serde(default)]
+        notice: String,
     },
     ServerDraftIndex {
         folder: Option<String>,
@@ -922,8 +927,9 @@ pub struct DraftConflict {
     pub id: String,
     pub account: AccountId,
     pub local: DraftId,
-    pub remote_copy: DraftId,
-    pub original: ResourceRef,
+    pub remote_copy: Option<DraftId>,
+    /// 受控原件ID，通过ReadServerDraft读取；删除冲突可能无远端原件。
+    pub original: Option<String>,
     pub reason: String,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1011,4 +1017,34 @@ pub struct DownloadInfo {
     pub received: u64,
     pub total: u64,
     pub error: Option<String>,
+}
+
+#[cfg(test)]
+mod draft_conflict_contract_tests {
+    use super::*;
+    #[test]
+    fn missing_remote_is_explicit_and_resolution_requires_controlled_identity() {
+        let reply = Reply::DraftConflicts(vec![DraftConflict {
+            id: "a".repeat(32),
+            account: AccountId("b".repeat(32)),
+            local: DraftId("c".repeat(32)),
+            remote_copy: None,
+            original: None,
+            reason: "远端已删除，保留本地".into(),
+        }]);
+        let json = serde_json::to_vec(&reply).unwrap();
+        let roundtrip: Reply = serde_json::from_slice(&json).unwrap();
+        assert!(
+            matches!(roundtrip,Reply::DraftConflicts(v) if v[0].original.is_none() && v[0].remote_copy.is_none())
+        );
+        let request = Request::new(
+            "d".repeat(32),
+            Command::ResolveDraftConflict {
+                account: AccountId("b".repeat(32)),
+                conflict: "../outside".into(),
+                resolution: DraftResolution::KeepBoth,
+            },
+        );
+        assert!(request.validate().is_err());
+    }
 }

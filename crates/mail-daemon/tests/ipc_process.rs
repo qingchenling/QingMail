@@ -1352,7 +1352,7 @@ fn server_draft_original_conversion_replay_isolation_and_offline_restart() {
     };
     assert!(commands.contains(&CommandName::ServerDrafts));
     assert!(commands.contains(&CommandName::ConvertServerDraft));
-    let Reply::ServerDrafts { folder, items } = client
+    let Reply::ServerDrafts { folder, items, .. } = client
         .request(Command::ServerDrafts {
             account: account.clone(),
         })
@@ -1530,4 +1530,130 @@ fn draft_upload_intent_and_uncertain_status_survive_isolated_daemon_restart_with
     let intent = s.draft_upload(&account, &id).unwrap();
     assert!(intent.probe_only);
     assert_eq!(intent.raw, b"Subject: fixed upload\r\n\r\nfrozen");
+}
+
+#[test]
+fn draft_conflict_choice_replay_and_restart_preserve_two_versions_without_smtp() {
+    use mail_core::*;
+    let root = private_root();
+    let (account, other, draft, remote) = {
+        let mut s = mail_storage::Store::open(&root.path().join("data")).unwrap();
+        let server = ServerSettings {
+            host: "example.invalid".into(),
+            port: 993,
+            username: "fixture".into(),
+            security: ConnectionSecurity::Tls,
+        };
+        let settings = AccountSettings {
+            display_name: "conflict".into(),
+            address: "me@example.invalid".into(),
+            imap: server.clone(),
+            smtp: server,
+        };
+        let a = s.create_account(&settings).unwrap();
+        let b = s.create_account(&settings).unwrap();
+        s.replace_remote_folders(
+            &a,
+            &[RemoteFolder {
+                name: "Drafts".into(),
+                display_name: "Drafts".into(),
+                delimiter: None,
+                selectable: true,
+            }],
+            0,
+        )
+        .unwrap();
+        s.set_server_draft_folder(&a, "Drafts").unwrap();
+        let original = s
+            .archive_server_draft(&a, "Drafts", 42, 1, b"Subject: baseline\r\n\r\nfirst")
+            .unwrap();
+        let draft = s.convert_server_draft(&a, &original.id).unwrap();
+        let remote = s
+            .archive_server_draft(
+                &a,
+                "Drafts",
+                42,
+                2,
+                b"Subject: remote\r\nBcc: hidden@example.invalid\r\n\r\nremote update",
+            )
+            .unwrap();
+        s.record_draft_conflict(&a, &draft.id, Some(&remote.id), "concurrent changes")
+            .unwrap();
+        (a, b, draft, remote)
+    };
+    let mut daemon = Daemon::start(root.path());
+    let client = daemon.ready(root.path());
+    let Reply::Hello { commands, .. } = client.request(Command::Hello).unwrap() else {
+        panic!()
+    };
+    assert!(commands.contains(&CommandName::DraftConflicts));
+    assert!(commands.contains(&CommandName::ResolveDraftConflict));
+    let Reply::DraftConflicts(conflicts) = client
+        .request(Command::DraftConflicts {
+            account: Some(account.clone()),
+        })
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(conflicts.len(), 1);
+    assert_eq!(conflicts[0].original.as_ref(), Some(&remote.id));
+    assert!(
+        client
+            .request(Command::ResolveDraftConflict {
+                account: other,
+                conflict: conflicts[0].id.clone(),
+                resolution: DraftResolution::KeepBoth
+            })
+            .is_err()
+    );
+    let request = Request::new(
+        transport::request_id().unwrap(),
+        Command::ResolveDraftConflict {
+            account: account.clone(),
+            conflict: conflicts[0].id.clone(),
+            resolution: DraftResolution::KeepBoth,
+        },
+    );
+    client.call(&request).unwrap();
+    client.call(&request).unwrap();
+    let Reply::Drafts(items) = client
+        .request(Command::Drafts {
+            account: Some(account.clone()),
+        })
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(items.len(), 2);
+    assert!(items.iter().any(|d| d.document.body.text() == "first"));
+    assert!(
+        items
+            .iter()
+            .any(|d| d.document.body.text() == "remote update")
+    );
+    client.request(Command::PrepareShutdown).unwrap();
+    daemon.exited();
+    let mut daemon = Daemon::start(root.path());
+    let client = daemon.ready(root.path());
+    client.call(&request).unwrap();
+    let Reply::Drafts(items) = client
+        .request(Command::Drafts {
+            account: Some(account.clone()),
+        })
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(items.len(), 2);
+    let saved = items.iter().find(|d| d.id == draft.id).unwrap();
+    assert_eq!(saved.document, draft.document);
+    assert!(
+        matches!(client.request(Command::DraftConflicts{account:Some(account.clone())}).unwrap(),Reply::DraftConflicts(v) if v.is_empty())
+    );
+    assert!(
+        matches!(client.request(Command::Tasks{account}).unwrap(),Reply::Tasks(v) if v.is_empty())
+    );
+    client.request(Command::PrepareShutdown).unwrap();
+    daemon.exited();
 }

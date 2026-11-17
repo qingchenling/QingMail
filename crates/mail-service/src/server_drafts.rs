@@ -73,6 +73,15 @@ fn index_using(
     folder: &str,
     tls: &native_tls::TlsConnector,
 ) -> Result<DraftIndex, CheckError> {
+    index_bounded_using(server, password, folder, tls, 200)
+}
+fn index_bounded_using(
+    server: &ServerSettings,
+    password: &str,
+    folder: &str,
+    tls: &native_tls::TlsConnector,
+    limit: usize,
+) -> Result<DraftIndex, CheckError> {
     if !valid_folder(folder) {
         return Err(CheckError::Invalid);
     }
@@ -107,8 +116,8 @@ fn index_using(
     let found = found.ok_or(CheckError::Protocol)?;
     let result = DraftIndex {
         uidvalidity: epoch,
-        has_more: found.len() > 200,
-        uids: found.into_iter().rev().take(200).collect(),
+        has_more: found.len() > limit,
+        uids: found.into_iter().rev().take(limit).collect(),
     };
     logout(&mut stream);
     Ok(result)
@@ -232,7 +241,7 @@ fn upload_using(
         || local.len() != 32
         || !local.bytes().all(|b| b.is_ascii_hexdigit())
         || raw.is_empty()
-        || raw.len() > 8 * 1024 * 1024
+        || raw.len() > 40 * 1024 * 1024
     {
         return Err(CopyError::Invalid);
     }
@@ -266,8 +275,16 @@ fn upload_using(
     logout(&mut stream);
     match result {
         Ok(Some(uid)) => {
-            let received = crate::sync::message_using(server, password, folder, epoch, uid, tls)
-                .map_err(|_| CopyError::ResultUnknown)?;
+            let received = crate::sync::message_bounded_using(
+                server,
+                password,
+                folder,
+                epoch,
+                uid,
+                tls,
+                40 * 1024 * 1024,
+            )
+            .map_err(|_| CopyError::ResultUnknown)?;
             if received != raw {
                 return Err(CopyError::ResultUnknown);
             }
@@ -299,11 +316,16 @@ mod upload_tests {
             .add_root_certificate(native_tls::Certificate::from_pem(&cert).unwrap())
             .build()
             .unwrap();
-        let raw=b"Message-ID: <0123456789abcdef0123456789abcdef@qingmail.invalid>\r\nSubject: draft\r\n\r\nfrozen\r\n";
+        let mut raw=b"Message-ID: <0123456789abcdef0123456789abcdef@qingmail.invalid>\r\nSubject: draft\r\n\r\nfrozen\r\n".to_vec();
+        if mode == "large" {
+            raw.extend(vec![b'x'; 9 * 1024 * 1024]);
+        }
+        let server_raw = raw.clone();
         let mode = mode.to_owned();
         let probe = mode.starts_with("probe");
         let server_mode = mode.clone();
         let worker = thread::spawn(move || {
+            let raw = &server_raw;
             let mut r = BufReader::new(accept.accept(socket(listen.try_clone().unwrap())).unwrap());
             r.get_mut().write_all(b"* OK fixture\r\n").unwrap();
             let _ = line(&mut r);
@@ -337,7 +359,7 @@ mod upload_tests {
                 r.get_mut().write_all(b"+ literal\r\n").unwrap();
                 let mut bytes = vec![0; raw.len()];
                 r.read_exact(&mut bytes).unwrap();
-                assert_eq!(bytes, raw);
+                assert_eq!(&bytes, raw);
                 assert_eq!(line(&mut r), "\r\n");
                 if server_mode == "lost_response" {
                     return;
@@ -379,7 +401,7 @@ mod upload_tests {
             "Drafts",
             Some(42),
             "<0123456789abcdef0123456789abcdef@qingmail.invalid>",
-            raw,
+            &raw,
             probe,
             &tls,
         );
@@ -390,6 +412,16 @@ mod upload_tests {
     fn append_draft_flag_and_verify_raw_even_with_appenduid() {
         assert_eq!(
             fixture("append"),
+            Ok(UploadResult::Verified {
+                uidvalidity: 42,
+                uid: 7
+            })
+        );
+    }
+    #[test]
+    fn large_draft_appends_and_verifies_above_ordinary_read_limit() {
+        assert_eq!(
+            fixture("large"),
             Ok(UploadResult::Verified {
                 uidvalidity: 42,
                 uid: 7
@@ -414,5 +446,181 @@ mod upload_tests {
             fixture("probe_mismatch"),
             Err(crate::sent::CopyError::ResultUnknown)
         );
+    }
+}
+
+pub fn message(
+    server: &ServerSettings,
+    password: &str,
+    folder: &str,
+    epoch: u32,
+    uid: u32,
+) -> Result<Vec<u8>, CheckError> {
+    crate::sync::message_bounded_using(
+        server,
+        password,
+        folder,
+        epoch,
+        uid,
+        &connector()?,
+        40 * 1024 * 1024,
+    )
+}
+
+/// 完整有界UID集合，不能拿页面窗口代替远端存在性证据。
+pub fn all(
+    server: &ServerSettings,
+    password: &str,
+    folder: &str,
+) -> Result<DraftIndex, CheckError> {
+    index_bounded_using(server, password, folder, &connector()?, 10000)
+}
+pub fn matching(
+    server: &ServerSettings,
+    password: &str,
+    folder: &str,
+    epoch: u32,
+    identity: &(String, String),
+) -> Result<Vec<u32>, CheckError> {
+    matching_using(server, password, folder, epoch, identity, &connector()?)
+}
+fn matching_using(
+    server: &ServerSettings,
+    password: &str,
+    folder: &str,
+    epoch: u32,
+    identity: &(String, String),
+    tls: &native_tls::TlsConnector,
+) -> Result<Vec<u32>, CheckError> {
+    if !valid_folder(folder)
+        || !matches!(identity.0.as_str(), "X-QingMail-Draft" | "Message-ID")
+        || identity.1.len() > 256
+        || identity.1.is_empty()
+        || !identity.1.is_ascii()
+        || identity.1.chars().any(char::is_control)
+    {
+        return Err(CheckError::Invalid);
+    }
+    let mut stream = authenticated(server, password, tls)?;
+    let mut examine = b"QM3 EXAMINE ".to_vec();
+    quoted(&mut examine, folder);
+    examine.extend_from_slice(b"\r\n");
+    command(&mut stream, &examine)?;
+    let mut seen = false;
+    until_done(&mut stream, "QM3", |r| {
+        crate::sync::ensure_epoch(&r, epoch)?;
+        if let Response::Data { outcome, .. } = r
+            && matches!(outcome.code, Some(ResponseCode::UidValidity(_)))
+        {
+            seen = true;
+        }
+        Ok(())
+    })?;
+    if !seen {
+        return Err(CheckError::Protocol);
+    }
+    let mut query = format!("QM4 UID SEARCH HEADER {} ", identity.0).into_bytes();
+    quoted(&mut query, &identity.1);
+    query.extend_from_slice(b"\r\n");
+    command(&mut stream, &query)?;
+    let mut found = None;
+    until_done(&mut stream, "QM4", |r| {
+        crate::sync::ensure_epoch(&r, epoch)?;
+        if let Response::MailboxData(MailboxDatum::Search(values)) = r {
+            if found.is_some() || values.len() > 10000 || values.contains(&0) {
+                return Err(CheckError::Limit);
+            }
+            found = Some(
+                values
+                    .into_iter()
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect(),
+            );
+        }
+        Ok(())
+    })?;
+    logout(&mut stream);
+    found.ok_or(CheckError::Protocol)
+}
+
+#[cfg(test)]
+mod replacement_tests {
+    use super::*;
+    use crate::accounts::tests::{acceptor, certificate, line, listener, server, socket};
+    use mail_core::ConnectionSecurity;
+    use std::{
+        io::{BufReader, Write},
+        thread,
+    };
+    #[test]
+    fn replacement_search_is_read_only_keeps_ambiguity_and_full_index_exceeds_ui_window() {
+        for mode in ["search", "all", "epoch"] {
+            let (cert, key) = certificate();
+            let accept = acceptor(&cert, &key);
+            let listen = listener();
+            let settings = server(&listen, ConnectionSecurity::Tls);
+            let worker = thread::spawn(move || {
+                let mut r = BufReader::new(accept.accept(socket(listen)).unwrap());
+                r.get_mut().write_all(b"* OK fixture\r\n").unwrap();
+                let _ = line(&mut r);
+                r.get_mut().write_all(b"QM2 OK login\r\n").unwrap();
+                assert_eq!(line(&mut r), "QM3 EXAMINE \"Drafts\"\r\n");
+                let epoch = if mode == "epoch" { 99 } else { 42 };
+                r.get_mut()
+                    .write_all(
+                        format!("* OK [UIDVALIDITY {epoch}] epoch\r\nQM3 OK examined\r\n")
+                            .as_bytes(),
+                    )
+                    .unwrap();
+                if mode == "epoch" {
+                    return;
+                }
+                if mode == "search" {
+                    assert_eq!(
+                        line(&mut r),
+                        "QM4 UID SEARCH HEADER Message-ID \"<stable@example.invalid>\"\r\n"
+                    );
+                    r.get_mut()
+                        .write_all(b"* SEARCH 7 9\r\nQM4 OK searched\r\n")
+                        .unwrap();
+                } else {
+                    assert_eq!(line(&mut r), "QM4 UID SEARCH ALL\r\n");
+                    let uids = (1..=250)
+                        .map(|n| n.to_string())
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    r.get_mut()
+                        .write_all(format!("* SEARCH {uids}\r\nQM4 OK searched\r\n").as_bytes())
+                        .unwrap();
+                }
+                assert_eq!(line(&mut r), "QM9 LOGOUT\r\n");
+            });
+            let tls = native_tls::TlsConnector::builder()
+                .add_root_certificate(native_tls::Certificate::from_pem(&cert).unwrap())
+                .build()
+                .unwrap();
+            if mode == "all" {
+                let index = index_bounded_using(&settings, "test", "Drafts", &tls, 10000).unwrap();
+                assert_eq!(index.uids.len(), 250);
+                assert!(!index.has_more);
+                assert_eq!(index.uids[249], 1);
+            } else {
+                let result = matching_using(
+                    &settings,
+                    "test",
+                    "Drafts",
+                    42,
+                    &("Message-ID".into(), "<stable@example.invalid>".into()),
+                    &tls,
+                );
+                if mode == "epoch" {
+                    assert_eq!(result, Err(CheckError::EpochChanged));
+                } else {
+                    assert_eq!(result.unwrap(), vec![7, 9]);
+                }
+            }
+            worker.join().unwrap();
+        }
     }
 }

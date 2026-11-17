@@ -87,7 +87,7 @@ impl Store {
             || epoch == 0
             || uid == 0
             || raw.is_empty()
-            || raw.len() > mail_content::MAX_MESSAGE_BYTES
+            || raw.len() > mail_content::MAX_SERVER_DRAFT_BYTES
         {
             return Err(Error::Invalid("草稿目录、定位或原件大小无效"));
         }
@@ -96,17 +96,18 @@ impl Store {
         if let Some(id) = old {
             return self.server_draft_source(account, &id);
         }
-        let content = mail_content::parse(raw).map_err(|_| Error::Invalid("原件无法读取"))?;
+        let content =
+            mail_content::parse_server_draft(raw).map_err(|_| Error::Invalid("原件无法读取"))?;
         let object = objects::Object::write(
             &self.objects,
             account,
             "attachment",
             &mut &raw[..],
-            mail_content::MAX_MESSAGE_BYTES as u64,
+            mail_content::MAX_SERVER_DRAFT_BYTES as u64,
         )?;
         let id = new_id()?;
         let result: Result<()> = (|| {
-            let tx = self.connection.transaction()?;
+            let tx = self.connection.savepoint()?;
             object.insert(&tx)?;
             tx.execute("INSERT INTO server_draft_sources(id,account_id,remote_name,uidvalidity,uid,raw_id,raw_hash,subject) VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",params![id,account.0,folder,epoch,uid,object.id,hash,content.subject])?;
             tx.commit()?;
@@ -143,7 +144,7 @@ impl Store {
             account,
             &raw,
             "attachment",
-            mail_content::MAX_MESSAGE_BYTES as u64,
+            mail_content::MAX_SERVER_DRAFT_BYTES as u64,
         )
     }
     pub(super) fn server_copy_document(
@@ -180,6 +181,14 @@ impl Store {
         if let Some(local) = source.converted {
             return self.draft(account, &local);
         }
+        self.convert_server_draft_fresh(account, id)
+    }
+    /// 冲突选择必须使用冻结原件，不把另一份已编辑转换副本冒充远端版本。
+    pub(super) fn convert_server_draft_fresh(
+        &mut self,
+        account: &AccountId,
+        id: &str,
+    ) -> Result<StoredDraft> {
         let raw = self.server_draft_original(account, id)?;
         let copy = mail_content::editable_server_copy(&raw)
             .map_err(|_| Error::Invalid("原件超出编辑模型或含无法转换内容，已保留原件"))?;
@@ -188,7 +197,7 @@ impl Store {
         let result = (|| {
             let document = self.server_copy_document(account, copy)?;
             let draft = self.create_draft(account, &document)?;
-            self.connection.execute("UPDATE server_draft_sources SET converted=?1,baseline_revision=?2 WHERE id=?3 AND account_id=?4 AND converted IS NULL",params![draft.id.0,draft.revision,id,account.0])?;
+            self.connection.execute("UPDATE server_draft_sources SET converted=?1,baseline_revision=?2 WHERE id=?3 AND account_id=?4",params![draft.id.0,draft.revision,id,account.0])?;
             self.connection.execute("UPDATE draft_sync SET base_source=?1,base_revision=?2,state='synced',detail='已转换，等待本地编辑' WHERE account_id=?3 AND draft_id=?4", params![id,draft.revision,account.0,draft.id.0])?;
             Ok(draft)
         })();
@@ -354,7 +363,7 @@ mod tests {
                 },
             )
             .unwrap();
-        s.connection.execute_batch("DROP TRIGGER track_server_draft_insert; DROP TRIGGER track_server_draft_update; DROP TABLE draft_uploads; DROP TABLE draft_sync; DROP TABLE server_draft_sources; DROP TABLE server_draft_folders; PRAGMA user_version=13;").unwrap();
+        s.connection.execute_batch("DROP TRIGGER stop_sent_draft_sync; DROP TRIGGER track_draft_scan_account; DROP TABLE draft_conflicts; DROP TABLE draft_scan_failures; DROP TABLE draft_scans; DROP TRIGGER track_server_draft_insert; DROP TRIGGER track_server_draft_update; DROP TABLE draft_uploads; DROP TABLE draft_sync; DROP TABLE server_draft_sources; DROP TABLE server_draft_folders; PRAGMA user_version=13;").unwrap();
         drop(s);
         let s = Store::open(&data).unwrap();
         assert_eq!(s.draft(&a, &draft.id).unwrap(), draft);
@@ -362,7 +371,7 @@ mod tests {
             s.connection
                 .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
                 .unwrap(),
-            15
+            16
         );
         assert!(std::fs::read_dir(&data).unwrap().any(|p| {
             p.unwrap()

@@ -307,7 +307,7 @@ impl Context {
             ReadServerDraft { account, source } => {
                 let raw =
                     receive(self.store.server_draft_original(account, source)).map_err(fail)?;
-                let content = mail_content::parse(&raw).map_err(fail)?;
+                let content = mail_content::parse_server_draft(&raw).map_err(fail)?;
                 self.publish(content, None)
             }
 
@@ -363,9 +363,14 @@ impl Context {
                 let baseline =
                     receive(self.store.account_version(account.clone())).map_err(fail)?;
                 let (settings, credentials) = self.credentials(account.clone())?;
-                let raw =
-                    sync::message(&settings.imap, &credentials.imap, &folder, uidvalidity, uid)
-                        .map_err(fail)?;
+                let raw = mail_service::server_drafts::message(
+                    &settings.imap,
+                    &credentials.imap,
+                    &folder,
+                    uidvalidity,
+                    uid,
+                )
+                .map_err(fail)?;
                 if receive(self.store.account_version(account.clone())).map_err(fail)? != baseline {
                     return Err(rpc_error(
                         ErrorCode::Conflict,

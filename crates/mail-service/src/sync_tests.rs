@@ -200,6 +200,12 @@ fn body_fixture(mode: &str) -> Result<Vec<u8>, CheckError> {
             return;
         }
         assert_eq!(line(&mut r), "QM4 UID FETCH 7 (UID BODY.PEEK[])\r\n");
+        if mode == "missing" {
+            r.get_mut()
+                .write_all(b"QM4 OK no matching UID\r\n")
+                .unwrap();
+            return;
+        }
         if mode == "oversize" {
             r.get_mut()
                 .write_all(b"* 1 FETCH (UID 7 BODY[] {8388609}\r\n")
@@ -244,6 +250,7 @@ fn full_mime_download_is_read_only_and_preserves_literal_bytes_above_index_budge
 #[test]
 fn changed_epoch_wrong_uid_truncation_and_oversize_never_return_a_body() {
     assert_eq!(body_fixture("epoch"), Err(CheckError::EpochChanged));
+    assert_eq!(body_fixture("missing"), Err(CheckError::Missing));
     assert_eq!(body_fixture("wrong-uid"), Err(CheckError::Protocol));
     assert_eq!(body_fixture("oversize"), Err(CheckError::Limit));
     assert!(body_fixture("partial").is_err());
