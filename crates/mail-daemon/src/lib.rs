@@ -1,5 +1,7 @@
-//! P0–P2 进程内后台入口。激活通道仅为 P0 私有控制，不冻结 P3 IPC。
+//! P0–P2 进程内后台及 P3 独立后台基础。
+//! 旧激活通道仅用于现有 GUI；P3 IPC v1 服务位于 ipc 模块，按能力列表逐步接入。
 mod instance;
+pub mod ipc;
 pub mod sending;
 pub mod storage;
 pub mod sync_engine;

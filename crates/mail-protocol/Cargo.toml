@@ -5,6 +5,8 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+rustix = { workspace = true }
+getrandom = { workspace = true }
 mail-core = { workspace = true }
 mail-content = { workspace = true }
 serde = { workspace = true }
