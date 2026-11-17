@@ -223,7 +223,12 @@ pub(super) fn reuse_editor(account: Option<&mail_core::AccountId>, cx: &mut App)
         .global::<Lifecycle>()
         .editors
         .iter()
-        .find(|e| live(e.window, cx))
+        .find(|e| {
+            live(e.window, cx)
+                && e.entity
+                    .upgrade()
+                    .is_some_and(|entity| entity.read(cx).account_id() == account)
+        })
         .map(|e| (e.window, e.entity.clone()));
     if let Some((window, entity)) = existing {
         let _ = entity.update(cx, |this, cx| this.explain_scope(account, cx));
@@ -298,6 +303,29 @@ pub(super) fn register_send_tasks(window: AnyWindowHandle, cx: &mut App) {
 pub(super) fn storage(cx: &App) -> mail_daemon::storage::StorageClient {
     cx.global::<Lifecycle>().storage.client()
 }
+pub(super) fn default_sender(cx: &App) -> Option<(mail_core::AccountId, String)> {
+    let remote = cx.global::<Lifecycle>().remote.as_ref()?;
+    let view = remote.snapshot();
+    view.snapshot
+        .accounts
+        .into_iter()
+        .find(|(id, _)| Some(id) == view.snapshot.default_account.as_ref())
+        .map(|(id, s)| (id, s.address))
+}
+pub(super) fn own_addresses(cx: &App) -> Vec<String> {
+    cx.global::<Lifecycle>()
+        .remote
+        .as_ref()
+        .map(|r| {
+            r.snapshot()
+                .snapshot
+                .accounts
+                .iter()
+                .map(|(_, s)| s.address.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
 pub(super) fn account_backend(cx: &App) -> Arc<AccountBackend> {
     cx.global::<Lifecycle>().account_backend.clone()
 }
@@ -325,6 +353,25 @@ pub(super) fn sync_status(cx: &App) -> String {
                 .unwrap_or_else(|| r.snapshot().snapshot.status.sync_status)
         })
         .unwrap_or_else(|| state.sync.as_ref().unwrap().status())
+}
+pub(super) fn account_sync_status(account: &mail_core::AccountId, cx: &App) -> String {
+    let state = cx.global::<Lifecycle>();
+    let states = state
+        .remote
+        .as_ref()
+        .map(|r| r.snapshot().snapshot.status.account_sync)
+        .unwrap_or_else(|| {
+            state
+                .sync
+                .as_ref()
+                .map(|s| s.account_states())
+                .unwrap_or_default()
+        });
+    states
+        .into_iter()
+        .find(|s| &s.account == account)
+        .map(|s| format!("{}{}", if s.paused { "已暂停 · " } else { "" }, s.status))
+        .unwrap_or_default()
 }
 pub(super) fn sync_revision(cx: &App) -> u64 {
     let state = cx.global::<Lifecycle>();

@@ -51,6 +51,8 @@ pub(super) struct Accounts {
     smtp: String,
     folders: Vec<RemoteFolder>,
     saved: Vec<(AccountId, AccountSettings)>,
+    default_account: Option<AccountId>,
+    paused_accounts: Vec<AccountId>,
     expanded: Option<AccountId>,
     editing: Option<AccountId>,
     impact: Option<(AccountId, mail_storage::AccountImpact)>,
@@ -107,6 +109,8 @@ impl Accounts {
             smtp: "尚未检查".into(),
             folders: vec![],
             saved: vec![],
+            default_account: None,
+            paused_accounts: vec![],
             expanded: None,
             editing: None,
             impact: None,
@@ -249,6 +253,29 @@ impl Accounts {
             .map_err(|_| "请填写完整的账号、邮箱地址、服务器与用户名".to_owned())?;
         Ok(settings)
     }
+    fn change_option(&mut self, command: Command, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        self.busy = true;
+        let store = crate::lifecycle::storage(cx);
+        let task = cx
+            .background_executor()
+            .spawn(async move { store.control(command) });
+        cx.spawn(async move |entity, cx| {
+            let result = task.await;
+            let _ = entity.update(cx, |this, cx| {
+                this.busy = false;
+                this.status = match result {
+                    Ok(_) => "账号设置已保存".into(),
+                    Err(e) => e,
+                };
+                this.refresh(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
     fn can_save(&self, cx: &App) -> bool {
         !self.busy
             && self.pending.is_none()
@@ -260,15 +287,21 @@ impl Accounts {
             && self.value(9, cx).is_empty()
     }
     fn refresh(&mut self, cx: &mut Context<Self>) {
-        let request = crate::lifecycle::storage(cx).accounts();
-        let task = cx
-            .background_executor()
-            .spawn(async move { receive(request) });
+        let store = crate::lifecycle::storage(cx);
+        let task = cx.background_executor().spawn(async move {
+            let accounts = receive(store.accounts())?;
+            let options = store.control(Command::AccountOptions)?;
+            Ok::<_, String>((accounts, options))
+        });
         cx.spawn(async move |entity, cx| {
             let result = task.await;
             let _ = entity.update(cx, |this, cx| {
                 match result {
-                    Ok(saved) => {
+                    Ok((saved, options)) => {
+                        if let mail_protocol::Reply::AccountOptions { default, paused } = options {
+                            this.default_account = default;
+                            this.paused_accounts = paused;
+                        }
                         this.saved = saved;
                         if this.saved.is_empty() {
                             this.editing = None;
@@ -651,11 +684,50 @@ impl Render for Accounts {
                     })),
             );
             if expanded {
+                let default_id = row_id.clone();
+                let pause_id = row_id.clone();
+                let is_default = self.default_account.as_ref() == Some(id);
+                let paused = self.paused_accounts.contains(id);
                 let edit_id = row_id.clone();
                 let remove_id = row_id.clone();
                 let edit_settings = settings.clone();
                 tree = tree
                     .child(div().text_sm().child(settings.address.clone()))
+                    .child(
+                        MaterialButton::new(("default-account", index))
+                            .child(if is_default {
+                                "默认发件账号"
+                            } else {
+                                "设为默认发件账号"
+                            })
+                            .disabled(self.busy || is_default)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.change_option(
+                                    Command::SetDefaultAccount {
+                                        account: default_id.clone(),
+                                    },
+                                    cx,
+                                )
+                            })),
+                    )
+                    .child(
+                        MaterialButton::new(("pause-account", index))
+                            .child(if paused {
+                                "恢复此账号同步"
+                            } else {
+                                "暂停此账号同步"
+                            })
+                            .disabled(self.busy)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.change_option(
+                                    Command::PauseSync {
+                                        account: Some(pause_id.clone()),
+                                        paused: !paused,
+                                    },
+                                    cx,
+                                )
+                            })),
+                    )
                     .child(div().text_sm().child("文件夹与缓存状态请在邮件窗口查看"))
                     .child(
                         MaterialButton::new(("open-mailbox", index))

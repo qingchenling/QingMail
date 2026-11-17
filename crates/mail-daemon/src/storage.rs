@@ -422,6 +422,15 @@ impl StorageClient {
             reply,
         })
     }
+    /// 类型化控制查询；不在前台重放不确定的写操作。
+    pub fn control(&self, command: mail_protocol::Command) -> StorageResult<mail_protocol::Reply> {
+        let id = mail_protocol::transport::request_id().map_err(|e| e.to_string())?;
+        self.rpc(mail_protocol::Request::new(id, command))?
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .map_err(|_| "后台控制查询超时，请重新读取状态".to_string())??
+            .result
+            .map_err(|e| e.message)
+    }
     pub fn rpc(
         &self,
         request: mail_protocol::Request,
@@ -1941,9 +1950,6 @@ fn persist_account_with_id(
     id: AccountId,
 ) -> StorageResult<AccountId> {
     mail_service::accounts::validate(settings).map_err(|e| e.to_string())?;
-    if !store.accounts().map_err(|e| e.to_string())?.is_empty() {
-        return Err("P2 当前仅支持一个远程账号".into());
-    }
     vault.save(&id, credentials).map_err(|e| match e {
         mail_service::credentials::VaultError::OperationFailed
         | mail_service::credentials::VaultError::Timeout => {
@@ -2089,7 +2095,7 @@ mod account_tests {
         }
     }
     #[test]
-    fn confirmed_vault_save_precedes_account_and_second_account_is_rejected() {
+    fn confirmed_vault_save_precedes_each_account_and_multiple_accounts_survive_restart() {
         let root = tempfile::tempdir().unwrap();
         let mut store = Store::open(&root.path().join("data")).unwrap();
         let vault = Vault {
@@ -2100,11 +2106,12 @@ mod account_tests {
         let c = Credentials::new("synthetic-imap".into(), "synthetic-smtp".into()).unwrap();
         let id = persist_account(&mut store, &vault, &settings(), &c).unwrap();
         assert_eq!(store.account(&id).unwrap(), Some(settings()));
-        assert!(persist_account(&mut store, &vault, &settings(), &c).is_err());
-        assert_eq!(vault.saves.get(), 1);
+        let second = persist_account(&mut store, &vault, &settings(), &c).unwrap();
+        assert_ne!(id, second);
+        assert_eq!(vault.saves.get(), 2);
         drop(store);
         let store = Store::open(&root.path().join("data")).unwrap();
-        assert_eq!(store.accounts().unwrap().len(), 1);
+        assert_eq!(store.accounts().unwrap().len(), 2);
         // 真实 SQLite 字节不能含任何密码。
         let bytes = std::fs::read(root.path().join("data/state.sqlite3")).unwrap();
         assert!(!bytes.windows(c.imap.len()).any(|w| w == c.imap.as_bytes()));

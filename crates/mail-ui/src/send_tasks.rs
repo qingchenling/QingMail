@@ -43,7 +43,7 @@ type TaskReply = mail_daemon::storage::StorageResult<
 pub(super) struct SendTasks {
     store: StorageClient,
     account: Option<AccountId>,
-    address: String,
+    accounts: Vec<(AccountId, mail_core::AccountSettings)>,
     tasks: Vec<SendTask>,
     status: String,
     busy: bool,
@@ -56,7 +56,7 @@ impl SendTasks {
         let mut this = Self {
             store: crate::lifecycle::storage(cx),
             account: None,
-            address: String::new(),
+            accounts: vec![],
             tasks: vec![],
             status: "正在读取发送任务…".into(),
             busy: false,
@@ -77,11 +77,14 @@ impl SendTasks {
         let store = self.store.clone();
         let task = cx.background_executor().spawn(async move {
             let accounts = receive(store.accounts())?;
-            let Some((account, settings)) = accounts.into_iter().next() else {
-                return Ok::<_, String>((None, None, vec![]));
-            };
-            let tasks = receive(store.tasks(account.clone()))?;
-            Ok((Some(account), Some(settings), tasks))
+            let mut tasks = vec![];
+            for (id, _) in &accounts {
+                tasks.extend(receive(store.tasks(id.clone()))?);
+            }
+            tasks.sort_by(|a, b| {
+                (b.created_at, &b.account.0, &b.id.0).cmp(&(a.created_at, &a.account.0, &a.id.0))
+            });
+            Ok::<_, String>((accounts, tasks))
         });
         cx.spawn(async move |entity, cx| {
             let result = task.await;
@@ -91,14 +94,17 @@ impl SendTasks {
                 }
                 this.busy = false;
                 match result {
-                    Ok((account, settings, tasks)) => {
-                        this.account = account;
-                        this.address = settings
+                    Ok((accounts, tasks)) => {
+                        this.accounts = accounts;
+                        if this
+                            .account
                             .as_ref()
-                            .map(|settings| settings.address.clone())
-                            .unwrap_or_default();
+                            .is_some_and(|id| !this.accounts.iter().any(|(a, _)| a == id))
+                        {
+                            this.account = None;
+                        }
                         this.tasks = tasks;
-                        if this.account.is_none() {
+                        if this.accounts.is_empty() {
                             this.status = "尚未添加邮箱".into();
                         } else if this.tasks.is_empty() {
                             this.status = "还没有发送任务".into();
@@ -185,9 +191,10 @@ impl SendTasks {
         self.busy = true;
         self.status = "正在准备发送内容…".into();
         let reader_account = self
-            .account
-            .clone()
-            .map(|account| (account, self.address.clone()));
+            .accounts
+            .iter()
+            .find(|(id, _)| *id == task.account)
+            .map(|(id, s)| (id.clone(), s.address.clone()));
         let job = cx.background_executor().spawn(async move {
             if let Some(client) = store.ipc_client() {
                 return mail_daemon::client::content(
@@ -447,13 +454,34 @@ impl Render for SendTasks {
                         .on_click(cx.listener(|this, _, _, cx| this.reload(cx, false))),
                 ),
         );
-        if !self.address.is_empty() {
-            column = column.child(
-                div()
-                    .text_size(px(13.))
-                    .child(format!("账号：{}", self.address)),
+        let mut filters = div().flex().flex_wrap().gap_2().child(
+            MaterialButton::new("tasks-all")
+                .child("全部账号")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.account = None;
+                    cx.notify();
+                })),
+        );
+        for (index, (id, settings)) in self.accounts.iter().enumerate() {
+            let id = id.clone();
+            filters = filters.child(
+                MaterialButton::new(("tasks-account", index))
+                    .child(format!(
+                        "{}{}",
+                        if self.account.as_ref() == Some(&id) {
+                            "✓ "
+                        } else {
+                            ""
+                        },
+                        settings.address
+                    ))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.account = Some(id.clone());
+                        cx.notify();
+                    })),
             );
         }
+        column = column.child(filters);
         column = column.child(div().text_size(px(13.)).child(self.status.clone()));
         let mut list = div()
             .id("send-task-list")
@@ -462,7 +490,11 @@ impl Render for SendTasks {
             .flex()
             .flex_col()
             .gap_2();
-        for task in &self.tasks {
+        for task in self
+            .tasks
+            .iter()
+            .filter(|task| self.account.as_ref().is_none_or(|id| *id == task.account))
+        {
             list = list.child(self.row(task, cx));
         }
         column.child(list)

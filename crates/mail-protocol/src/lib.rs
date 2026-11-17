@@ -100,6 +100,7 @@ pub enum Command {
     MutationResult {
         mutation: String,
     },
+    AccountOptions,
     Accounts,
     CheckAccount {
         account: Option<AccountId>,
@@ -455,6 +456,7 @@ pub struct Event {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EventTopic {
+    AccountOptions,
     Accounts,
     Mail,
     Drafts,
@@ -478,7 +480,15 @@ pub struct ResourceChunk {
     pub complete: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccountSyncState {
+    pub account: AccountId,
+    pub paused: bool,
+    pub status: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonStatus {
+    #[serde(default)]
+    pub account_sync: Vec<AccountSyncState>,
     pub pid: u32,
     pub revision: u64,
     pub sync_paused: bool,
@@ -524,6 +534,7 @@ pub enum CommandName {
     Snapshot,
     Events,
     MutationResult,
+    AccountOptions,
     Accounts,
     CheckAccount,
     AccountCheckStatus,
@@ -599,6 +610,7 @@ impl Command {
             Self::Snapshot => CommandName::Snapshot,
             Self::Events { .. } => CommandName::Events,
             Self::MutationResult { .. } => CommandName::MutationResult,
+            Self::AccountOptions => CommandName::AccountOptions,
             Self::Accounts => CommandName::Accounts,
             Self::CheckAccount { .. } => CommandName::CheckAccount,
             Self::AccountCheckStatus { .. } => CommandName::AccountCheckStatus,
@@ -660,6 +672,10 @@ impl Command {
     deny_unknown_fields
 )]
 pub enum Reply {
+    AccountOptions {
+        default: Option<AccountId>,
+        paused: Vec<AccountId>,
+    },
     Encoded(ResourceRef),
     DraftPage {
         items: Vec<StoredDraft>,

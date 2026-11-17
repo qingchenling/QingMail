@@ -24,6 +24,10 @@ pub(crate) const COMMANDS: &[mail_protocol::CommandName] = &[
     mail_protocol::CommandName::DraftPage,
     mail_protocol::CommandName::TaskPage,
     mail_protocol::CommandName::Accounts,
+    mail_protocol::CommandName::AccountOptions,
+    mail_protocol::CommandName::PauseSync,
+    mail_protocol::CommandName::SetDefaultAccount,
+    mail_protocol::CommandName::UnifiedInbox,
     mail_protocol::CommandName::AccountImpact,
     mail_protocol::CommandName::Catalog,
     mail_protocol::CommandName::Folders,
@@ -44,7 +48,12 @@ pub(crate) const COMMANDS: &[mail_protocol::CommandName] = &[
 fn mutates(command: &Rpc) -> bool {
     matches!(
         command,
-        Rpc::OpenDraft { .. }
+        Rpc::SetDefaultAccount { .. }
+            | Rpc::PauseSync {
+                account: Some(_),
+                ..
+            }
+            | Rpc::OpenDraft { .. }
             | Rpc::NewDraft { .. }
             | Rpc::SelectDraft { .. }
             | Rpc::SaveDraft { .. }
@@ -136,6 +145,38 @@ fn execute(store: &mut Store, command: Rpc) -> Result<Reply, RpcError> {
                 .map_err(storage_error)?;
             Reply::TaskPage { items, next }
         }
+        Rpc::AccountOptions => Reply::AccountOptions {
+            default: store.default_account().map_err(storage_error)?,
+            paused: store
+                .accounts()
+                .map_err(storage_error)?
+                .into_iter()
+                .filter_map(|(id, _)| match store.account_paused(&id) {
+                    Ok(true) => Some(Ok(id)),
+                    Ok(false) => None,
+                    Err(e) => Some(Err(e)),
+                })
+                .collect::<mail_storage::Result<_>>()
+                .map_err(storage_error)?,
+        },
+        Rpc::SetDefaultAccount { account } => {
+            store.set_default_account(&account).map_err(storage_error)?;
+            Reply::Acknowledged
+        }
+        Rpc::PauseSync {
+            account: Some(account),
+            paused,
+        } => {
+            store
+                .pause_account(&account, paused)
+                .map_err(storage_error)?;
+            Reply::Acknowledged
+        }
+        Rpc::UnifiedInbox { before, limit } => Reply::Inbox(
+            store
+                .unified_inbox(before.as_ref(), limit)
+                .map_err(storage_error)?,
+        ),
         Rpc::Accounts => Reply::Accounts(store.accounts().map_err(storage_error)?),
         Rpc::AccountImpact { account } => {
             if store.account(&account).map_err(storage_error)?.is_none() {
@@ -157,10 +198,11 @@ fn execute(store: &mut Store, command: Rpc) -> Result<Reply, RpcError> {
                 .folder_cache(&account, &name, before)
                 .map_err(storage_error)?,
         ),
-        Rpc::Search {
-            account: Some(account),
-            query,
-        } => Reply::Search(store.search(&account, &query).map_err(storage_error)?),
+        Rpc::Search { account, query } => Reply::Search(
+            store
+                .search_scope(account.as_ref(), &query)
+                .map_err(storage_error)?,
+        ),
         Rpc::OpenDraft { account, initial } => {
             let account = editor_account(store, account).map_err(local_error)?;
             Reply::Draft(open_for(store, &account, initial).map_err(local_error)?)

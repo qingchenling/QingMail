@@ -13,15 +13,31 @@ impl Mailbox {
             .flex_1()
             .min_h_0()
             .overflow_y_scroll();
-        if let Some((_, settings)) = &self.account {
+        if self.accounts.len() > 1 {
             folders = folders.child(
-                MaterialButton::new("account-tree-root")
+                quiet("unified-inbox", "统一收件箱")
+                    .icon(icon("all_inbox"))
+                    .w_full()
+                    .rounded_none()
+                    .on_click(cx.listener(|this, _, _, cx| this.select_unified(cx))),
+            );
+        }
+        for (account_index, (account_id, settings)) in self.accounts.iter().enumerate() {
+            let expanded = !self.closed_accounts.contains(&account_id.0);
+            let account_key = account_id.0.clone();
+            let account_folders = self
+                .catalogs
+                .get(&account_id.0)
+                .map(|(folders, _)| folders.as_slice())
+                .unwrap_or(&[]);
+            folders = folders.child(
+                MaterialButton::new(("account-tree-root", account_index))
                     .variant(ButtonVariant::Text)
                     .tone(ButtonTone::Neutral)
                     .shape(ButtonShape::Square)
                     .rounded_none()
                     .w_full()
-                    .h(px(72.))
+                    .h(px(90.))
                     .child(
                         div()
                             .flex_1()
@@ -41,28 +57,47 @@ impl Mailbox {
                                     .text_color(theme::color(ColorRole::ON_SURFACE_VARIANT))
                                     .truncate()
                                     .child(settings.address.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.))
+                                    .truncate()
+                                    .child(crate::lifecycle::account_sync_status(account_id, cx)),
                             ),
                     )
-                    .child(icon(if self.expanded {
+                    .child(icon(if expanded {
                         "expand_more"
                     } else {
                         "chevron_right"
                     }))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.expanded = !this.expanded;
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !this.closed_accounts.remove(&account_key) {
+                            this.closed_accounts.insert(account_key.clone());
+                        }
                         cx.notify();
                     })),
             );
-            if self.expanded {
-                for (index, row) in tree_rows(&self.folders, &self.collapsed)
+            if expanded {
+                let prefix = format!("{}:", account_id.0);
+                let collapsed = self
+                    .collapsed
+                    .iter()
+                    .filter_map(|key| key.strip_prefix(&prefix).map(str::to_owned))
+                    .collect();
+                for (folder_index, row) in tree_rows(account_folders, &collapsed)
                     .into_iter()
                     .enumerate()
                 {
+                    let index = account_index * 8192 + folder_index;
+                    let target_account = account_id.clone();
                     let target = row.name.clone();
-                    let toggle = row.name.clone();
+                    let toggle = format!("{}:{}", account_id.0, row.name);
+                    let branch_key = toggle.clone();
                     let children = row.children;
                     let selectable = row.selectable;
-                    let selected = self.selected_folder.as_ref() == Some(&row.name);
+                    let selected = !self.unified
+                        && self.account.as_ref().map(|(id, _)| id) == Some(account_id)
+                        && self.selected_folder.as_ref() == Some(&row.name);
                     let symbol = match row.name.to_ascii_lowercase().as_str() {
                         "inbox" => "inbox",
                         "drafts" | "draft" => "draft",
@@ -87,7 +122,7 @@ impl Mailbox {
                                 slot.child(
                                     tool(
                                         ("branch", index),
-                                        if children && !self.collapsed.contains(&row.name) {
+                                        if children && !collapsed.contains(&row.name) {
                                             "expand_more"
                                         } else {
                                             "chevron_right"
@@ -124,9 +159,13 @@ impl Mailbox {
                                     .disabled(!selectable && !children)
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         if selectable {
-                                            this.select_folder(target.clone(), cx);
-                                        } else if !this.collapsed.remove(&target) {
-                                            this.collapsed.insert(target.clone());
+                                            this.switch_account(
+                                                target_account.clone(),
+                                                target.clone(),
+                                                cx,
+                                            );
+                                        } else if !this.collapsed.remove(&branch_key) {
+                                            this.collapsed.insert(branch_key.clone());
                                         }
                                         cx.notify();
                                     })),
@@ -134,7 +173,8 @@ impl Mailbox {
                     );
                 }
             }
-        } else {
+        }
+        if self.accounts.is_empty() {
             folders = folders.child(div().p_4().text_sm().child("添加邮箱，开始收发邮件"));
         }
         div()
@@ -177,7 +217,7 @@ impl Mailbox {
                         .child("写邮件")
                         .disabled(self.account.is_none())
                         .on_click(cx.listener(|this, _, _, cx| {
-                            if let Some((account, settings)) = this.account.clone() {
+                            if let Some((account, settings)) = this.compose_account() {
                                 cx.defer(move |cx| {
                                     crate::composer::open_account(account, settings.address, cx)
                                 });
@@ -276,10 +316,14 @@ impl Mailbox {
                         .truncate()
                         .child(format!(
                             "{} / {title}",
-                            self.account
-                                .as_ref()
-                                .map(|(_, s)| s.display_name.as_str())
-                                .unwrap_or("邮箱")
+                            if self.unified {
+                                "全部账号"
+                            } else {
+                                self.account
+                                    .as_ref()
+                                    .map(|(_, s)| s.display_name.as_str())
+                                    .unwrap_or("邮箱")
+                            }
                         )),
                 )
             })
@@ -317,9 +361,17 @@ impl Mailbox {
             )
             .child(div().flex_1())
             .child(
-                tool("sync-folder", "sync", "同步当前文件夹")
-                    .disabled(self.busy || self.selected_folder.is_none())
-                    .on_click(cx.listener(|this, _, _, cx| this.sync_folder(false, cx))),
+                tool(
+                    "sync-folder",
+                    "sync",
+                    if self.unified {
+                        "同步所有账号"
+                    } else {
+                        "同步当前文件夹"
+                    },
+                )
+                .disabled(self.busy || (!self.unified && self.selected_folder.is_none()))
+                .on_click(cx.listener(|this, _, _, cx| this.sync_folder(false, cx))),
             )
             .child(
                 MenuPopup::new(
@@ -360,14 +412,20 @@ impl Mailbox {
             .child(
                 quiet(
                     "search-scope",
-                    if self.search_current_folder {
-                        "范围：当前文件夹"
-                    } else {
-                        "范围：整个账号"
+                    &match self.search_scope {
+                        0 => "范围：当前文件夹".to_string(),
+                        1 => format!(
+                            "范围：账号 {}",
+                            self.account
+                                .as_ref()
+                                .map(|(_, s)| s.address.as_str())
+                                .unwrap_or("未选择")
+                        ),
+                        _ => "范围：全部本地缓存".to_string(),
                     },
                 )
                 .on_click(cx.listener(|this, _, _, cx| {
-                    this.search_current_folder = !this.search_current_folder;
+                    this.search_scope = (this.search_scope + 1) % 3;
                     cx.notify();
                 })),
             )
@@ -413,7 +471,8 @@ impl Mailbox {
                     let entity = entity.clone();
                     move |_, _, cx| {
                         entity.update(cx, |this, cx| {
-                            this.checked = this.messages().iter().map(|m| m.location.uid).collect();
+                            this.checked =
+                                this.messages().iter().map(|m| m.location.clone()).collect();
                             this.confirm_delete = false;
                             cx.notify();
                         })
@@ -438,8 +497,9 @@ impl Mailbox {
                         if let Some(inline) = &this.inline {
                             let content = inline.content.clone();
                             let account = this
-                                .account
-                                .as_ref()
+                                .accounts
+                                .iter()
+                                .find(|(id, _)| *id == inline.location.account)
                                 .map(|(id, s)| (id.clone(), s.address.clone()));
                             cx.defer(move |cx| crate::reader::open_content(content, account, cx));
                         }
@@ -477,7 +537,7 @@ impl Mailbox {
         } else {
             self.selected == Some(index)
         };
-        let uid = message.location.uid;
+        let uid = message.location.clone();
         let checked = self.checked.contains(&uid);
         let time = sync::display_time(message.envelope.received_at);
         let time = time.get(..10).unwrap_or(&time).to_owned();
@@ -519,7 +579,7 @@ impl Mailbox {
                     .button_size(ButtonSize::ExtraSmall)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
-                        this.toggle_checked(uid, cx);
+                        this.toggle_checked(uid.clone(), cx);
                     })),
                 )
             })
@@ -553,7 +613,19 @@ impl Mailbox {
                                     } else {
                                         gpui_kit::FontWeight::BOLD
                                     })
-                                    .child(message.envelope.sender.clone()),
+                                    .child(format!(
+                                        "{}{}",
+                                        message.envelope.sender,
+                                        if self.unified || self.search_scope == 2 {
+                                            self.accounts
+                                                .iter()
+                                                .find(|(id, _)| *id == message.location.account)
+                                                .map(|(_, s)| format!(" · {}", s.address))
+                                                .unwrap_or_default()
+                                        } else {
+                                            String::new()
+                                        }
+                                    )),
                             )
                             .child(
                                 div()
@@ -602,7 +674,13 @@ impl Render for Mailbox {
             .selected_folder
             .as_deref()
             .map(folder_label)
-            .unwrap_or_else(|| "邮件".into());
+            .unwrap_or_else(|| {
+                if self.unified {
+                    "统一收件箱".into()
+                } else {
+                    "邮件".into()
+                }
+            });
         let count = self
             .search_results
             .as_ref()
@@ -724,17 +802,34 @@ impl Render for Mailbox {
                 .when(self.search_results.is_none(), |row| {
                     row.child(
                         tool("first-cache-page", "chevron_left", "返回最新缓存")
-                            .disabled(self.busy || self.before.is_none())
+                            .disabled(
+                                self.busy
+                                    || if self.unified {
+                                        self.inbox_before.is_none()
+                                    } else {
+                                        self.before.is_none()
+                                    },
+                            )
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.before = None;
+                                this.inbox_before = None;
                                 this.load_cache(cx);
                             })),
                     )
                     .child(
                         tool("older-cache-page", "chevron_right", "下一页缓存")
-                            .disabled(self.busy || self.messages().is_empty())
+                            .disabled(
+                                self.busy
+                                    || if self.unified {
+                                        self.inbox.as_ref().is_none_or(|p| p.next.is_none())
+                                    } else {
+                                        self.messages().is_empty()
+                                    },
+                            )
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.before = this.messages().last().map(|m| m.location.uid);
+                                this.inbox_before =
+                                    this.inbox.as_ref().and_then(|p| p.next.clone());
                                 this.load_cache(cx);
                             })),
                     )

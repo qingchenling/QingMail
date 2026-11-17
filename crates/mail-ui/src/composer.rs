@@ -230,7 +230,7 @@ impl InputHighlighter for RichStyles {
 }
 
 pub(super) fn open(cx: &mut App) {
-    open_scoped(None, None, cx);
+    open_scoped(crate::lifecycle::default_sender(cx), None, cx);
 }
 pub(super) fn open_account(account: mail_core::AccountId, address: String, cx: &mut App) {
     open_scoped(Some((account, address)), None, cx);
@@ -311,6 +311,9 @@ pub(super) struct Composer {
 }
 
 impl Composer {
+    pub(super) fn account_id(&self) -> Option<&mail_core::AccountId> {
+        self.account_scope.as_ref().map(|(id, _)| id)
+    }
     pub(super) fn explain_scope(
         &mut self,
         requested: Option<&mail_core::AccountId>,

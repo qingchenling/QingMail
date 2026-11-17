@@ -47,6 +47,18 @@ pub(crate) fn headers(content: &MailContent, own: &str, mode: ReplyMode) -> Draf
     }
 }
 
+pub(crate) fn exclude_own(headers: &mut DraftHeaders, addresses: &[String]) {
+    let own: HashSet<_> = addresses
+        .iter()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .collect();
+    headers
+        .to
+        .retain(|s| !own.contains(&s.trim().to_ascii_lowercase()));
+    headers
+        .cc
+        .retain(|s| !own.contains(&s.trim().to_ascii_lowercase()));
+}
 fn push(target: &mut Vec<String>, source: &[String], own: &str, seen: &mut HashSet<String>) {
     let own = own.trim().to_ascii_lowercase();
     for address in source {
@@ -119,6 +131,17 @@ mod tests {
         assert_eq!(built.cc, vec!["carol@example.org"]);
         assert!(!built.to.contains(&"me@example.org".to_string()));
         assert!(!built.cc.contains(&"me@example.org".to_string()));
+    }
+
+    #[test]
+    fn reply_all_excludes_all_configured_accounts_case_insensitively() {
+        let mut built = headers(&content(), "me@example.org", ReplyMode::ReplyAll);
+        exclude_own(
+            &mut built,
+            &["BOB@example.org".into(), "carol@example.org".into()],
+        );
+        assert_eq!(built.to, vec!["reply@example.org"]);
+        assert!(built.cc.is_empty());
     }
 
     #[test]

@@ -4,6 +4,7 @@ mod account_credentials;
 mod client_requests;
 pub use client_requests::{ClientRequests, PendingAccountRequest};
 mod message_body;
+mod multi_account;
 mod mutations;
 pub use account_credentials::AccountVersion;
 pub use mutations::MutationClaim;
@@ -29,7 +30,7 @@ use private_dir::PrivateDir;
 use rusqlite::{Connection, MAIN_DB, OpenFlags, OptionalExtension, params};
 use std::{fmt, fs::File, io, path::Path, time::Duration};
 
-const SCHEMA_VERSION: u32 = 10;
+const SCHEMA_VERSION: u32 = 11;
 const APPLICATION_ID: u32 = 0x514d4149;
 const SCHEMA: &str = include_str!("schema.sql");
 const SCHEMA_V2: &str = include_str!("schema-v2.sql");
@@ -317,6 +318,7 @@ impl Store {
         ] {
             tx.execute(sql, [&id.0])?;
         }
+        tx.execute("UPDATE account_options SET is_default=1 WHERE account_id=(SELECT id FROM accounts WHERE kind='remote' ORDER BY id LIMIT 1) AND NOT EXISTS(SELECT 1 FROM account_options WHERE is_default=1)", [])?;
         tx.commit()?;
         for object in objects {
             self.objects.remove(&object);
@@ -462,6 +464,14 @@ impl Store {
 
     /// 已缓存内容的本地搜索；不发网络请求。has_attachments 仅对有正文标记的邮件生效。
     pub fn search(&self, account: &AccountId, query: &SearchQuery) -> Result<Vec<SearchHit>> {
+        self.search_scope(Some(account), query)
+    }
+
+    pub fn search_scope(
+        &self,
+        account: Option<&AccountId>,
+        query: &SearchQuery,
+    ) -> Result<Vec<SearchHit>> {
         if query.text.len() > 512 || query.sender.len() > 320 {
             return Err(Error::Invalid("搜索条件过长"));
         }
@@ -469,21 +479,21 @@ impl Store {
         let text = like(&query.text);
         let sender = like(&query.sender);
         let mut statement = self.connection.prepare(
-            "SELECT m.id,fm.uid,fm.uidvalidity,m.subject,m.sender,m.received_at,fm.seen,fm.flagged,f.remote_name,f.id \
+            "SELECT m.id,fm.uid,fm.uidvalidity,m.subject,m.sender,m.received_at,fm.seen,fm.flagged,f.remote_name,f.id,fm.account_id \
              FROM folder_messages fm \
              JOIN messages m ON m.id=fm.message_id AND m.account_id=fm.account_id \
              JOIN folders f ON f.id=fm.folder_id AND f.account_id=fm.account_id \
-             WHERE fm.account_id=?1 \
+             WHERE (?1 IS NULL OR fm.account_id=?1) \
                AND (?2 IS NULL OR f.remote_name=?2) \
                AND (?3='' OR m.subject LIKE ?4 ESCAPE '\\' OR m.sender LIKE ?4 ESCAPE '\\') \
                AND (?5='' OR m.sender LIKE ?6 ESCAPE '\\') \
                AND (?7=0 OR COALESCE(m.has_attachments,0) > 0) \
-             ORDER BY m.received_at DESC, fm.uid DESC LIMIT 200",
+             ORDER BY m.received_at DESC, fm.account_id DESC, m.id DESC LIMIT 200",
         )?;
         Ok(statement
             .query_map(
                 params![
-                    account.0,
+                    account.map(|id| &id.0),
                     query.folder,
                     query.text,
                     text,
@@ -496,7 +506,7 @@ impl Store {
                         message: CachedMessage {
                             id: MessageId(row.get(0)?),
                             location: MailUid {
-                                account: account.clone(),
+                                account: AccountId(row.get(10)?),
                                 folder_id: row.get(9)?,
                                 uidvalidity: row.get(2)?,
                                 uid: row.get(1)?,
@@ -637,6 +647,9 @@ fn migrate(
     }
     if version < 10 {
         tx.execute_batch(include_str!("schema-v10.sql"))?;
+    }
+    if version < 11 {
+        tx.execute_batch(include_str!("schema-v11.sql"))?;
     }
     tx.pragma_update(None, "application_id", APPLICATION_ID)?;
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;

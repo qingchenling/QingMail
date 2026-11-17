@@ -30,6 +30,96 @@ fn envelope() -> MessageEnvelope {
         received_at: 1794787200,
     }
 }
+
+#[test]
+fn unified_pagination_search_and_preferences_isolate_accounts() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("data");
+    let mut store = Store::open(&path).unwrap();
+    let a = store.create_account(&settings()).unwrap();
+    let b = store.create_account(&settings()).unwrap();
+    assert_eq!(store.default_account().unwrap(), Some(a.clone()));
+    for account in [&a, &b] {
+        let folder = store.upsert_folder(account, "INBOX", 42).unwrap();
+        for uid in 1..=3 {
+            store
+                .cache_message(&location(&folder, uid), &envelope())
+                .unwrap();
+        }
+    }
+    let mut all = vec![];
+    let mut cursor = None;
+    loop {
+        let page = store.unified_inbox(cursor.as_ref(), 2).unwrap();
+        all.extend(page.messages.into_iter().map(|m| m.id.0));
+        cursor = page.next;
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(all.len(), 6);
+    all.sort();
+    all.dedup();
+    assert_eq!(all.len(), 6);
+    let query = SearchQuery {
+        text: "中文".into(),
+        sender: String::new(),
+        folder: None,
+        has_attachments: false,
+    };
+    assert_eq!(store.search_scope(None, &query).unwrap().len(), 6);
+    assert_eq!(store.search(&a, &query).unwrap().len(), 3);
+    store.set_default_account(&b).unwrap();
+    store.pause_account(&a, true).unwrap();
+    assert!(
+        store
+            .set_default_account(&AccountId("missing".into()))
+            .is_err()
+    );
+    drop(store);
+    let store = Store::open(&path).unwrap();
+    assert_eq!(store.default_account().unwrap(), Some(b));
+    assert!(store.account_paused(&a).unwrap());
+    assert!(store.validate_account_commit(None).is_ok());
+}
+
+#[test]
+fn schema10_upgrade_backs_up_and_removing_default_selects_remaining_account() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("data");
+    let mut store = Store::open(&path).unwrap();
+    let a = store.create_account(&settings()).unwrap();
+    let b = store.create_account(&settings()).unwrap();
+    let folder = store.upsert_folder(&a, "INBOX", 42).unwrap();
+    let message = store
+        .cache_message(&location(&folder, 7), &envelope())
+        .unwrap();
+    drop(store);
+    let connection = Connection::open(path.join("state.sqlite3")).unwrap();
+    connection
+        .execute_batch("DROP TRIGGER account_default_options; DROP TABLE account_options; PRAGMA user_version=10;")
+        .unwrap();
+    drop(connection);
+    let mut store = Store::open(&path).unwrap();
+    assert_eq!(
+        store.list_messages(&folder, None, 10).unwrap()[0].id,
+        message
+    );
+    assert!(std::fs::read_dir(&path).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("migration-v10-")
+    }));
+    store.set_default_account(&a).unwrap();
+    store.pause_account(&a, true).unwrap();
+    store.remove_account(&a).unwrap();
+    assert_eq!(store.default_account().unwrap(), Some(b.clone()));
+    store.create_account(&settings()).unwrap();
+    assert_eq!(store.default_account().unwrap(), Some(b));
+    assert!(!store.account_paused(&a).unwrap());
+}
 fn location(folder: &Folder, uid: u32) -> MailUid {
     MailUid {
         account: folder.account.clone(),
