@@ -290,3 +290,270 @@ fn dev_entrypoint_requires_explicit_isolation() {
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("--isolated-root"));
 }
+
+#[test]
+fn frontend_lease_events_and_save_failure_keep_daemon_alive() {
+    let root = private_root();
+    let mut daemon = Daemon::start(root.path());
+    let client = daemon.ready(root.path());
+    let first = "1".repeat(32);
+    let second = "2".repeat(32);
+    assert!(matches!(
+        client
+            .request(Command::AttachUi {
+                session: first.clone()
+            })
+            .unwrap(),
+        Reply::UiAttached { attached: true }
+    ));
+    assert!(matches!(
+        client
+            .request(Command::AttachUi {
+                session: second.clone()
+            })
+            .unwrap(),
+        Reply::UiAttached { attached: false }
+    ));
+    let Reply::UiState {
+        activation: Some(activation),
+        ..
+    } = client
+        .request(Command::UiHeartbeat {
+            session: first.clone(),
+            acknowledged: 0,
+        })
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert!(matches!(activation.target, WindowTarget::Mailbox));
+    assert!(
+        client
+            .request(Command::DetachUi { session: second })
+            .is_err()
+    );
+    let Reply::Snapshot(snapshot) = client.request(Command::Snapshot).unwrap() else {
+        panic!()
+    };
+    client
+        .request(Command::NewDraft {
+            account: None,
+            document: document("退出前保留"),
+        })
+        .unwrap();
+    let Reply::Events(events) = client
+        .request(Command::Events {
+            after: snapshot.revision,
+        })
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert!(!events.resnapshot);
+    assert!(events.revision > snapshot.revision);
+    assert!(
+        events
+            .events
+            .iter()
+            .any(|e| matches!(e.topic, EventTopic::Drafts))
+    );
+    client.request(Command::PrepareShutdown).unwrap();
+    assert!(matches!(
+        client
+            .request(Command::UiHeartbeat {
+                session: first.clone(),
+                acknowledged: activation.sequence
+            })
+            .unwrap(),
+        Reply::UiState {
+            shutdown_requested: true,
+            ..
+        }
+    ));
+    client
+        .request(Command::FinishShutdown {
+            session: first.clone(),
+            saved: false,
+        })
+        .unwrap();
+    assert!(matches!(
+        client.request(Command::Status).unwrap(),
+        Reply::Status(_)
+    ));
+    client
+        .request(Command::DetachUi {
+            session: first.clone(),
+        })
+        .unwrap();
+    // 关闭前台后后台与草稿仍在；重开复用后台，而不是再启动一个数据库写者。
+    assert!(
+        matches!(client.request(Command::Drafts {account:None}).unwrap(),Reply::Drafts(d) if d.len()==1)
+    );
+    client
+        .request(Command::AttachUi {
+            session: first.clone(),
+        })
+        .unwrap();
+    client.request(Command::PrepareShutdown).unwrap();
+    client
+        .request(Command::FinishShutdown {
+            session: first,
+            saved: true,
+        })
+        .unwrap();
+    daemon.exited();
+}
+
+#[test]
+fn binary_resources_roundtrip_without_json_bytes_and_incomplete_upload_never_imports() {
+    let root = private_root();
+    let mut daemon = Daemon::start(root.path());
+    let client = daemon.ready(root.path());
+    let body = "中文🙂\n".repeat(1000);
+    let original = document(&body);
+    let draft = get_draft(
+        client
+            .request(Command::NewDraft {
+                account: None,
+                document: original.clone(),
+            })
+            .unwrap(),
+    );
+    let Reply::OptionalResource(Some(resource)) = client
+        .request(Command::SelectedDraftBody { account: None })
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert!(resource.size > u64::from(MAX_CHUNK_BYTES));
+    let bytes = client.read_resource(&resource, 1024 * 1024).unwrap();
+    assert_eq!(
+        mail_content::draft::Draft::from_json(&bytes).unwrap(),
+        original.body
+    );
+    assert!(client.read_resource(&resource, 1).is_err());
+    let Reply::ResourceCreated(upload) = client
+        .request(Command::CreateUpload {
+            account: draft.account.clone(),
+            name: "测试.bin".into(),
+            media_type: "application/octet-stream".into(),
+            size: 70000,
+        })
+        .unwrap()
+    else {
+        panic!()
+    };
+    let bytes: Vec<_> = (0..70000).map(|n| (n % 256) as u8).collect();
+    client.write_chunk(&upload.id, 0, &bytes[..65536]).unwrap();
+    // 一个新确认请求记录明确失败；资源仍可补全，再由另一个明确确认请求导入。
+    assert!(
+        client
+            .request(Command::FinishUpload {
+                resource: upload.id.clone()
+            })
+            .is_err()
+    );
+    assert!(
+        client
+            .write_chunk(&upload.id, 65536, &vec![0; 5000])
+            .is_err()
+    );
+    client
+        .write_chunk(&upload.id, 65536, &bytes[65536..])
+        .unwrap();
+    let finish = Request::new(
+        "f".repeat(32),
+        Command::FinishUpload {
+            resource: upload.id.clone(),
+        },
+    );
+    let Reply::Attachment(attachment) = client.call(&finish).unwrap() else {
+        panic!()
+    };
+    let Reply::Attachment(replayed) = client.call(&finish).unwrap() else {
+        panic!()
+    };
+    assert_eq!(attachment, replayed);
+    assert_eq!(attachment.size, 70000);
+    assert!(client.write_chunk(&upload.id, 70000, b"x").is_err());
+    let Reply::Attachments(infos) = client
+        .request(Command::AttachmentInfos {
+            account: draft.account,
+            ids: vec![attachment.id.clone()],
+        })
+        .unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(infos, vec![attachment]);
+    client
+        .request(Command::CancelResource {
+            resource: resource.id.clone(),
+        })
+        .unwrap();
+    assert!(client.read_chunk(&resource.id, 0, 1).is_err());
+    client.request(Command::PrepareShutdown).unwrap();
+    daemon.exited();
+}
+
+#[test]
+fn existing_editor_storage_api_works_through_ipc_without_another_database_owner() {
+    use mail_daemon::storage::{StorageWorker, receive};
+    let root = private_root();
+    let mut daemon = Daemon::start(root.path());
+    let client = daemon.ready(root.path());
+    let mut frontend = StorageWorker::connect(client.clone()).unwrap();
+    let saved = receive(
+        frontend
+            .client()
+            .open_editor(mail_content::draft::Draft::plain("前台草稿🙂").unwrap()),
+    )
+    .unwrap();
+    let selected = root.path().join("附件.txt");
+    fs::write(&selected, "附件内容🙂").unwrap();
+    let info = receive(
+        frontend
+            .client()
+            .import_attachment(saved.account.clone(), selected.clone()),
+    )
+    .unwrap();
+    fs::remove_file(&selected).unwrap();
+    let mut document = saved.document.clone();
+    document.attachments.push(info.id.clone());
+    document.headers.subject = "IPC保存".into();
+    let saved = receive(frontend.client().save_document(saved, document)).unwrap();
+    let raw = receive(frontend.client().selected_draft_body(None))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        mail_content::draft::Draft::from_json(&raw).unwrap(),
+        saved.document.body
+    );
+    frontend.stop();
+    assert!(matches!(
+        client.request(Command::Status).unwrap(),
+        Reply::Status(_)
+    ));
+    let mut reopened = StorageWorker::connect(client.clone()).unwrap();
+    assert_eq!(
+        receive(
+            reopened
+                .client()
+                .open_editor(mail_content::draft::Draft::plain("不得覆盖").unwrap())
+        )
+        .unwrap(),
+        saved
+    );
+    assert_eq!(
+        receive(
+            reopened
+                .client()
+                .attachment_infos(saved.account, vec![info.id.clone()])
+        )
+        .unwrap(),
+        vec![info]
+    );
+    reopened.stop();
+    client.request(Command::PrepareShutdown).unwrap();
+    daemon.exited();
+}

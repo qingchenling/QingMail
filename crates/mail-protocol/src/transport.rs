@@ -119,6 +119,100 @@ impl Client {
         }
         response.result.map_err(ClientError::Remote)
     }
+    /// 二进制数据紧接类型化控制响应；不把资源字节放入 JSON。
+    pub fn read_chunk(
+        &self,
+        resource: &str,
+        offset: u64,
+        length: u32,
+    ) -> Result<(crate::ResourceChunk, Vec<u8>), ClientError> {
+        let request = Request::new(
+            request_id()?,
+            Command::ReadResource {
+                resource: resource.into(),
+                offset,
+                length,
+            },
+        );
+        request.validate()?;
+        let mut stream = DeadlineStream::new(UnixStream::connect(checked_socket_path(
+            &self.runtime_root,
+        )?)?)?;
+        write_json(&mut stream, &request)?;
+        let mut reader = BufReader::new(stream);
+        let response: Response = read_json(&mut reader)?;
+        if response.version != PROTOCOL_VERSION || response.id != request.id {
+            return Err(ClientError::MismatchedResponse);
+        }
+        let Reply::Resource(chunk) = response.result.map_err(ClientError::Remote)? else {
+            return Err(ClientError::MismatchedResponse);
+        };
+        if chunk.resource != resource
+            || chunk.offset != offset
+            || chunk.length > length
+            || chunk.total < offset
+            || offset
+                .checked_add(u64::from(chunk.length))
+                .is_none_or(|end| end > chunk.total || chunk.complete != (end == chunk.total))
+            || chunk.length == 0 && !chunk.complete
+        {
+            return Err(ClientError::MismatchedResponse);
+        }
+        let mut bytes = vec![0; chunk.length as usize];
+        reader.read_exact(&mut bytes)?;
+        Ok((chunk, bytes))
+    }
+    pub fn write_chunk(
+        &self,
+        resource: &str,
+        offset: u64,
+        bytes: &[u8],
+    ) -> Result<(), ClientError> {
+        let length = u32::try_from(bytes.len()).map_err(|_| ProtocolError::TooLarge)?;
+        let request = Request::new(
+            request_id()?,
+            Command::WriteResource {
+                resource: resource.into(),
+                offset,
+                length,
+            },
+        );
+        request.validate()?;
+        let mut stream = DeadlineStream::new(UnixStream::connect(checked_socket_path(
+            &self.runtime_root,
+        )?)?)?;
+        write_json(&mut stream, &request)?;
+        stream.write_all(bytes)?;
+        stream.flush()?;
+        let response: Response = read_json(&mut BufReader::new(stream))?;
+        if response.version != PROTOCOL_VERSION || response.id != request.id {
+            return Err(ClientError::MismatchedResponse);
+        }
+        match response.result.map_err(ClientError::Remote)? {
+            Reply::Acknowledged => Ok(()),
+            _ => Err(ClientError::MismatchedResponse),
+        }
+    }
+    /// 调用方指定上限；绝不因对端宣称的 total 无界分配内存。
+    pub fn read_resource(
+        &self,
+        resource: &crate::ResourceRef,
+        max: u64,
+    ) -> Result<Vec<u8>, ClientError> {
+        if resource.size > max {
+            return Err(ProtocolError::TooLarge.into());
+        }
+        let mut bytes = Vec::new();
+        while (bytes.len() as u64) < resource.size {
+            let (chunk, data) =
+                self.read_chunk(&resource.id, bytes.len() as u64, crate::MAX_CHUNK_BYTES)?;
+            if chunk.total != resource.size {
+                return Err(ClientError::MismatchedResponse);
+            }
+            bytes.extend_from_slice(&data);
+        }
+        Ok(bytes)
+    }
 }
 pub fn checked_socket_path(root: &Path) -> io::Result<PathBuf> {
     if !root.is_absolute()

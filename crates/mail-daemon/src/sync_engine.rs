@@ -22,6 +22,8 @@ pub struct SyncEngine {
     status: Arc<Mutex<String>>,
     revision: Arc<AtomicU64>,
     thread: Option<thread::JoinHandle<()>>,
+    requested: Arc<AtomicBool>,
+    enabled: bool,
 }
 impl SyncEngine {
     pub fn start(storage: StorageClient) -> Self {
@@ -33,6 +35,8 @@ impl SyncEngine {
         let paused = Arc::new(AtomicBool::new(!enabled));
         let stop = Arc::new(AtomicBool::new(false));
         let status = Arc::new(Mutex::new("自动收信：等待首次轮询".to_string()));
+        let requested = Arc::new(AtomicBool::new(false));
+        let wake = requested.clone();
         let worker = (
             paused.clone(),
             stop.clone(),
@@ -44,7 +48,7 @@ impl SyncEngine {
             .name("qingmail-sync".into())
             .spawn(move || {
                 let (paused, stop, status, revision, storage) = worker;
-                run(paused, stop.clone(), status, |refresh| {
+                run(paused, stop.clone(), status, wake, |refresh| {
                     poll_once(&storage, refresh, &revision, &stop)
                 });
             })
@@ -55,12 +59,34 @@ impl SyncEngine {
             status,
             revision,
             thread,
+            requested,
+            enabled,
         }
     }
     pub fn stop(&mut self) {
         self.stop.store(true, Ordering::Release);
         if let Some(thread) = self.thread.take() {
+            thread.thread().unpark();
             let _ = thread.join();
+        }
+    }
+    /// 每次前台启动请求一次收信；多个请求合并，始终由同一同步线程执行。
+    /// 不连接 SMTP，也不能让隔离模式绕过禁止联网的设置。
+    pub fn request_sync(&self) -> bool {
+        if !self.enabled {
+            return false;
+        }
+        self.requested.store(true, Ordering::Release);
+        if let Some(thread) = &self.thread {
+            thread.thread().unpark();
+        }
+        true
+    }
+    pub fn set_paused(&self, paused: bool) {
+        self.paused
+            .store(paused || !self.enabled, Ordering::Release);
+        if !paused && self.enabled {
+            self.request_sync();
         }
     }
     pub fn revision(&self) -> u64 {
@@ -70,8 +96,8 @@ impl SyncEngine {
         self.paused.load(Ordering::Acquire)
     }
     pub fn toggle_paused(&self) {
-        let now = !self.paused.load(Ordering::Acquire);
-        self.paused.store(now, Ordering::Release);
+        self.set_paused(!self.paused());
+        let now = self.paused();
         *self.status.lock().unwrap_or_else(|e| e.into_inner()) = if now {
             "自动收信已暂停；可手动同步".into()
         } else {
@@ -95,17 +121,19 @@ fn run(
     paused: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     status: Arc<Mutex<String>>,
+    requested: Arc<AtomicBool>,
     mut poll: impl FnMut(bool) -> Result<usize, String>,
 ) {
     let mut next = Instant::now();
     let mut failures = 0u32;
     let mut cycles = 0usize;
     while !stop.load(Ordering::Acquire) {
-        if Instant::now() < next {
-            thread::sleep(Duration::from_millis(500));
+        let manual = requested.swap(false, Ordering::AcqRel);
+        if !manual && Instant::now() < next {
+            thread::park_timeout(Duration::from_millis(500));
             continue;
         }
-        if paused.load(Ordering::Acquire) {
+        if !manual && paused.load(Ordering::Acquire) {
             next = Instant::now() + Duration::from_secs(2);
             continue;
         }
@@ -220,6 +248,7 @@ mod tests {
                 Arc::new(AtomicBool::new(false)),
                 stop.clone(),
                 status.clone(),
+                Arc::new(AtomicBool::new(false)),
                 |refresh| {
                     assert!(refresh);
                     calls += 1;
@@ -236,6 +265,30 @@ mod tests {
         assert!(refresh_on_cycle(1));
         assert!(!refresh_on_cycle(2));
         assert!(refresh_on_cycle(CATALOG_EVERY));
+    }
+    #[test]
+    fn startup_requests_during_poll_coalesce_and_manual_sync_can_run_while_paused() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let wake = Arc::new(AtomicBool::new(true));
+        let mut calls = 0;
+        run(
+            Arc::new(AtomicBool::new(true)),
+            stop.clone(),
+            Default::default(),
+            wake.clone(),
+            |_| {
+                calls += 1;
+                if calls == 1 {
+                    for _ in 0..20 {
+                        wake.store(true, Ordering::Release);
+                    }
+                } else {
+                    stop.store(true, Ordering::Release);
+                }
+                Ok(0)
+            },
+        );
+        assert_eq!(calls, 2);
     }
     #[test]
     fn plan_includes_unopened_folders_and_skips_containers() {
