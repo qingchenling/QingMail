@@ -50,6 +50,17 @@ impl DraftSync {
                                     ));
                                 }
                                 revision.fetch_add(1, Ordering::Release);
+                            } else if !paused.load(Ordering::Acquire)
+                                && let Ok(Some(refresh)) = receive(store.next_draft_refresh())
+                            {
+                                let _permit =
+                                    crate::network_gate::acquire(&refresh.draft.account, false);
+                                if signal.load(Ordering::Acquire) {
+                                    break;
+                                }
+                                if matches!(refresh_remote(&store, refresh), Ok(true)) {
+                                    revision.fetch_add(1, Ordering::Release);
+                                }
                             } else {
                                 thread::park_timeout(Duration::from_millis(500));
                             }
@@ -235,4 +246,47 @@ fn execute(
             ))
         }
     }
+}
+
+/// 仅检查已知完整定位，不根据最新200条窗口推断删除，也不按Message-ID猜关联。
+fn refresh_remote(
+    store: &StorageClient,
+    refresh: mail_storage::DraftRefresh,
+) -> Result<bool, String> {
+    let account = refresh.draft.account.clone();
+    if matches!(store.control(Command::AccountOptions), Ok(Reply::AccountOptions {paused,..}) if paused.contains(&account))
+    {
+        return Ok(false);
+    }
+    let baseline = refresh.version.clone();
+    let credentials = SystemVault
+        .load(&baseline.credential_key)
+        .map_err(|e| e.to_string())?;
+    let source = &refresh.source;
+    let raw = match mail_service::sync::message(
+        &baseline.settings.imap,
+        &credentials.imap,
+        &source.folder,
+        source.uidvalidity,
+        source.uid,
+    ) {
+        Ok(raw) => Some(raw),
+        Err(
+            mail_service::accounts::CheckError::EpochChanged
+            | mail_service::accounts::CheckError::Protocol,
+        ) => None,
+        Err(e) => {
+            if e == mail_service::accounts::CheckError::Authentication {
+                let _ = store.control(Command::PauseSync {
+                    account: Some(account),
+                    paused: true,
+                });
+            }
+            return Err(e.to_string());
+        }
+    };
+    if receive(store.account_version(account))? != baseline {
+        return Ok(false);
+    }
+    receive(store.observe_draft_remote(refresh, raw))
 }

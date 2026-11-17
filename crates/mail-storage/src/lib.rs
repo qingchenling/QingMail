@@ -3,6 +3,7 @@
 mod account_credentials;
 mod client_requests;
 pub use client_requests::{ClientRequests, PendingAccountRequest};
+mod draft_refresh;
 mod draft_uploads;
 mod message_body;
 mod multi_account;
@@ -11,6 +12,7 @@ mod operations;
 mod parts;
 mod server_drafts;
 pub use account_credentials::AccountVersion;
+pub use draft_refresh::DraftRefresh;
 pub use draft_uploads::{DraftUpload, DraftUploadCandidate};
 pub use mutations::MutationClaim;
 mod objects;

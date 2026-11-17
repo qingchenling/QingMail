@@ -146,6 +146,34 @@ impl Store {
             mail_content::MAX_MESSAGE_BYTES as u64,
         )
     }
+    pub(super) fn server_copy_document(
+        &mut self,
+        account: &AccountId,
+        copy: mail_content::EditableServerCopy,
+    ) -> Result<DraftDocument> {
+        let mut attachments = vec![];
+        for attachment in copy.attachments {
+            attachments.push(
+                self.import_attachment(
+                    account,
+                    &attachment.name,
+                    &attachment.media_type,
+                    &mut attachment.bytes.as_ref(),
+                )?
+                .id,
+            );
+        }
+        Ok(DraftDocument {
+            headers: mail_core::DraftHeaders {
+                subject: copy.subject,
+                to: copy.to,
+                cc: copy.cc,
+                bcc: copy.bcc,
+            },
+            body: copy.body,
+            attachments,
+        })
+    }
     /// 仅由操作者明确选择“转换副本”调用；保存附件、草稿和转换关联在同一savepoint。
     pub fn convert_server_draft(&mut self, account: &AccountId, id: &str) -> Result<StoredDraft> {
         let source = self.server_draft_source(account, id)?;
@@ -158,31 +186,8 @@ impl Store {
         self.connection
             .execute_batch("SAVEPOINT convert_server_draft")?;
         let result = (|| {
-            let mut attachments = vec![];
-            for attachment in copy.attachments {
-                attachments.push(
-                    self.import_attachment(
-                        account,
-                        &attachment.name,
-                        &attachment.media_type,
-                        &mut attachment.bytes.as_ref(),
-                    )?
-                    .id,
-                );
-            }
-            let draft = self.create_draft(
-                account,
-                &DraftDocument {
-                    headers: mail_core::DraftHeaders {
-                        subject: copy.subject,
-                        to: copy.to,
-                        cc: copy.cc,
-                        bcc: copy.bcc,
-                    },
-                    body: copy.body,
-                    attachments,
-                },
-            )?;
+            let document = self.server_copy_document(account, copy)?;
+            let draft = self.create_draft(account, &document)?;
             self.connection.execute("UPDATE server_draft_sources SET converted=?1,baseline_revision=?2 WHERE id=?3 AND account_id=?4 AND converted IS NULL",params![draft.id.0,draft.revision,id,account.0])?;
             self.connection.execute("UPDATE draft_sync SET base_source=?1,base_revision=?2,state='synced',detail='已转换，等待本地编辑' WHERE account_id=?3 AND draft_id=?4", params![id,draft.revision,account.0,draft.id.0])?;
             Ok(draft)
