@@ -1,4 +1,4 @@
-//! 通用账号接入；检查不发送邮件，保存必须由用户明确触发。
+//! 通用账号接入；前台仅暂存密码并传引用，检查/保存复用后台命令；保存由用户明确触发。
 use gpui_kit::{
     App, Bounds, Context, Entity, EntityInputHandler, Render, TitlebarOptions, Window,
     WindowBounds, WindowOptions,
@@ -15,6 +15,12 @@ use mail_service::{
     credentials::{CredentialVault, Credentials, SystemVault},
 };
 
+use mail_protocol::{Command, Request, transport::request_id};
+
+mod flow;
+
+pub(super) type PendingSave = mail_storage::PendingAccountRequest;
+
 const LABELS: [&str; 10] = [
     "账号名称",
     "邮箱地址",
@@ -29,7 +35,7 @@ const LABELS: [&str; 10] = [
 ];
 struct Checked {
     settings: AccountSettings,
-    credentials: Credentials,
+    token: String,
 }
 pub(super) struct Accounts {
     inputs: Vec<Entity<InputState>>,
@@ -38,6 +44,7 @@ pub(super) struct Accounts {
     busy: bool,
     pub(super) saving: bool,
     checked: Option<Checked>,
+    pending: Option<PendingSave>,
     status: String,
     vault: String,
     imap: String,
@@ -93,6 +100,7 @@ impl Accounts {
             busy: false,
             saving: false,
             checked: None,
+            pending: crate::lifecycle::pending_account_save(cx),
             status: "填写邮箱服务商提供的 IMAP / SMTP 配置".into(),
             vault: "尚未检查".into(),
             imap: "尚未检查".into(),
@@ -120,6 +128,9 @@ impl Accounts {
                 })
             })
             .collect();
+        if this.pending.is_some() {
+            this.status = "上次保存结果待确认，请点击“查询保存结果”".into();
+        }
         this.refresh(cx);
         if std::env::args().any(|a| a == "--accounts-probe") {
             cx.spawn_in(window, async move |entity, cx| {
@@ -186,8 +197,7 @@ impl Accounts {
             2 => {
                 self.checked = Some(Checked {
                     settings: self.settings(cx).unwrap(),
-                    credentials: Credentials::new("synthetic-imap".into(), "synthetic-smtp".into())
-                        .unwrap(),
+                    token: "a".repeat(32),
                 });
                 assert!(self.can_save(cx));
                 self.inputs[2].update(cx, |input, cx| {
@@ -241,6 +251,7 @@ impl Accounts {
     }
     fn can_save(&self, cx: &App) -> bool {
         !self.busy
+            && self.pending.is_none()
             && self
                 .checked
                 .as_ref()
@@ -297,7 +308,7 @@ impl Accounts {
         cx.notify();
     }
     fn check(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.busy {
+        if self.busy || self.pending.is_some() {
             return;
         }
         self.checked = None;
@@ -325,34 +336,44 @@ impl Accounts {
         }
         self.busy = true;
         self.status = "正在检查加密连接与认证，请稍候…".into();
+        let backend = crate::lifecycle::account_backend(cx);
+        let account = self.editing.clone();
         let task = cx.background_executor().spawn(async move {
-            let result = accounts::check(&settings, &credentials);
-            (settings, credentials, result)
+            let result = flow::check(
+                &*backend,
+                &SystemVault,
+                account,
+                settings.clone(),
+                credentials,
+            );
+            (settings, result)
         });
         cx.spawn(async move |entity, cx| {
-            let (settings, credentials, result) = task.await;
+            let (settings, result) = task.await;
             let _ = entity.update(cx, |this, cx| {
                 this.busy = false;
-                this.smtp = result
-                    .smtp
-                    .map(|()| "连接与认证通过".into())
-                    .unwrap_or_else(|e| e.to_string());
-                let passed = result.passed();
-                match result.imap {
-                    Ok(folders) => {
-                        this.imap = format!("连接与认证通过 · {} 个文件夹", folders.len());
-                        this.folders = folders;
+                match result {
+                    Ok(result) => {
+                        this.smtp = result
+                            .smtp
+                            .map(|()| "连接与认证通过".into())
+                            .unwrap_or_else(|e| e.message);
+                        match result.imap {
+                            Ok(folders) => {
+                                this.imap = format!("连接与认证通过 · {} 个文件夹", folders.len());
+                                this.folders = folders;
+                            }
+                            Err(e) => this.imap = e.message,
+                        }
+                        if let Some(token) = result.check {
+                            this.checked = Some(Checked { settings, token });
+                            this.status =
+                                "检查通过。确认配置后点击“保存账号”；修改配置需重新检查".into();
+                        } else {
+                            this.status = "未保存账号。请修正配置并重新输入密码后检查".into();
+                        }
                     }
-                    Err(e) => this.imap = e.to_string(),
-                }
-                if passed {
-                    this.checked = Some(Checked {
-                        settings,
-                        credentials,
-                    });
-                    this.status = "检查通过。确认配置后点击“保存账号”；修改配置需重新检查".into();
-                } else {
-                    this.status = "未保存账号。请修正配置并重新输入密码后检查".into();
+                    Err(e) => this.status = format!("连接检查未完成：{e}；请重新输入密码后检查"),
                 }
                 cx.notify();
             });
@@ -362,50 +383,129 @@ impl Accounts {
     }
     fn save(&mut self, cx: &mut Context<Self>) {
         if !self.can_save(cx) {
-            self.status = "配置有变化，请重新输入密码并检查连接".into();
+            self.status = "配置有变化或保存结果待查询，请先检查状态".into();
             cx.notify();
             return;
         }
+        let id = match request_id() {
+            Ok(id) => id,
+            Err(_) => {
+                self.status = "无法生成保存标识，未提交".into();
+                cx.notify();
+                return;
+            }
+        };
         let checked = self.checked.take().expect("checked");
+        let pending = PendingSave {
+            id: id.clone(),
+            updated: self.editing.is_some(),
+        };
+        self.pending = Some(pending.clone());
+        crate::lifecycle::set_pending_account_save(Some(pending), cx);
+        let request = Request::new(
+            id,
+            Command::CommitAccount {
+                check: checked.token,
+                account: self.editing.clone(),
+            },
+        );
+        self.save_result(Some(request), cx);
+    }
+    fn save_result(&mut self, request: Option<Request>, cx: &mut Context<Self>) {
+        if self.busy || self.pending.is_none() {
+            return;
+        }
+        let pending = self.pending.clone().expect("pending save");
+        let backend = crate::lifecycle::account_backend(cx);
+        let journal = crate::lifecycle::account_requests(cx);
         self.busy = true;
         self.saving = true;
-        let editing = self.editing.clone();
-        self.status = "正在保存到系统密钥库与本地账号目录…".into();
-        let storage = crate::lifecycle::storage(cx);
-        if let Some(account) = editing {
-            let reply = storage.update_account(account, checked.settings, checked.credentials);
-            let task = cx
-                .background_executor()
-                .spawn(async move { receive(reply) });
-            cx.spawn(async move |entity, cx| {
-                let result = task.await;
-                let _ = entity.update(cx, |this, cx| this.finish_save(result, true, cx));
-            })
-            .detach();
+        self.status = if request.is_some() {
+            "正在保存账号…"
         } else {
-            let reply = storage.add_account(checked.settings, checked.credentials);
-            let task = cx
-                .background_executor()
-                .spawn(async move { receive(reply).map(|_| ()) });
-            cx.spawn(async move |entity, cx| {
-                let result = task.await;
-                let _ = entity.update(cx, |this, cx| this.finish_save(result, false, cx));
-            })
-            .detach();
+            "正在查询原保存请求，不会重新提交…"
         }
+        .into();
+        let task = cx.background_executor().spawn(async move {
+            if request.is_some()
+                && let Err(e) = journal.remember(&pending)
+            {
+                return flow::SaveResult::Unconfirmed(format!(
+                    "保存标识未确认落盘，未提交账号：{e}"
+                ));
+            }
+            let result = flow::save(&*backend, &pending.id, request);
+            if matches!(result, flow::SaveResult::Finished(_))
+                && let Err(e) = journal.clear(&pending.id)
+            {
+                return flow::SaveResult::Unconfirmed(format!(
+                    "已取得结果，但恢复记录未确认清理：{e}"
+                ));
+            }
+            result
+        });
+        cx.spawn(async move |entity, cx| {
+            let result = task.await;
+            let _ = entity.update(cx, |this, cx| {
+                this.busy = false;
+                this.saving = false;
+                match result {
+                    flow::SaveResult::Finished(result) => {
+                        let updated = this.pending.take().is_some_and(|p| p.updated);
+                        crate::lifecycle::set_pending_account_save(None, cx);
+                        this.status = match result {
+                            Ok(_) if updated => "账号配置与凭据已更新；本地缓存未改动".into(),
+                            Ok(_) => "账号已保存；可在主界面同步邮件".into(),
+                            Err(e) => format!("账号未保存：{}；请重新检查连接", e.message),
+                        };
+                    }
+                    flow::SaveResult::Unconfirmed(note) => {
+                        this.status =
+                            format!("保存结果未确认：{note}。请点击“查询保存结果”，不要重复提交");
+                    }
+                }
+                this.refresh(cx);
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
-    fn finish_save(&mut self, result: Result<(), String>, updated: bool, cx: &mut Context<Self>) {
-        self.busy = false;
-        self.saving = false;
-        self.status = match (result, updated) {
-            (Ok(()), true) => "账号配置与凭据已更新；本地缓存未改动".into(),
-            (Ok(()), false) => "账号已保存，尚未同步邮件。可在左侧展开账号查看状态".into(),
-            (Err(e), _) => format!("保存未确认：{e}。重试前请刷新账号列表"),
+
+    fn finish_query(&mut self, cx: &mut Context<Self>) {
+        if self.busy || crate::lifecycle::account_backend(cx).saving() {
+            return;
+        }
+        let Some(pending) = self.pending.clone() else {
+            return;
         };
-        self.refresh(cx);
+        let journal = crate::lifecycle::account_requests(cx);
+        self.busy = true;
+        self.saving = true;
+        let job = cx
+            .background_executor()
+            .spawn(async move { journal.clear(&pending.id) });
+        cx.spawn(async move |entity, cx| {
+            let result = job.await;
+            let _ = entity.update(cx, |this, cx| {
+                this.busy = false;
+                this.saving = false;
+                match result {
+                    Ok(()) => {
+                        this.pending = None;
+                        this.checked = None;
+                        crate::lifecycle::set_pending_account_save(None, cx);
+                        this.status = "已结束查询；没有重新提交。需修改账号时请重新检查连接".into();
+                    }
+                    Err(e) => this.status = format!("恢复记录未清理，仍保留待查询状态：{e}"),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
+
     fn begin_edit(
         &mut self,
         account: AccountId,
@@ -413,6 +513,9 @@ impl Accounts {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.pending.is_some() {
+            return;
+        }
         self.editing = Some(account.clone());
         self.impact = None;
         self.checked = None;
@@ -439,7 +542,7 @@ impl Accounts {
         cx.notify();
     }
     fn request_remove(&mut self, account: AccountId, cx: &mut Context<Self>) {
-        if self.busy {
+        if self.busy || self.pending.is_some() {
             return;
         }
         if crate::lifecycle::sending(cx).active() {
@@ -471,6 +574,9 @@ impl Accounts {
         cx.notify();
     }
     fn confirm_remove(&mut self, cx: &mut Context<Self>) {
+        if self.pending.is_some() || self.busy {
+            return;
+        }
         let Some((account, _)) = self.impact.take() else {
             return;
         };
@@ -564,7 +670,7 @@ impl Render for Accounts {
                                 MaterialButton::new(("edit-account", index))
                                     .variant(ButtonVariant::Tonal)
                                     .child("编辑配置")
-                                    .disabled(self.busy)
+                                    .disabled(self.busy || self.pending.is_some())
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.begin_edit(
                                             edit_id.clone(),
@@ -577,7 +683,7 @@ impl Render for Accounts {
                             .child(
                                 MaterialButton::new(("remove-account", index))
                                     .child("移除账号")
-                                    .disabled(self.busy)
+                                    .disabled(self.busy || self.pending.is_some())
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.request_remove(remove_id.clone(), cx);
                                     })),
@@ -621,7 +727,7 @@ impl Render for Accounts {
                         .child(if i == 2 { "IMAP 收信" } else { "SMTP 发信" })
                         .child(
                             MaterialButton::new(("tls", index))
-                                .disabled(self.busy)
+                                .disabled(self.busy || self.pending.is_some())
                                 .variant(if security == ConnectionSecurity::Tls {
                                     ButtonVariant::Filled
                                 } else {
@@ -636,7 +742,7 @@ impl Render for Accounts {
                         )
                         .child(
                             MaterialButton::new(("starttls", index))
-                                .disabled(self.busy)
+                                .disabled(self.busy || self.pending.is_some())
                                 .variant(if security == ConnectionSecurity::StartTls {
                                     ButtonVariant::Filled
                                 } else {
@@ -653,7 +759,7 @@ impl Render for Accounts {
             }
             let field = TextField::new(("account-input", i), &self.inputs[i])
                 .label(*label)
-                .disabled(self.busy);
+                .disabled(self.busy || self.pending.is_some());
             form = form.child(if i == 5 || i == 9 {
                 field.input_type(TextFieldInputType::Password)
             } else {
@@ -667,13 +773,13 @@ impl Render for Accounts {
                     .gap_2()
                     .child(
                         MaterialButton::new("check-account")
-                            .disabled(self.busy)
+                            .disabled(self.busy || self.pending.is_some())
                             .child("检查连接")
                             .on_click(cx.listener(|this, _, window, cx| this.check(window, cx))),
                     )
                     .child(
                         MaterialButton::new("check-vault")
-                            .disabled(self.busy)
+                            .disabled(self.busy || self.pending.is_some())
                             .child("检查密钥库")
                             .on_click(cx.listener(|this, _, _, cx| this.vault_status(cx))),
                     )
@@ -688,6 +794,18 @@ impl Render for Accounts {
                             .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
                     ),
             )
+            .when(self.pending.is_some(), |form| form.child(
+                div().flex().flex_col().gap_2()
+                .child("请先刷新并核对账号状态；结束查询不会取消或重新执行原请求。")
+                .child(MaterialButton::new("query-account-save")
+                    .child("查询保存结果")
+                    .disabled(self.busy)
+                    .on_click(cx.listener(|this, _, _, cx| this.save_result(None, cx))))
+                .child(MaterialButton::new("finish-account-query")
+                    .child("已核对账号，结束查询")
+                    .disabled(self.busy || crate::lifecycle::account_backend(cx).saving())
+                    .on_click(cx.listener(|this, _, _, cx| this.finish_query(cx))))
+            ))
             .child(format!("IMAP：{}", self.imap))
             .child(format!("SMTP：{}", self.smtp))
             .child(format!("系统密钥库：{}", self.vault))
