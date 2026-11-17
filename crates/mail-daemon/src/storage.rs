@@ -13,6 +13,7 @@ use std::{
 };
 
 pub type StorageResult<T> = Result<T, String>;
+pub(crate) type RpcStorageResult<T> = StorageResult<Result<T, mail_protocol::RpcError>>;
 pub type CatalogCache = (Vec<mail_core::RemoteFolder>, Option<i64>);
 pub type AccountList = Vec<(AccountId, mail_core::AccountSettings)>;
 
@@ -27,6 +28,35 @@ pub struct StorageWorker {
 }
 
 enum Request {
+    CredentialReferenced {
+        key: AccountId,
+        reply: SyncSender<StorageResult<bool>>,
+    },
+    AccountVersion {
+        account: AccountId,
+        reply: SyncSender<StorageResult<mail_storage::AccountVersion>>,
+    },
+    ClaimMutation {
+        request: Box<mail_protocol::Request>,
+        reply: SyncSender<RpcStorageResult<mail_storage::MutationClaim>>,
+    },
+    FinishMutation {
+        request: Box<mail_protocol::Request>,
+        result: Box<Result<mail_protocol::Reply, mail_protocol::RpcError>>,
+        reply: SyncSender<RpcStorageResult<()>>,
+    },
+    ValidateAccountCommit {
+        baseline: Option<Box<mail_storage::AccountVersion>>,
+        reply: SyncSender<RpcStorageResult<()>>,
+    },
+    CommitAccountCredentials {
+        request: Box<mail_protocol::Request>,
+        account: AccountId,
+        settings: Box<mail_core::AccountSettings>,
+        key: AccountId,
+        baseline: Option<Box<mail_storage::AccountVersion>>,
+        reply: SyncSender<RpcStorageResult<()>>,
+    },
     Rpc {
         request: Box<mail_protocol::Request>,
         reply: SyncSender<StorageResult<mail_protocol::Response>>,
@@ -269,6 +299,64 @@ impl Drop for StorageWorker {
 }
 
 impl StorageClient {
+    pub(crate) fn credential_referenced(
+        &self,
+        key: AccountId,
+    ) -> StorageResult<Receiver<StorageResult<bool>>> {
+        self.request(|reply| Request::CredentialReferenced { key, reply })
+    }
+    pub fn account_version(
+        &self,
+        account: AccountId,
+    ) -> StorageResult<Receiver<StorageResult<mail_storage::AccountVersion>>> {
+        self.request(|reply| Request::AccountVersion { account, reply })
+    }
+    pub(crate) fn claim_mutation(
+        &self,
+        request: mail_protocol::Request,
+    ) -> StorageResult<Receiver<RpcStorageResult<mail_storage::MutationClaim>>> {
+        self.request(|reply| Request::ClaimMutation {
+            request: Box::new(request),
+            reply,
+        })
+    }
+    pub(crate) fn finish_mutation(
+        &self,
+        request: mail_protocol::Request,
+        result: Result<mail_protocol::Reply, mail_protocol::RpcError>,
+    ) -> StorageResult<Receiver<RpcStorageResult<()>>> {
+        self.request(|reply| Request::FinishMutation {
+            request: Box::new(request),
+            result: Box::new(result),
+            reply,
+        })
+    }
+    pub(crate) fn validate_account_commit(
+        &self,
+        baseline: Option<mail_storage::AccountVersion>,
+    ) -> StorageResult<Receiver<RpcStorageResult<()>>> {
+        self.request(|reply| Request::ValidateAccountCommit {
+            baseline: baseline.map(Box::new),
+            reply,
+        })
+    }
+    pub(crate) fn commit_account_credentials(
+        &self,
+        request: mail_protocol::Request,
+        account: AccountId,
+        settings: mail_core::AccountSettings,
+        key: AccountId,
+        baseline: Option<mail_storage::AccountVersion>,
+    ) -> StorageResult<Receiver<RpcStorageResult<()>>> {
+        self.request(|reply| Request::CommitAccountCredentials {
+            request: Box::new(request),
+            account,
+            settings: Box::new(settings),
+            key,
+            baseline: baseline.map(Box::new),
+            reply,
+        })
+    }
     pub fn rpc(
         &self,
         request: mail_protocol::Request,
@@ -764,6 +852,57 @@ fn run(path: Option<PathBuf>, receiver: Receiver<Request>) {
         })();
         let opened = opened.map(|()| store.as_mut().expect("opened"));
         match request {
+            Request::CredentialReferenced { key, reply } => {
+                let _ =
+                    reply
+                        .send(opened.and_then(|s| {
+                            s.credential_referenced(&key).map_err(|e| e.to_string())
+                        }));
+            }
+            Request::AccountVersion { account, reply } => {
+                let _ = reply.send(
+                    opened.and_then(|s| s.account_version(&account).map_err(|e| e.to_string())),
+                );
+            }
+            Request::ClaimMutation { request, reply } => {
+                let _ = reply
+                    .send(opened.map(|s| s.claim_mutation(&request).map_err(rpc::storage_error)));
+            }
+            Request::FinishMutation {
+                request,
+                result,
+                reply,
+            } => {
+                let _ = reply.send(opened.map(|s| {
+                    s.finish_mutation(&request, &result)
+                        .map_err(rpc::storage_error)
+                }));
+            }
+            Request::ValidateAccountCommit { baseline, reply } => {
+                let _ = reply.send(opened.map(|s| {
+                    s.validate_account_commit(baseline.as_deref())
+                        .map_err(rpc::storage_error)
+                }));
+            }
+            Request::CommitAccountCredentials {
+                request,
+                account,
+                settings,
+                key,
+                baseline,
+                reply,
+            } => {
+                let _ = reply.send(opened.map(|s| {
+                    s.commit_account_credentials(
+                        Some(&request),
+                        &account,
+                        &settings,
+                        &key,
+                        baseline.as_deref(),
+                    )
+                    .map_err(rpc::storage_error)
+                }));
+            }
             Request::Rpc { request, reply } => {
                 let _ = reply.send(opened.map(|store| rpc::dispatch(store, *request)));
             }
@@ -960,27 +1099,28 @@ fn run(path: Option<PathBuf>, receiver: Receiver<Request>) {
                 reply,
             } => {
                 let _ = reply.send(opened.and_then(|s| {
-                    if s.account(&account).map_err(|e| e.to_string())?.is_none() {
-                        return Err("账号不存在或不是远端账号".into());
-                    }
-                    mail_service::credentials::SystemVault
-                        .save(&account, &credentials)
-                        .map_err(|e| format!("凭据未更新：{e}"))?;
-                    s.update_account(&account, &settings).map_err(|e| {
-                        format!("凭据已更新，但连接配置保存失败：{e}；请重试或移除账号")
-                    })
+                    persist_update_account(
+                        s,
+                        &mail_service::credentials::SystemVault,
+                        &account,
+                        &settings,
+                        &credentials,
+                    )
                 }));
             }
             Request::RemoveAccount { account, reply } => {
                 let _ = reply.send(opened.and_then(|s| {
+                    let keys = s.credential_keys(&account).map_err(|e| e.to_string())?;
                     let impact = s.remove_account(&account).map_err(|e| e.to_string())?;
-                    mail_service::credentials::SystemVault
-                        .delete(&account)
-                        .map_err(|e| {
-                            format!(
-                                "账号已从本地移除，但密钥库条目可能仍在（{e}）；不会自动全盘扫描"
-                            )
-                        })?;
+                    let mut failed = false;
+                    for key in keys {
+                        failed |= mail_service::credentials::SystemVault.delete(&key).is_err();
+                    }
+                    if failed {
+                        return Err(
+                            "账号已从本地移除，但部分密钥库凭据版本可能仍在，请检查密钥库".into(),
+                        );
+                    }
                     Ok(impact)
                 }));
             }
@@ -1639,6 +1779,41 @@ mod failure_tests {
     }
 }
 
+fn persist_update_account(
+    store: &mut Store,
+    vault: &impl mail_service::credentials::CredentialVault,
+    account: &AccountId,
+    settings: &mail_core::AccountSettings,
+    credentials: &mail_service::credentials::Credentials,
+) -> StorageResult<()> {
+    mail_service::accounts::validate(settings).map_err(|e| e.to_string())?;
+    let baseline = store.account_version(account).map_err(|e| e.to_string())?;
+    let key = loop {
+        let key = AccountId(mail_protocol::transport::request_id().map_err(|e| e.to_string())?);
+        if &key != account
+            && !store
+                .credential_referenced(&key)
+                .map_err(|e| e.to_string())?
+        {
+            break key;
+        }
+    };
+    vault
+        .save(&key, credentials)
+        .map_err(|e| format!("新凭据未确认保存：{e}；旧配置与旧凭据未更改"))?;
+    if let Err(e) = store.commit_account_credentials(None, account, settings, &key, Some(&baseline))
+    {
+        // 只有确认新键不是活动版本才清理；不删除旧键，也不猜测失败的提交结果。
+        match store.account_version(account) {
+            Ok(current) if current.credential_key != key => {
+                let _ = vault.delete(&key);
+                return Err(format!("账号更新失败，旧配置与凭据已保留：{e}"));
+            }
+            _ => return Err("账号更新结果不确定，凭据版本已保留，请刷新后检查".into()),
+        }
+    }
+    Ok(())
+}
 fn persist_account(
     store: &mut Store,
     vault: &impl mail_service::credentials::CredentialVault,
@@ -1723,6 +1898,57 @@ mod account_tests {
             imap: server.clone(),
             smtp: server,
         }
+    }
+    #[test]
+    fn legacy_update_switches_versions_and_database_failure_never_overwrites_old_key() {
+        use std::cell::RefCell;
+        struct TrackingVault {
+            saves: RefCell<Vec<AccountId>>,
+            deletes: RefCell<Vec<AccountId>>,
+        }
+        impl CredentialVault for TrackingVault {
+            fn status(&self) -> Result<(), VaultError> {
+                Ok(())
+            }
+            fn save(&self, key: &AccountId, _: &Credentials) -> Result<(), VaultError> {
+                self.saves.borrow_mut().push(key.clone());
+                Ok(())
+            }
+            fn load(&self, _: &AccountId) -> Result<Credentials, VaultError> {
+                Err(VaultError::Missing)
+            }
+            fn delete(&self, key: &AccountId) -> Result<(), VaultError> {
+                self.deletes.borrow_mut().push(key.clone());
+                Ok(())
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data");
+        let mut store = Store::open(&data).unwrap();
+        let account = store.create_account(&settings()).unwrap();
+        let baseline = store.account_version(&account).unwrap();
+        let vault = TrackingVault {
+            saves: RefCell::new(vec![]),
+            deletes: RefCell::new(vec![]),
+        };
+        let credentials = Credentials::new("imap".into(), "smtp".into()).unwrap();
+        let conn = rusqlite::Connection::open(data.join("state.sqlite3")).unwrap();
+        conn.execute_batch("CREATE TRIGGER fail_switch BEFORE INSERT ON account_credentials BEGIN SELECT RAISE(ABORT,'disk failure'); END;").unwrap();
+        let mut changed = settings();
+        changed.imap.host = "changed.example.test".into();
+        assert!(
+            persist_update_account(&mut store, &vault, &account, &changed, &credentials).is_err()
+        );
+        assert_eq!(store.account_version(&account).unwrap(), baseline);
+        assert_ne!(vault.saves.borrow()[0], account);
+        assert_eq!(*vault.deletes.borrow(), *vault.saves.borrow());
+        conn.execute_batch("DROP TRIGGER fail_switch;").unwrap();
+        persist_update_account(&mut store, &vault, &account, &changed, &credentials).unwrap();
+        let current = store.account_version(&account).unwrap();
+        assert_eq!(current.settings, changed);
+        assert_eq!(current.credential_key, vault.saves.borrow()[1]);
+        assert!(store.credential_keys(&account).unwrap().contains(&account));
+        assert!(!vault.deletes.borrow().contains(&account));
     }
     #[test]
     fn unavailable_locked_and_unknown_vault_results_never_insert_account() {

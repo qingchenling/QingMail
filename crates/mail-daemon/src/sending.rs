@@ -219,7 +219,9 @@ fn dispatch(
     copy: impl FnOnce(&ServerSettings, &str, &str, &[u8], Option<&str>) -> sent::CopyResult,
 ) -> StorageResult<SendTask> {
     // 取密钥先于建立任务；密钥库不可用时草稿仍可编辑且无未提交任务。
-    let credentials = vault.load(&review.account).map_err(|e| e.to_string())?;
+    let credentials = vault
+        .load(&receive(store.account_version(review.account.clone()))?.credential_key)
+        .map_err(|e| e.to_string())?;
     let ready = receive(store.begin_send(review, allow_empty_subject))?;
     run_submission(
         &store,
@@ -239,7 +241,9 @@ fn retry_copy_once(
     task: SendTaskId,
     copy: impl FnOnce(&ServerSettings, &str, &str, &[u8], Option<&str>) -> sent::CopyResult,
 ) -> StorageResult<SendTask> {
-    let credentials = vault.load(&account).map_err(|e| e.to_string())?;
+    let credentials = vault
+        .load(&receive(store.account_version(account.clone()))?.credential_key)
+        .map_err(|e| e.to_string())?;
     save_copy(&store, &account, &task, credentials.imap.as_str(), copy)
 }
 
@@ -257,7 +261,9 @@ fn resend_once(
     copy: impl FnOnce(&ServerSettings, &str, &str, &[u8], Option<&str>) -> sent::CopyResult,
 ) -> StorageResult<SendTask> {
     // 先取密钥：密钥库不可用时连新任务都不创建。
-    let credentials = vault.load(&account).map_err(|e| e.to_string())?;
+    let credentials = vault
+        .load(&receive(store.account_version(account.clone()))?.credential_key)
+        .map_err(|e| e.to_string())?;
     let (next, snapshot, server) = receive(store.resend(account.clone(), previous))?;
     let message = match outgoing::prepare(&snapshot, true) {
         Ok(message) => message,

@@ -287,6 +287,11 @@ impl Command {
                 Err(ProtocolError::Invalid)
             }
             Self::AccountCheckStatus { task } if !valid_id(task) => Err(ProtocolError::Invalid),
+            Self::CommitAccount { check, account }
+                if !valid_id(check) || account.as_ref().is_some_and(|id| !valid_id(&id.0)) =>
+            {
+                Err(ProtocolError::Invalid)
+            }
             Self::AttachmentInfos { ids, .. } if ids.len() > 32 => Err(ProtocolError::Invalid),
             Self::CreateUpload { name, size, .. }
                 if *size > 25 * 1024 * 1024

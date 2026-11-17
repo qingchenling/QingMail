@@ -11,7 +11,7 @@ fn error(code: ErrorCode, message: impl Into<String>) -> RpcError {
         message: message.into(),
     }
 }
-fn storage_error(e: mail_storage::Error) -> RpcError {
+pub(super) fn storage_error(e: mail_storage::Error) -> RpcError {
     match e {
         mail_storage::Error::Conflict => error(ErrorCode::Conflict, e.to_string()),
         _ => error(ErrorCode::Storage, e.to_string()),

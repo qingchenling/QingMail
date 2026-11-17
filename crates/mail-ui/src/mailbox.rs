@@ -505,16 +505,21 @@ impl Mailbox {
         if self.busy {
             return;
         }
-        let Some((id, settings)) = self.account.clone() else {
+        let Some((id, _)) = self.account.clone() else {
             return;
         };
         self.busy = true;
         self.status = "正在获取服务器文件夹…".into();
+        let store = self.store.clone();
         let task = cx.background_executor().spawn(async move {
             let _guard = NETWORK
                 .try_lock()
                 .map_err(|_| "另一个同步检查仍在结束，请稍后重试".to_owned())?;
-            let credentials = SystemVault.load(&id).map_err(|e| e.to_string())?;
+            let access = receive(store.account_version(id.clone()))?;
+            let settings = access.settings;
+            let credentials = SystemVault
+                .load(&access.credential_key)
+                .map_err(|e| e.to_string())?;
             sync::folders(&settings.imap, &credentials.imap).map_err(|e| e.to_string())
         });
         cx.spawn(async move |entity, cx| {
@@ -576,7 +581,7 @@ impl Mailbox {
         if self.busy {
             return;
         }
-        let Some((id, settings)) = self.account.clone() else {
+        let Some((id, _)) = self.account.clone() else {
             return;
         };
         let Some(name) = self.selected_folder.clone() else {
@@ -596,11 +601,16 @@ impl Mailbox {
         let expected_epoch = self.cache.as_ref().map(|cache| cache.folder.uidvalidity);
         self.busy = true;
         self.status = "正在只读检查文件夹并获取最近90天的邮件头…".into();
+        let store = self.store.clone();
         let task = cx.background_executor().spawn(async move {
             let _guard = NETWORK
                 .try_lock()
                 .map_err(|_| "另一个同步检查仍在结束，请稍后重试".to_owned())?;
-            let credentials = SystemVault.load(&id).map_err(|e| e.to_string())?;
+            let access = receive(store.account_version(id.clone()))?;
+            let settings = access.settings;
+            let credentials = SystemVault
+                .load(&access.credential_key)
+                .map_err(|e| e.to_string())?;
             sync::folder(
                 &settings.imap,
                 &credentials.imap,
@@ -712,7 +722,11 @@ impl Mailbox {
                     let _guard = NETWORK
                         .try_lock()
                         .map_err(|_| "另一个网络请求仍在结束，请稍后重试".to_owned())?;
-                    let credentials = SystemVault.load(&account).map_err(|e| e.to_string())?;
+                    let access = receive(store.account_version(account.clone()))?;
+                    let settings = access.settings;
+                    let credentials = SystemVault
+                        .load(&access.credential_key)
+                        .map_err(|e| e.to_string())?;
                     let raw = sync::message(
                         &settings.imap,
                         &credentials.imap,
@@ -879,7 +893,7 @@ impl Mailbox {
             cx.notify();
             return;
         }
-        let Some((account, settings)) = self.account.clone() else {
+        let Some((account, _)) = self.account.clone() else {
             return;
         };
         let Some(name) = self.selected_folder.clone() else {
@@ -910,7 +924,11 @@ impl Mailbox {
         let store = self.store.clone();
         let uids = targets.clone();
         let task = cx.background_executor().spawn(async move {
-            let credentials = SystemVault.load(&account).map_err(|e| e.to_string())?;
+            let access = receive(store.account_version(account.clone()))?;
+            let settings = access.settings;
+            let credentials = SystemVault
+                .load(&access.credential_key)
+                .map_err(|e| e.to_string())?;
             actions::store_flags(
                 &settings.imap,
                 &credentials.imap,
@@ -969,7 +987,7 @@ impl Mailbox {
             cx.notify();
             return;
         }
-        let Some((account, settings)) = self.account.clone() else {
+        let Some((account, _)) = self.account.clone() else {
             return;
         };
         let Some(name) = self.selected_folder.clone() else {
@@ -1003,7 +1021,11 @@ impl Mailbox {
         let store = self.store.clone();
         let uids = targets.clone();
         let task = cx.background_executor().spawn(async move {
-            let credentials = SystemVault.load(&account).map_err(|e| e.to_string())?;
+            let access = receive(store.account_version(account.clone()))?;
+            let settings = access.settings;
+            let credentials = SystemVault
+                .load(&access.credential_key)
+                .map_err(|e| e.to_string())?;
             let outcome = actions::move_messages(
                 &settings.imap,
                 &credentials.imap,
@@ -1048,7 +1070,7 @@ impl Mailbox {
         if self.busy {
             return;
         }
-        let Some((account, settings)) = self.account.clone() else {
+        let Some((account, _)) = self.account.clone() else {
             return;
         };
         let Some(name) = self.selected_folder.clone() else {
@@ -1066,7 +1088,11 @@ impl Mailbox {
         self.status = "正在加载最近90天之前的历史…".into();
         let store = self.store.clone();
         let task = cx.background_executor().spawn(async move {
-            let credentials = SystemVault.load(&account).map_err(|e| e.to_string())?;
+            let access = receive(store.account_version(account.clone()))?;
+            let settings = access.settings;
+            let credentials = SystemVault
+                .load(&access.credential_key)
+                .map_err(|e| e.to_string())?;
             let batch = sync::history(
                 &settings.imap,
                 &credentials.imap,

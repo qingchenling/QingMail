@@ -1,6 +1,7 @@
 //! P0–P2 进程内后台及 P3 独立后台基础。
 //! 旧激活通道仅用于现有 GUI；P3 IPC v1 服务位于 ipc 模块，按能力列表逐步接入。
 pub mod account_checks;
+mod account_commits;
 mod instance;
 pub mod ipc;
 pub mod sending;

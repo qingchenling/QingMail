@@ -170,11 +170,13 @@ fn poll_once(
     stop: &AtomicBool,
 ) -> Result<usize, String> {
     let accounts = receive(storage.accounts())?;
-    let Some((account, settings)) = accounts.into_iter().next() else {
+    let Some((account, _)) = accounts.into_iter().next() else {
         return Ok(0);
     };
+    let access = receive(storage.account_version(account.clone()))?;
+    let settings = access.settings;
     let credentials = SystemVault
-        .load(&account)
+        .load(&access.credential_key)
         .map_err(|error| error.to_string())?;
     let (mut catalog, _) = receive(storage.catalog(account.clone()))?;
     if refresh_catalog || catalog.is_empty() {
