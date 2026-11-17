@@ -1,0 +1,18 @@
+{
+  "passed": true,
+  "synthetic_only": true,
+  "schema": 8,
+  "sends": 0,
+  "screenshots": [],
+  "checks": [
+    "default cached INBOX",
+    "click directly reads MIME",
+    "rapid selection shows latest only",
+    "folder switch rejects stale body",
+    "search result directly reads",
+    "clear search restores selected reading",
+    "page change clears previous body",
+    "light/dark/narrow native render"
+  ],
+  "boundary": "Application entity integration and native rendering; does not assert real mailbox or pointer interaction."
+}
