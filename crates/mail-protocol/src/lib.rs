@@ -1,5 +1,6 @@
 //! QingMail IPC v1：有界 NDJSON 控制帧；资源数据通过单独连接的二进制帧传输。
 mod domain;
+pub mod transport;
 mod wire;
 pub use domain::*;
 use mail_content::draft::Draft;

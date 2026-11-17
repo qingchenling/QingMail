@@ -21,6 +21,7 @@ pub struct SyncEngine {
     stop: Arc<AtomicBool>,
     status: Arc<Mutex<String>>,
     revision: Arc<AtomicU64>,
+    thread: Option<thread::JoinHandle<()>>,
 }
 impl SyncEngine {
     pub fn start(storage: StorageClient) -> Self {
@@ -39,19 +40,27 @@ impl SyncEngine {
             revision.clone(),
             storage,
         );
-        let _ = thread::Builder::new()
+        let thread = thread::Builder::new()
             .name("qingmail-sync".into())
             .spawn(move || {
                 let (paused, stop, status, revision, storage) = worker;
                 run(paused, stop.clone(), status, |refresh| {
                     poll_once(&storage, refresh, &revision, &stop)
                 });
-            });
+            })
+            .ok();
         Self {
             paused,
             stop,
             status,
             revision,
+            thread,
+        }
+    }
+    pub fn stop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
         }
     }
     pub fn revision(&self) -> u64 {
@@ -78,7 +87,7 @@ impl SyncEngine {
 }
 impl Drop for SyncEngine {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::Release);
+        self.stop();
     }
 }
 

@@ -1,8 +1,11 @@
 //! 进程内事件驱动的存储线程；SQLite 连接仅在此线程建立和使用。
+#[path = "rpc_storage.rs"]
+mod rpc;
 use mail_content::draft::Draft;
 use mail_core::{AccountId, DraftHeaders};
 use mail_service::credentials::CredentialVault as _;
 use mail_storage::{AppPaths, DraftDocument, Store, StoredDraft};
+pub(crate) use rpc::COMMANDS as RPC_COMMANDS;
 use std::{
     path::PathBuf,
     sync::mpsc::{self, Receiver, SyncSender},
@@ -24,6 +27,10 @@ pub struct StorageWorker {
 }
 
 enum Request {
+    Rpc {
+        request: Box<mail_protocol::Request>,
+        reply: SyncSender<StorageResult<mail_protocol::Response>>,
+    },
     Open {
         account: Option<AccountId>,
         initial: Draft,
@@ -262,6 +269,15 @@ impl Drop for StorageWorker {
 }
 
 impl StorageClient {
+    pub fn rpc(
+        &self,
+        request: mail_protocol::Request,
+    ) -> StorageResult<Receiver<StorageResult<mail_protocol::Response>>> {
+        self.request(|reply| Request::Rpc {
+            request: Box::new(request),
+            reply,
+        })
+    }
     fn request<T>(
         &self,
         build: impl FnOnce(SyncSender<StorageResult<T>>) -> Request,
@@ -748,6 +764,9 @@ fn run(path: Option<PathBuf>, receiver: Receiver<Request>) {
         })();
         let opened = opened.map(|()| store.as_mut().expect("opened"));
         match request {
+            Request::Rpc { request, reply } => {
+                let _ = reply.send(opened.map(|store| rpc::dispatch(store, *request)));
+            }
             Request::Open {
                 account,
                 initial,

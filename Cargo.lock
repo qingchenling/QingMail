@@ -3954,6 +3954,7 @@ dependencies = [
  "mail-service",
  "mail-storage",
  "rustix",
+ "serde_json",
  "tempfile",
  "zbus 5.19.0",
 ]
@@ -3975,8 +3976,10 @@ dependencies = [
 name = "mail-protocol"
 version = "0.1.0"
 dependencies = [
+ "getrandom 0.4.3",
  "mail-content",
  "mail-core",
+ "rustix",
  "serde",
  "serde_json",
 ]
