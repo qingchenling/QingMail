@@ -241,7 +241,7 @@ mod tests {
         store
             .connection
             .execute_batch(
-                "DROP TABLE part_resources; DROP TABLE message_structures; PRAGMA user_version=12;",
+                "DROP TABLE server_draft_sources; DROP TABLE server_draft_folders; DROP TABLE part_resources; DROP TABLE message_structures; PRAGMA user_version=12;",
             )
             .unwrap();
         drop(store);

@@ -260,6 +260,14 @@ impl Mailbox {
                         .on_click(|_, _, cx| crate::operations::open(cx)),
                     )
                     .child(
+                        quiet("mailbox-server-drafts", "服务器草稿")
+                            .icon(icon("drafts"))
+                            .w_full()
+                            .shape(ButtonShape::Square)
+                            .rounded_none()
+                            .on_click(|_, _, cx| crate::server_drafts::open(cx)),
+                    )
+                    .child(
                         quiet("mailbox-settings", "设置")
                             .icon(icon("settings"))
                             .w_full()

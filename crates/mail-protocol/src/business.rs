@@ -3,6 +3,19 @@ use crate::*;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum BusinessOperation {
+    ReadServerDraft {
+        account: AccountId,
+        source: String,
+    },
+    ScanServerDrafts {
+        account: AccountId,
+    },
+    ImportServerDraft {
+        account: AccountId,
+        folder: String,
+        uidvalidity: u32,
+        uid: u32,
+    },
     RefreshCatalog {
         account: AccountId,
     },
@@ -55,11 +68,27 @@ impl BusinessOperation {
     }
     pub fn validate(&self) -> Result<(), ProtocolError> {
         match self {
+            Self::ReadServerDraft { source, .. } if !valid_id(source) => {
+                Err(ProtocolError::Invalid)
+            }
             Self::Flags { epoch, uids, .. } | Self::Move { epoch, uids, .. }
                 if *epoch == 0
                     || uids.is_empty()
                     || uids.len() > MAX_BATCH
                     || uids.contains(&0) =>
+            {
+                Err(ProtocolError::Invalid)
+            }
+            Self::ImportServerDraft {
+                folder,
+                uidvalidity,
+                uid,
+                ..
+            } if folder.is_empty()
+                || folder.len() > 4096
+                || folder.chars().any(char::is_control)
+                || *uidvalidity == 0
+                || *uid == 0 =>
             {
                 Err(ProtocolError::Invalid)
             }

@@ -271,6 +271,13 @@ pub enum Command {
         folder: String,
         before: Option<u32>,
     },
+    ServerDrafts {
+        account: AccountId,
+    },
+    ConvertServerDraft {
+        account: AccountId,
+        source: String,
+    },
     DraftConflicts {
         account: Option<AccountId>,
     },
@@ -350,6 +357,16 @@ impl Command {
             Self::CommitAccount { check, account }
                 if !valid_id(check) || account.as_ref().is_some_and(|id| !valid_id(&id.0)) =>
             {
+                Err(ProtocolError::Invalid)
+            }
+            Self::DraftSyncFolder { folder, .. }
+                if folder.is_empty()
+                    || folder.len() > 4096
+                    || folder.chars().any(char::is_control) =>
+            {
+                Err(ProtocolError::Invalid)
+            }
+            Self::ConvertServerDraft { source, .. } if !valid_id(source) => {
                 Err(ProtocolError::Invalid)
             }
             Self::AttachmentInfos { ids, .. } if ids.len() > 32 => Err(ProtocolError::Invalid),
@@ -549,6 +566,8 @@ pub enum CommandName {
     AccountCheckStatus,
     SetDefaultAccount,
     SyncHistory,
+    ServerDrafts,
+    ConvertServerDraft,
     DraftConflicts,
     CommitAccount,
     AccountImpact,
@@ -608,6 +627,8 @@ impl Command {
             Self::JobResult { .. } => CommandName::JobResult,
             Self::SetDefaultAccount { .. } => CommandName::SetDefaultAccount,
             Self::SyncHistory { .. } => CommandName::SyncHistory,
+            Self::ServerDrafts { .. } => CommandName::ServerDrafts,
+            Self::ConvertServerDraft { .. } => CommandName::ConvertServerDraft,
             Self::DraftConflicts { .. } => CommandName::DraftConflicts,
             Self::Hello => CommandName::Hello,
             Self::Status => CommandName::Status,
@@ -757,6 +778,18 @@ pub enum Reply {
     /// 冻结快照的展示/导出资源，不传携带附件字节的 OutgoingSnapshot。
     TaskResource(ResourceRef),
     Operations(Vec<OperationInfo>),
+    ServerDrafts {
+        folder: Option<String>,
+        items: Vec<ServerDraftSource>,
+    },
+    ServerDraftIndex {
+        folder: Option<String>,
+        uidvalidity: u32,
+        uids: Vec<u32>,
+        has_more: bool,
+        choices: Vec<RemoteFolder>,
+    },
+    ServerDraftSource(ServerDraftSource),
     DraftConflicts(Vec<DraftConflict>),
     Cache(CacheInfo),
     BrowserCopy {
