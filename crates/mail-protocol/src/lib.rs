@@ -1,5 +1,7 @@
 //! QingMail IPC v1：有界 NDJSON 控制帧；资源数据通过单独连接的二进制帧传输。
+mod business;
 mod domain;
+pub use business::*;
 pub mod transport;
 mod wire;
 pub use domain::*;
@@ -9,6 +11,7 @@ use serde::{Deserialize, Serialize};
 pub use wire::*;
 
 pub const PROTOCOL_VERSION: u32 = 1;
+pub const MAX_STORAGE_PAYLOAD: u64 = 16 * 1024 * 1024;
 pub const MAX_CONTROL_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_CHUNK_BYTES: u32 = 64 * 1024;
 pub const MAX_PAGE: u32 = 200;
@@ -50,6 +53,26 @@ impl Request {
     deny_unknown_fields
 )]
 pub enum Command {
+    CreateStorageRequest {
+        size: u64,
+    },
+    StorageRequest {
+        resource: String,
+    },
+    DraftPage {
+        account: Option<AccountId>,
+        after: Option<String>,
+    },
+    TaskPage {
+        account: AccountId,
+        after: Option<String>,
+    },
+    Business {
+        operation: BusinessOperation,
+    },
+    JobResult {
+        task: String,
+    },
     Hello,
     Status,
     Activate {
@@ -265,6 +288,18 @@ pub enum Command {
 impl Command {
     fn validate(&self) -> Result<(), ProtocolError> {
         match self {
+            Self::CreateStorageRequest { size } if *size == 0 || *size > MAX_STORAGE_PAYLOAD => {
+                Err(ProtocolError::Invalid)
+            }
+            Self::DraftPage {
+                after: Some(after), ..
+            }
+            | Self::TaskPage {
+                after: Some(after), ..
+            } if after.len() > 128 => Err(ProtocolError::Invalid),
+            Self::StorageRequest { resource } if !valid_id(resource) => Err(ProtocolError::Invalid),
+            Self::Business { operation } => operation.validate(),
+            Self::JobResult { task } if !valid_id(task) => Err(ProtocolError::Invalid),
             Self::AttachUi { session }
             | Self::DetachUi { session }
             | Self::UiHeartbeat { session, .. }
@@ -449,6 +484,7 @@ pub struct DaemonStatus {
     pub sync_paused: bool,
     pub sync_status: String,
     pub sending: bool,
+    pub account_saving: bool,
     pub tray_status: String,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -471,6 +507,12 @@ pub fn valid_id(id: &str) -> bool {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CommandName {
+    CreateStorageRequest,
+    StorageRequest,
+    DraftPage,
+    TaskPage,
+    Business,
+    JobResult,
     Hello,
     Status,
     Activate,
@@ -537,6 +579,12 @@ pub enum CommandName {
 impl Command {
     pub fn name(&self) -> CommandName {
         match self {
+            Self::CreateStorageRequest { .. } => CommandName::CreateStorageRequest,
+            Self::StorageRequest { .. } => CommandName::StorageRequest,
+            Self::DraftPage { .. } => CommandName::DraftPage,
+            Self::TaskPage { .. } => CommandName::TaskPage,
+            Self::Business { .. } => CommandName::Business,
+            Self::JobResult { .. } => CommandName::JobResult,
             Self::SetDefaultAccount { .. } => CommandName::SetDefaultAccount,
             Self::SyncHistory { .. } => CommandName::SyncHistory,
             Self::DraftConflicts { .. } => CommandName::DraftConflicts,
@@ -612,6 +660,30 @@ impl Command {
     deny_unknown_fields
 )]
 pub enum Reply {
+    Encoded(ResourceRef),
+    DraftPage {
+        items: Vec<StoredDraft>,
+        next: Option<String>,
+    },
+    TaskPage {
+        items: Vec<SendTask>,
+        next: Option<String>,
+    },
+    Pending {
+        task: String,
+    },
+    Job {
+        result: Option<Box<Result<Reply, RpcError>>>,
+    },
+    History {
+        count: u64,
+        has_more: bool,
+    },
+    Moved {
+        count: u64,
+        copied_only: bool,
+        destination: String,
+    },
     Hello {
         commands: Vec<CommandName>,
         epoch: String,
@@ -730,7 +802,7 @@ pub enum ResourceState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MessageView {
-    pub location: MailUid,
+    pub location: Option<MailUid>,
     pub subject: String,
     pub sender: String,
     pub from: Vec<String>,

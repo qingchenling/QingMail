@@ -1,7 +1,7 @@
 //! IPC 幂等记录与业务操作分离：先可靠取得执行权，完成结果落盘后才应答。
 //! 发生进程中断时保留不确定记录，不能以“没有最终响应”推断可重新执行。
 use crate::{Error, Result, Store};
-use mail_protocol::{MAX_CONTROL_BYTES, MutationStatus, Reply, Request, RpcError, valid_id};
+use mail_protocol::{MAX_STORAGE_PAYLOAD, MutationStatus, Reply, Request, RpcError, valid_id};
 use rusqlite::{OptionalExtension, params};
 use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -89,8 +89,8 @@ pub(super) fn finish_on(
 ) -> Result<()> {
     let fingerprint = fingerprint(request)?;
     let encoded = serde_json::to_string(result).map_err(|_| Error::Invalid("IPC 结果无法编码"))?;
-    if encoded.len() > MAX_CONTROL_BYTES - 256 {
-        return Err(Error::Invalid("IPC 结果超过控制帧限制"));
+    if encoded.len() as u64 > MAX_STORAGE_PAYLOAD - 256 {
+        return Err(Error::Invalid("IPC 持久结果超过资源上限"));
     }
     let updated = connection.execute(
         "UPDATE mutation_results SET state='finished',result=?1 WHERE request_id=?2 AND fingerprint=?3 AND state='in_progress'",

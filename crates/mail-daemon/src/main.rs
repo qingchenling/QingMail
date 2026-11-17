@@ -1,4 +1,4 @@
-//! P3 独立后台开发入口。生产 GUI 切换完成前只允许显式隔离数据运行。
+//! P3 独立后台入口，支持正式运行与禁止邮件网络的隔离验证。
 use mail_daemon::ipc::{Config, Server};
 use mail_protocol::{Command, Reply, transport::Client};
 use std::{io, path::PathBuf};
@@ -12,14 +12,16 @@ fn run() -> io::Result<()> {
     let mut args = std::env::args_os().skip(1);
     let mut root = None;
     let mut control = None;
+    let mut production = false;
     while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--help" | "-h") => {
                 println!(
-                    "QingMail P3 独立后台开发入口\n用法：mail-daemon --isolated-root <绝对目录> [--status|--quit]\n此阶段仅支持隔离运行，不读取正式账号、不联网、不发送邮件。正常应用仍使用 mail-ui。"
+                    "QingMail P3 独立后台\n用法：mail-daemon --isolated-root <绝对目录> [--status|--quit]\n正式运行：mail-daemon --production；通常由 mail-ui 自动启动。隔离运行不读取正式账号、不联网、不发送邮件。"
                 );
                 return Ok(());
             }
+            Some("--production") if !production => production = true,
             Some("--isolated-root") if root.is_none() => root = args.next().map(PathBuf::from),
             Some("--status") if control.is_none() => control = Some(Command::Status),
             Some("--quit") if control.is_none() => control = Some(Command::PrepareShutdown),
@@ -31,13 +33,15 @@ fn run() -> io::Result<()> {
             }
         }
     }
-    let root = root.ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "当前开发入口必须指定 --isolated-root；未打开正式数据",
-        )
-    })?;
-    let config = Config::isolated(root)?;
+    let config = match (root, production) {
+        (Some(root), false) => Config::isolated(root)?,
+        (None, true) => Config::production()?,
+        _ => {
+            return Err(io::Error::other(
+                "须选择 --production 或 --isolated-root，不能混用",
+            ));
+        }
+    };
     if let Some(command) = control {
         match Client::new(config.runtime_root)
             .request(command)

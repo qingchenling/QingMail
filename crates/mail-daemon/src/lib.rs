@@ -3,8 +3,10 @@
 pub mod account_checks;
 mod account_commits;
 pub mod account_gateway;
+pub mod client;
 mod instance;
 pub mod ipc;
+pub mod launcher;
 pub mod sending;
 pub mod storage;
 pub mod sync_engine;

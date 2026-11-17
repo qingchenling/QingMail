@@ -28,6 +28,16 @@ impl Endpoint for Client {
         })
     }
 }
+impl Endpoint for crate::lifecycle::AccountBackend {
+    fn call(&self, request: Request) -> Result<Reply, Failure> {
+        match self {
+            crate::lifecycle::AccountBackend::Local(backend) => {
+                backend.call(request).map_err(Failure::Remote)
+            }
+            crate::lifecycle::AccountBackend::Remote(client, _) => Endpoint::call(client, request),
+        }
+    }
+}
 fn message(error: Failure) -> String {
     match error {
         Failure::Remote(e) => e.message,

@@ -557,3 +557,250 @@ fn existing_editor_storage_api_works_through_ipc_without_another_database_owner(
     client.request(Command::PrepareShutdown).unwrap();
     daemon.exited();
 }
+
+#[test]
+fn business_cached_reader_resource_cleanup_identity_and_removal_replay() {
+    use mail_core::*;
+    let root = private_root();
+    let location = {
+        let mut store = mail_storage::Store::open(&root.path().join("data")).unwrap();
+        let server = ServerSettings {
+            host: "example.invalid".into(),
+            port: 993,
+            username: "synthetic".into(),
+            security: ConnectionSecurity::Tls,
+        };
+        let account = store
+            .create_account(&AccountSettings {
+                display_name: "IPC reader".into(),
+                address: "reader@example.invalid".into(),
+                imap: server.clone(),
+                smtp: server,
+            })
+            .unwrap();
+        let folder = store.upsert_folder(&account, "INBOX", 42).unwrap();
+        let location = MailUid {
+            account,
+            folder_id: folder.id.0,
+            uidvalidity: 42,
+            uid: 7,
+        };
+        store
+            .cache_message(
+                &location,
+                &MessageEnvelope {
+                    subject: "cached".into(),
+                    sender: "synthetic".into(),
+                    received_at: 0,
+                },
+            )
+            .unwrap();
+        store
+            .save_message_body(
+                &location,
+                include_bytes!("../../../tests/fixtures/mime/03-alternative-related.eml"),
+            )
+            .unwrap();
+        location
+    };
+    let mut daemon = Daemon::start(root.path());
+    let client = daemon.ready(root.path());
+    let Reply::Snapshot(before_read) = client.request(Command::Snapshot).unwrap() else {
+        panic!()
+    };
+    let content = mail_daemon::client::content(
+        &client,
+        BusinessOperation::Read {
+            location: location.clone(),
+            folder: "INBOX".into(),
+        },
+    )
+    .unwrap();
+    let Reply::Snapshot(after_read) = client.request(Command::Snapshot).unwrap() else {
+        panic!()
+    };
+    assert_eq!(
+        before_read.revision, after_read.revision,
+        "read resources must not trigger mailbox reload loops"
+    );
+    assert!(content.is_html);
+    assert!(!content.images.is_empty());
+    assert!(!content.attachments.is_empty());
+    let handle = content.display_handle.unwrap();
+    // Materialization releases binary transport IDs, but the bounded display handle remains usable.
+    assert!(client.read_chunk(&handle, 0, 1).is_err());
+    let copy = mail_daemon::client::run(
+        &client,
+        BusinessOperation::BrowserCopy {
+            content: handle.clone(),
+        },
+    )
+    .unwrap();
+    assert!(
+        matches!(copy,Reply::BrowserCopy {url,..} if url.starts_with("file://") && url.ends_with(".html"))
+    );
+    assert!(
+        mail_daemon::client::content(&client, BusinessOperation::RemoteImages { content: handle })
+            .err()
+            .unwrap()
+            .contains("隔离模式")
+    );
+    assert!(
+        mail_daemon::client::run(
+            &client,
+            BusinessOperation::Read {
+                location: location.clone(),
+                folder: "OTHER".into()
+            }
+        )
+        .unwrap_err()
+        .contains("定位")
+    );
+    let mut stale = location.clone();
+    stale.uidvalidity += 1;
+    assert!(
+        mail_daemon::client::run(
+            &client,
+            BusinessOperation::Read {
+                location: stale,
+                folder: "INBOX".into()
+            }
+        )
+        .is_err()
+    );
+    // More than the result-ring capacity must not exhaust normal reading indefinitely.
+    for _ in 0..70 {
+        mail_daemon::client::run(&client, BusinessOperation::ClearCopies).unwrap();
+    }
+    let request = Request::new(
+        "9".repeat(32),
+        Command::Business {
+            operation: BusinessOperation::RemoveAccount {
+                account: location.account.clone(),
+            },
+        },
+    );
+    assert!(matches!(
+        client.call(&request).unwrap(),
+        Reply::Pending { .. }
+    ));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Reply::Job {
+            result: Some(result),
+        } = client
+            .request(Command::JobResult {
+                task: request.id.clone(),
+            })
+            .unwrap()
+        {
+            assert!(result.is_ok());
+            break;
+        }
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    client.request(Command::PrepareShutdown).unwrap();
+    daemon.exited();
+    let mut daemon = Daemon::start(root.path());
+    let client = daemon.ready(root.path());
+    // Repeating the original ID returns its durable result, never removes a newly selected account.
+    assert!(matches!(
+        client.call(&request).unwrap(),
+        Reply::AccountImpact(_)
+    ));
+    assert!(
+        matches!(client.request(Command::Accounts).unwrap(),Reply::Accounts(v) if v.is_empty())
+    );
+    client.request(Command::PrepareShutdown).unwrap();
+    daemon.exited();
+}
+
+#[test]
+fn large_draft_chunked_write_lost_response_query_and_keyset_pages() {
+    let root = private_root();
+    let mut daemon = Daemon::start(root.path());
+    let client = daemon.ready(root.path());
+    let body = "x".repeat(mail_content::draft::MAX_TEXT);
+    let mut large_document = document(&body);
+    large_document
+        .body
+        .set_link(
+            0..body.len(),
+            Some("https://example.invalid/large-rich-text-link"),
+        )
+        .unwrap();
+    let request = Request::new(
+        "8".repeat(32),
+        Command::NewDraft {
+            account: None,
+            document: large_document,
+        },
+    );
+    assert!(serde_json::to_vec(&request).unwrap().len() > MAX_CONTROL_BYTES);
+    let draft = get_draft(client.call(&request).unwrap());
+    assert_eq!(draft.document.body.text(), body);
+    assert_eq!(get_draft(client.call(&request).unwrap()), draft);
+    assert!(
+        matches!(client.request(Command::MutationResult{mutation:request.id.clone()}).unwrap(),Reply::Mutation(MutationStatus::Finished(result)) if matches!(&*result,Ok(Reply::Draft(d)) if d==&draft))
+    );
+    let second = get_draft(
+        client
+            .request(Command::NewDraft {
+                account: None,
+                document: document("second"),
+            })
+            .unwrap(),
+    );
+    let mut after = None;
+    let mut ids = vec![];
+    loop {
+        let Reply::DraftPage { items, next } = client
+            .request(Command::DraftPage {
+                account: None,
+                after,
+            })
+            .unwrap()
+        else {
+            panic!()
+        };
+        assert_eq!(items.len(), 1);
+        ids.push(items[0].id.clone());
+        if next.is_none() {
+            break;
+        }
+        after = next;
+    }
+    assert_eq!(ids.len(), 2);
+    assert!(ids.contains(&draft.id) && ids.contains(&second.id));
+    // The existing editor API receives the same complete list through paginated IPC.
+    let remote = mail_daemon::storage::StorageWorker::connect(client.clone()).unwrap();
+    let listed = mail_daemon::storage::receive(remote.client().list()).unwrap();
+    assert_eq!(listed.len(), 2);
+    drop(remote);
+    // Binary storage envelopes cannot smuggle a network/recursive command.
+    let inner = Request::new("7".repeat(32), Command::PrepareShutdown);
+    let bytes = serde_json::to_vec(&inner).unwrap();
+    let Reply::ResourceCreated(resource) = client
+        .request(Command::CreateStorageRequest {
+            size: bytes.len() as u64,
+        })
+        .unwrap()
+    else {
+        panic!()
+    };
+    client.write_chunk(&resource.id, 0, &bytes).unwrap();
+    assert!(
+        client
+            .call(&Request::new(
+                inner.id,
+                Command::StorageRequest {
+                    resource: resource.id
+                }
+            ))
+            .is_err()
+    );
+    assert!(client.request(Command::Status).is_ok());
+    client.request(Command::PrepareShutdown).unwrap();
+    daemon.exited();
+}

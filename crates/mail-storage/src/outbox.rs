@@ -267,6 +267,23 @@ impl Store {
         Ok(())
     }
 
+    /// IPC keyset page; never collects every draft body in the database.
+    pub fn draft_ids_page(&self, account: &AccountId, after: Option<&str>) -> Result<Vec<DraftId>> {
+        let mut query = self.connection.prepare("SELECT id FROM drafts WHERE account_id=?1 AND (?2 IS NULL OR id>?2) ORDER BY id LIMIT 2")?;
+        Ok(query
+            .query_map(params![account.0, after], |r| Ok(DraftId(r.get(0)?)))?
+            .collect::<std::result::Result<_, _>>()?)
+    }
+    pub fn task_ids_page(
+        &self,
+        account: &AccountId,
+        after: Option<&str>,
+    ) -> Result<Vec<SendTaskId>> {
+        let mut query = self.connection.prepare("SELECT id FROM send_tasks WHERE account_id=?1 AND (?2 IS NULL OR id>?2) ORDER BY id LIMIT 33")?;
+        Ok(query
+            .query_map(params![account.0, after], |r| Ok(SendTaskId(r.get(0)?)))?
+            .collect::<std::result::Result<_, _>>()?)
+    }
     pub fn draft_ids(&self, account: &AccountId) -> Result<Vec<DraftId>> {
         let mut query = self
             .connection

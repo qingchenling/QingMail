@@ -57,6 +57,9 @@ impl Sessions {
             self.events.pop_front();
         }
     }
+    pub fn closing(&self) -> bool {
+        self.shutdown
+    }
     pub fn revision(&self) -> u64 {
         self.revision
     }

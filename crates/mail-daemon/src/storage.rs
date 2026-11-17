@@ -17,6 +17,7 @@ use std::{
 pub type StorageResult<T> = Result<T, String>;
 pub(crate) type RpcStorageResult<T> = StorageResult<Result<T, mail_protocol::RpcError>>;
 pub type CatalogCache = (Vec<mail_core::RemoteFolder>, Option<i64>);
+pub type RemovedAccount = (mail_storage::AccountImpact, Vec<AccountId>);
 pub type AccountList = Vec<(AccountId, mail_core::AccountSettings)>;
 
 #[derive(Clone)]
@@ -31,6 +32,10 @@ pub struct StorageWorker {
 }
 
 enum Request {
+    RemoveLocal {
+        account: AccountId,
+        reply: SyncSender<StorageResult<(mail_storage::AccountImpact, Vec<AccountId>)>>,
+    },
     CredentialReferenced {
         key: AccountId,
         reply: SyncSender<StorageResult<bool>>,
@@ -318,6 +323,16 @@ impl Drop for StorageWorker {
 }
 
 impl StorageClient {
+    pub(crate) fn remove_local(
+        &self,
+        account: AccountId,
+    ) -> StorageResult<Receiver<StorageResult<RemovedAccount>>> {
+        self.request(|reply| Request::RemoveLocal { account, reply })
+    }
+    pub fn ipc_client(&self) -> Option<mail_protocol::transport::Client> {
+        self.remote.clone()
+    }
+
     pub(crate) fn import_bytes(
         &self,
         account: AccountId,
@@ -1174,6 +1189,13 @@ fn run(path: Option<PathBuf>, receiver: Receiver<Request>) {
                         &settings,
                         &credentials,
                     )
+                }));
+            }
+            Request::RemoveLocal { account, reply } => {
+                let _ = reply.send(opened.and_then(|s| {
+                    let keys = s.credential_keys(&account).map_err(|e| e.to_string())?;
+                    let impact = s.remove_account(&account).map_err(|e| e.to_string())?;
+                    Ok((impact, keys))
                 }));
             }
             Request::RemoveAccount { account, reply } => {

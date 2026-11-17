@@ -28,11 +28,11 @@ impl Item {
     }
     #[zbus(property)]
     fn id(&self) -> &str {
-        "qingmail-p0"
+        "qingmail"
     }
     #[zbus(property)]
     fn title(&self) -> &str {
-        "QingMail · P0 合成后台"
+        "QingMail"
     }
     #[zbus(property)]
     fn status(&self) -> &str {

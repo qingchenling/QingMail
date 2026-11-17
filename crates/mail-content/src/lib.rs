@@ -55,6 +55,8 @@ pub struct InlineImage {
 
 #[derive(Clone, Debug)]
 pub struct MailContent {
+    /// 仅供前台回传给后台的受控内容句柄，非路径或URL。
+    pub display_handle: Option<String>,
     pub raw: Arc<[u8]>,
     pub subject: String,
     pub sender: String,
@@ -82,6 +84,7 @@ pub fn parse(raw: &[u8]) -> Result<MailContent, ContentError> {
         return Err(ContentError("邮件超过 8 MiB 的原型解析上限".into()));
     }
     let mut result = MailContent {
+        display_handle: None,
         raw: Arc::from(raw),
         subject: "（无主题）".into(),
         sender: "（未知发件人）".into(),
@@ -289,7 +292,7 @@ impl MailContent {
     }
 }
 
-pub(crate) fn validate_image(
+pub fn validate_image(
     bytes: &[u8],
     media_type: &str,
     key: String,
@@ -476,6 +479,13 @@ impl MailContent {
         }
         draft
     }
+}
+
+/// 安全副本由后台创建后，生成正确转义的本地URL。
+pub fn file_url(path: &std::path::Path) -> Result<String, ContentError> {
+    url::Url::from_file_path(path)
+        .map(|u| u.to_string())
+        .map_err(|_| ContentError("副本路径无效".into()))
 }
 
 #[cfg(test)]

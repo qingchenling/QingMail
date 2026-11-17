@@ -679,6 +679,12 @@ impl Composer {
         }
         match step {
             0 => {
+                if std::env::var_os("QINGMAIL_IPC_TEST_EDITOR").is_some() {
+                    let root = std::env::var_os("QINGMAIL_IPC_ROOT").unwrap();
+                    if !std::path::Path::new(&root).join("edit-trigger").exists() {
+                        return false;
+                    }
+                }
                 if std::env::args().any(|arg| arg == "--lifecycle-failure-probe") {
                     let root = std::env::var_os("QINGMAIL_P0_DRAFT_ROOT").unwrap();
                     if !std::path::Path::new(&root).join("trigger").exists() {
