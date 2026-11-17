@@ -5,6 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+mail-protocol = { workspace = true }
 mail-core = { workspace = true }
 mail-content = { workspace = true }
 serde_json = { workspace = true }

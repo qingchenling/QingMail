@@ -3939,6 +3939,9 @@ dependencies = [
 [[package]]
 name = "mail-core"
 version = "0.1.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "mail-daemon"
@@ -3971,6 +3974,12 @@ dependencies = [
 [[package]]
 name = "mail-protocol"
 version = "0.1.0"
+dependencies = [
+ "mail-content",
+ "mail-core",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "mail-service"
@@ -4001,6 +4010,7 @@ dependencies = [
  "getrandom 0.4.3",
  "mail-content",
  "mail-core",
+ "mail-protocol",
  "rusqlite",
  "rustix",
  "serde_json",

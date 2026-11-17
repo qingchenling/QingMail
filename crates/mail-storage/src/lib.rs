@@ -13,30 +13,7 @@ mod private_dir;
 
 pub use paths::AppPaths;
 
-/// 本地搜索条件；只查询已缓存索引，不访问网络。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct SearchQuery {
-    pub text: String,
-    pub sender: String,
-    pub has_attachments: bool,
-    /// None 表示整个账号范围；Some 限定一个远端文件夹名。
-    pub folder: Option<String>,
-}
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SearchHit {
-    pub message: CachedMessage,
-    pub folder: String,
-}
-
-/// 本地移除账号前的影响统计；不含远端邮件。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct AccountImpact {
-    pub cached_messages: u64,
-    pub drafts: u64,
-    pub tasks: u64,
-    pub pending_tasks: u64,
-    pub object_bytes: u64,
-}
+pub use mail_protocol::{AccountImpact, SearchHit, SearchQuery};
 
 use mail_core::{
     AccountId, AccountSettings, CachedMessage, ConnectionSecurity, Folder, FolderId, MailUid,

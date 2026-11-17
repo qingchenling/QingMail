@@ -17,44 +17,7 @@ use crate::{
 pub const MAX_ATTACHMENT_BYTES: u64 = 25 * 1024 * 1024;
 const MAX_ATTACHMENTS: usize = 32;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DraftDocument {
-    pub headers: DraftHeaders,
-    pub body: Draft,
-    pub attachments: Vec<AttachmentId>,
-}
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StoredDraft {
-    pub id: DraftId,
-    pub account: AccountId,
-    pub revision: u32,
-    pub document: DraftDocument,
-}
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SendTask {
-    pub id: SendTaskId,
-    pub account: AccountId,
-    pub source_draft: DraftId,
-    pub source_revision: u32,
-    pub sender: String,
-    /// 冻结的收件人与主题；主题在 `recipients.subject`，不另存一份。
-    pub recipients: DraftHeaders,
-    pub created_at: i64,
-    pub state: SendState,
-    /// 固定诊断代码，不接受包含密码或服务器原始响应的错误字符串。
-    pub detail: String,
-    pub resend_of: Option<SendTaskId>,
-    /// 只有副本确认保存或查重命中后才存在；不表示允许重发。
-    pub copy: Option<SentCopy>,
-}
-/// 已保存副本的服务器位置。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SentCopy {
-    pub folder: String,
-    pub uidvalidity: u32,
-    /// 服务器未提供 APPENDUID 时为 None。
-    pub uid: Option<u32>,
-}
+pub use mail_protocol::{DraftDocument, SendTask, SentCopy, StoredDraft};
 /// 副本保存结果；Failed/Uncertain 都保持 CopyPending，只能重试副本。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CopyOutcome {
