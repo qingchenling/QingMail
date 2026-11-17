@@ -1,6 +1,7 @@
 //! 本地索引与 P3 IPC 幂等记录：后台单写者、XDG 路径、事务迁移和 IMAP 定位隔离。
 //! 不保存密码/令牌；草稿与发送快照使用不可变对象和事务关联。
 mod account_credentials;
+mod cache;
 mod client_requests;
 pub use client_requests::{ClientRequests, PendingAccountRequest};
 mod draft_reconcile;
@@ -38,7 +39,7 @@ use private_dir::PrivateDir;
 use rusqlite::{Connection, MAIN_DB, OpenFlags, OptionalExtension, params};
 use std::{fmt, fs::File, io, path::Path, time::Duration};
 
-const SCHEMA_VERSION: u32 = 16;
+const SCHEMA_VERSION: u32 = 17;
 const APPLICATION_ID: u32 = 0x514d4149;
 const SCHEMA: &str = include_str!("schema.sql");
 const SCHEMA_V2: &str = include_str!("schema-v2.sql");
@@ -137,12 +138,15 @@ impl Store {
         outbox::recover_interrupted(&mut connection)?;
         mutations::recover(&connection)?;
         operations::recover(&connection)?;
-        Ok(Self {
+        let mut store = Self {
             objects,
             connection,
             _writer: writer,
             _directory: directory,
-        })
+        };
+        store.recover_cache_files()?;
+        store.trim_cache(false)?;
+        Ok(store)
     }
 
     /// 本地草稿空间不含可用服务器或凭据；account()/accounts() 不暴露为真实账号。
@@ -683,6 +687,9 @@ fn migrate(
     }
     if version < 16 {
         tx.execute_batch(include_str!("schema-v16.sql"))?;
+    }
+    if version < 17 {
+        tx.execute_batch(include_str!("schema-v17.sql"))?;
     }
     tx.pragma_update(None, "application_id", APPLICATION_ID)?;
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;

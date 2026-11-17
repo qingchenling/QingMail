@@ -245,6 +245,33 @@ mod tests {
         a
     }
     #[test]
+    fn cache_clear_preserves_server_original_and_editable_copy() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&root.path().join("data")).unwrap();
+        let account = setup(&mut store);
+        store.set_server_draft_folder(&account, "Drafts").unwrap();
+        let raw = b"Subject: protected original\r\n\r\nhello";
+        let original = store
+            .archive_server_draft(&account, "Drafts", 42, 7, raw)
+            .unwrap();
+        let draft = store.convert_server_draft(&account, &original.id).unwrap();
+        store.set_cache_budget(0).unwrap();
+        store.clear_cache().unwrap();
+        assert_eq!(
+            store.server_draft_original(&account, &original.id).unwrap(),
+            raw
+        );
+        assert_eq!(
+            store
+                .draft(&account, &draft.id)
+                .unwrap()
+                .document
+                .body
+                .text(),
+            "hello"
+        );
+    }
+    #[test]
     fn folder_ambiguity_and_account_scoped_immutable_originals_survive_restart() {
         let root = tempfile::tempdir().unwrap();
         let data = root.path().join("data");
@@ -363,7 +390,7 @@ mod tests {
                 },
             )
             .unwrap();
-        s.connection.execute_batch("DROP TRIGGER stop_sent_draft_sync; DROP TRIGGER track_draft_scan_account; DROP TABLE draft_conflicts; DROP TABLE draft_scan_failures; DROP TABLE draft_scans; DROP TRIGGER track_server_draft_insert; DROP TRIGGER track_server_draft_update; DROP TABLE draft_uploads; DROP TABLE draft_sync; DROP TABLE server_draft_sources; DROP TABLE server_draft_folders; PRAGMA user_version=13;").unwrap();
+        s.connection.execute_batch("DROP VIEW protected_objects; DROP TRIGGER cache_body_insert; DROP TRIGGER cache_part_insert; DROP TABLE cache_access; DROP TABLE cache_settings; DROP TRIGGER stop_sent_draft_sync; DROP TRIGGER track_draft_scan_account; DROP TABLE draft_conflicts; DROP TABLE draft_scan_failures; DROP TABLE draft_scans; DROP TRIGGER track_server_draft_insert; DROP TRIGGER track_server_draft_update; DROP TABLE draft_uploads; DROP TABLE draft_sync; DROP TABLE server_draft_sources; DROP TABLE server_draft_folders; PRAGMA user_version=13;").unwrap();
         drop(s);
         let s = Store::open(&data).unwrap();
         assert_eq!(s.draft(&a, &draft.id).unwrap(), draft);
@@ -371,7 +398,7 @@ mod tests {
             s.connection
                 .pragma_query_value(None, "user_version", |r| r.get::<_, u32>(0))
                 .unwrap(),
-            16
+            17
         );
         assert!(std::fs::read_dir(&data).unwrap().any(|p| {
             p.unwrap()

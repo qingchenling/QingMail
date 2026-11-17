@@ -787,8 +787,10 @@ impl Service {
                         | Command::SaveDraft { .. }
                         | Command::DiscardSelectedDraft { .. }
                         | Command::StopUncertain { .. }
+                        | Command::SetCacheBudget { .. }
+                        | Command::ClearCache
                 );
-                let response = self
+                let mut response = self
                     .storage
                     .rpc(request)
                     .map_err(|e| rpc_error(ErrorCode::Busy, e))?
@@ -797,6 +799,13 @@ impl Service {
                         rpc_error(ErrorCode::Uncertain, "后台请求未确认，请查询原请求结果")
                     })?
                     .map_err(|e| rpc_error(ErrorCode::Storage, e))?;
+                if let Ok(Reply::Cache(info)) = &mut response.result {
+                    info.downloading_bytes = self
+                        .resources
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .downloading_bytes();
+                }
                 if changes && response.result.is_ok() {
                     self.revision.fetch_add(1, Ordering::Release);
                 }

@@ -1,0 +1,32 @@
+{
+  "smtp_commands": 0,
+  "real": true,
+  "accounts": [
+    {
+      "account_number": 1,
+      "checks": [
+        "real credential access and folder listing",
+        "INBOX server synchronization",
+        "selected message sanitized reading resources",
+        "server Drafts discovery",
+        "new local draft APPEND and independent IMAP re-fetch verified",
+        "send tasks unchanged"
+      ],
+      "indexed_messages": 59,
+      "draft_folder_selected": true,
+      "test_draft_label": "QingMail P3-007 compatibility 63a243c2",
+      "test_draft_id": "5aa280f19bd14507421b81a20c6ccf59",
+      "draft_synced": true,
+      "passed": true,
+      "recovered_original_request_without_reappend": true
+    }
+  ],
+  "passed": true,
+  "dual_account_passed": false,
+  "configured_accounts": 1,
+  "limits": [
+    "No SMTP or mail flag/move/delete command invoked",
+    "Test drafts intentionally retained",
+    "Independent second-client editing/conflicts require separate compatibility acceptance"
+  ]
+}

@@ -217,7 +217,13 @@ fn execute(
         &upload.raw,
         probe_only,
     ) {
-        Ok(UploadResult::Verified { uidvalidity, uid }) => {
+        Ok(UploadResult::Verified {
+            uidvalidity,
+            uid,
+            raw,
+        }) => {
+            let mut upload = upload;
+            upload.raw = raw;
             if receive(store.account_version(account.clone())).map_err(pending)? != baseline {
                 return Err((
                     "uncertain",

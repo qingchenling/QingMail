@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# 单邮箱测试包：release 程序、启动脚本、说明、构建信息与 SHA256。
+# P3 多账号测试包：release 程序、启动脚本、说明、构建信息与 SHA256。
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-version="0.1.0-p3-002-test1"
+version="0.1.0-p3-test1"
 out="$root/dist/qingmail-$version"
 archive="$out.tar.gz"
 

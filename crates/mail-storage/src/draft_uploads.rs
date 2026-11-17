@@ -370,7 +370,7 @@ mod tests {
             .archive_server_draft(&a, "Drafts", 42, 7, b"Subject: remote\r\n\r\ncontent")
             .unwrap();
         let draft = s.convert_server_draft(&a, &source.id).unwrap();
-        s.connection.execute_batch("DROP TRIGGER stop_sent_draft_sync; DROP TRIGGER track_draft_scan_account; DROP TABLE draft_conflicts; DROP TABLE draft_scan_failures; DROP TABLE draft_scans; DROP TRIGGER track_server_draft_insert; DROP TRIGGER track_server_draft_update; DROP TABLE draft_uploads; DROP TABLE draft_sync; PRAGMA user_version=14;").unwrap();
+        s.connection.execute_batch("DROP VIEW protected_objects; DROP TRIGGER cache_body_insert; DROP TRIGGER cache_part_insert; DROP TABLE cache_access; DROP TABLE cache_settings; DROP TRIGGER stop_sent_draft_sync; DROP TRIGGER track_draft_scan_account; DROP TABLE draft_conflicts; DROP TABLE draft_scan_failures; DROP TABLE draft_scans; DROP TRIGGER track_server_draft_insert; DROP TRIGGER track_server_draft_update; DROP TABLE draft_uploads; DROP TABLE draft_sync; PRAGMA user_version=14;").unwrap();
         drop(s);
         let mut s = Store::open(&data).unwrap();
         let status = s.draft_sync_status(&a).unwrap();

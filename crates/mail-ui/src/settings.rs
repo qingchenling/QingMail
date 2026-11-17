@@ -132,7 +132,7 @@ pub(crate) fn open(cx: &mut App) {
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
             None,
-            size(px(560.), px(420.)),
+            size(px(720.), px(700.)),
             cx,
         ))),
         titlebar: Some(TitlebarOptions {
@@ -147,10 +147,53 @@ pub(crate) fn open(cx: &mut App) {
     }
 }
 
-struct Settings;
+struct Settings {
+    store: mail_daemon::storage::StorageClient,
+    cache: Option<mail_protocol::CacheInfo>,
+    busy: bool,
+    confirm_clear: bool,
+    status: String,
+}
 impl Settings {
-    fn new(_cx: &mut Context<Self>) -> Self {
-        Self
+    fn new(cx: &mut Context<Self>) -> Self {
+        let mut this = Self {
+            store: crate::lifecycle::storage(cx),
+            cache: None,
+            busy: false,
+            confirm_clear: false,
+            status: String::new(),
+        };
+        this.cache_command(mail_protocol::Command::CacheStatus, cx);
+        this
+    }
+    fn cache_command(&mut self, command: mail_protocol::Command, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        self.busy = true;
+        self.confirm_clear = false;
+        self.status = "正在更新缓存…".into();
+        let store = self.store.clone();
+        let task = cx
+            .background_executor()
+            .spawn(async move { store.control(command) });
+        cx.spawn(async move |entity, cx| {
+            let result = task.await;
+            let _ = entity.update(cx, |this, cx| {
+                this.busy = false;
+                match result {
+                    Ok(mail_protocol::Reply::Cache(info)) => {
+                        this.cache = Some(info);
+                        this.status.clear();
+                    }
+                    Ok(_) => this.status = "后台缓存响应无效".into(),
+                    Err(error) => this.status = error,
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
     }
 }
 impl Render for Settings {
@@ -269,7 +312,42 @@ impl Render for Settings {
                 .text_size(px(12.))
                 .child("减少动态用于关闭主题过渡；产品窗口本身没有持续动画。"),
         );
-        column
+        column = column.child(div().text_size(px(20.)).child("邮件缓存"));
+        if let Some(info) = &self.cache {
+            let mib = |v: u64| v as f64 / 1048576.;
+            column = column.child(format!(
+                "预算 {:.0} MiB · 可清理 {:.1} MiB · 受保护 {:.1} MiB · 正在下载 {:.1} MiB",
+                mib(info.budget_bytes),
+                mib(info.evictable_bytes),
+                mib(info.protected_bytes),
+                mib(info.downloading_bytes)
+            ));
+            if info.protected_bytes > info.budget_bytes {
+                column = column.child("受保护内容超过预算；请提高预算或自行整理草稿与附件，应用不会自动删除这些内容。");
+            }
+        }
+        let mut budgets = div().flex().gap_2().items_center().child("预算");
+        for (id, label, bytes) in [
+            ("cache-256", "256 MiB", 256 * 1024 * 1024),
+            ("cache-1024", "1 GiB", 1024 * 1024 * 1024),
+            ("cache-4096", "4 GiB", 4 * 1024 * 1024 * 1024),
+        ] {
+            budgets = budgets.child(
+                MaterialButton::new(id)
+                    .disabled(self.busy)
+                    .child(label)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.cache_command(mail_protocol::Command::SetCacheBudget { bytes }, cx)
+                    })),
+            );
+        }
+        column.child(budgets).child(div().flex().gap_2().child(
+            MaterialButton::new("cache-refresh").disabled(self.busy).child("刷新用量").on_click(cx.listener(|this, _, _, cx| this.cache_command(mail_protocol::Command::CacheStatus, cx)))
+        ).child(MaterialButton::new("cache-clear").disabled(self.busy).child(if self.confirm_clear { "确认清理可下载缓存" } else { "清理邮件缓存" }).on_click(cx.listener(|this, _, _, cx| {
+            if this.confirm_clear { this.cache_command(mail_protocol::Command::ClearCache, cx); }
+            else { this.confirm_clear = true; cx.notify(); }
+        })))).child("只清理可重新下载的正文与附件；保留邮件索引、草稿、发送快照、冲突原件和未完成操作。清理后需要联网重新下载。浏览器副本请在阅读器中单独清理。")
+        .child(self.status.clone())
     }
 }
 

@@ -195,7 +195,11 @@ mod tests {
 #[derive(Debug, PartialEq, Eq)]
 pub enum UploadResult {
     EpochChanged,
-    Verified { uidvalidity: u32, uid: u32 },
+    Verified {
+        uidvalidity: u32,
+        uid: u32,
+        raw: Vec<u8>,
+    },
     Uncertain,
 }
 pub fn upload(
@@ -252,11 +256,13 @@ fn upload_using(
         return Ok(UploadResult::EpochChanged);
     }
     let result = (|| {
-        if let Some(uid) = sent::search_existing(&mut stream, epoch, message_id)? {
+        if let Some(uid) =
+            sent::search_existing(&mut stream, epoch, message_id.trim_matches(['<', '>']))?
+        {
             return Ok(Some(uid));
         }
         if probe_only {
-            return Ok(None);
+            return search_draft_headers(&mut stream, epoch, message_id).map_err(sent::map_error);
         }
         let appended = sent::append_flags(
             &mut stream,
@@ -269,8 +275,11 @@ fn upload_using(
         if appended.uidvalidity != epoch {
             return Err(CopyError::ResultUnknown);
         }
-        // 即使有APPENDUID也按Message-ID重新查证，再核验内容；不把 tagged OK 当成完整验证。
-        sent::search_existing(&mut stream, epoch, message_id).map_err(|_| CopyError::ResultUnknown)
+        // APPENDUID is only a candidate; the separate complete-byte fetch below
+        // must still verify it. HEADER SEARCH is unreliable on some providers.
+        sent::search_existing(&mut stream, epoch, message_id.trim_matches(['<', '>']))
+            .map(|found| found.or(appended.uid))
+            .map_err(|_| CopyError::ResultUnknown)
     })();
     logout(&mut stream);
     match result {
@@ -285,17 +294,140 @@ fn upload_using(
                 40 * 1024 * 1024,
             )
             .map_err(|_| CopyError::ResultUnknown)?;
-            if received != raw {
+            if !verified_draft_bytes(raw, &received) {
                 return Err(CopyError::ResultUnknown);
             }
             Ok(UploadResult::Verified {
                 uidvalidity: epoch,
                 uid,
+                raw: received,
             })
         }
         Ok(None) => Ok(UploadResult::Uncertain),
         Err(e) => Err(e),
     }
+}
+
+/// Query-only recovery for providers with false-negative HEADER SEARCH.
+/// Fetch at most 200 header fields (no attachment bodies); a miss stays uncertain.
+fn search_draft_headers(
+    stream: &mut crate::accounts::ImapStream,
+    epoch: u32,
+    message_id: &str,
+) -> Result<Option<u32>, CheckError> {
+    use imap_proto::{AttributeValue, MessageSection, SectionPath};
+    command(stream, b"QM7 UID SEARCH ALL\r\n")?;
+    let mut wanted = None;
+    until_done(stream, "QM7", |response| {
+        crate::sync::ensure_epoch(&response, epoch)?;
+        if let Response::MailboxData(MailboxDatum::Search(values)) = response {
+            if wanted.is_some() || values.len() > 10000 || values.contains(&0) {
+                return Err(CheckError::Limit);
+            }
+            wanted = Some(values.into_iter().collect::<BTreeSet<_>>());
+        }
+        Ok(())
+    })?;
+    let wanted = wanted
+        .ok_or(CheckError::Protocol)?
+        .into_iter()
+        .rev()
+        .take(200)
+        .collect::<BTreeSet<_>>();
+    if wanted.is_empty() {
+        return Ok(None);
+    }
+    let set = wanted
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    command(
+        stream,
+        format!("QM8 UID FETCH {set} (UID BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])\r\n").as_bytes(),
+    )?;
+    let mut seen = BTreeSet::new();
+    let mut found = None;
+    let mut total = 0;
+    until_done(stream, "QM8", |response| {
+        crate::sync::ensure_epoch(&response, epoch)?;
+        if let Response::Fetch(_, attrs) = response {
+            let mut uid = None;
+            let mut header = None;
+            for attr in attrs {
+                match attr {
+                    AttributeValue::Uid(value) if uid.is_none() => uid = Some(value),
+                    AttributeValue::BodySection {
+                        section: Some(SectionPath::Full(MessageSection::Header)),
+                        index: None,
+                        data: Some(data),
+                    } if header.is_none() => header = Some(data),
+                    _ => return Err(CheckError::Protocol),
+                }
+            }
+            let uid = uid
+                .filter(|u| wanted.contains(u))
+                .ok_or(CheckError::Protocol)?;
+            if !seen.insert(uid) {
+                return Err(CheckError::Protocol);
+            }
+            let header = header.ok_or(CheckError::Protocol)?;
+            total += header.len();
+            if header.len() > 65536 || total > 1024 * 1024 {
+                return Err(CheckError::Limit);
+            }
+            let parsed = mail_parser::MessageParser::default()
+                .parse_headers(&header)
+                .ok_or(CheckError::Protocol)?;
+            if parsed
+                .message_id()
+                .is_some_and(|id| id == message_id.trim_matches(['<', '>']))
+                && found.replace(uid).is_some()
+            {
+                return Err(CheckError::Protocol);
+            }
+        }
+        Ok(())
+    })?;
+    if seen != wanted {
+        return Err(CheckError::Protocol);
+    }
+    Ok(found)
+}
+
+/// QQ IMAP may insert one X-QQ-mid transport trace on APPEND. Only that
+/// additional header is allowed; every original header and MIME body byte must match.
+/// Keep the actual received original as the subsequent conflict baseline.
+fn verified_draft_bytes(expected: &[u8], received: &[u8]) -> bool {
+    if expected == received {
+        return true;
+    }
+    fn without_trace(raw: &[u8]) -> Option<(Vec<u8>, usize)> {
+        let end = raw.windows(4).position(|w| w == b"\r\n\r\n")?;
+        let mut result = Vec::with_capacity(raw.len());
+        let mut count = 0;
+        let mut skipping = false;
+        for line in raw[..end + 2].split_inclusive(|&b| b == b'\n') {
+            if line.starts_with(b" ") || line.starts_with(b"\t") {
+                if !skipping {
+                    result.extend_from_slice(line);
+                }
+                continue;
+            }
+            skipping = line
+                .split(|&b| b == b':')
+                .next()?
+                .eq_ignore_ascii_case(b"X-QQ-mid");
+            if skipping {
+                count += 1;
+            } else {
+                result.extend_from_slice(line);
+            }
+        }
+        result.extend_from_slice(&raw[end + 2..]);
+        Some((result, count))
+    }
+    matches!((without_trace(expected), without_trace(received)), (Some((a, 0)), Some((b, 1))) if a == b)
 }
 
 #[cfg(test)]
@@ -345,8 +477,35 @@ mod upload_tests {
                     .unwrap();
             }
             if server_mode == "probe_missing" {
+                assert_eq!(line(&mut r), "QM7 UID SEARCH ALL\r\n");
+                r.get_mut()
+                    .write_all(b"* SEARCH\r\nQM7 OK searched\r\n")
+                    .unwrap();
                 assert_eq!(line(&mut r), "QM9 LOGOUT\r\n");
                 return;
+            }
+            if server_mode == "probe_fallback" {
+                assert_eq!(line(&mut r), "QM7 UID SEARCH ALL\r\n");
+                r.get_mut()
+                    .write_all(b"* SEARCH 7\r\nQM7 OK searched\r\n")
+                    .unwrap();
+                assert_eq!(
+                    line(&mut r),
+                    "QM8 UID FETCH 7 (UID BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])\r\n"
+                );
+                let header =
+                    b"Message-ID: <0123456789abcdef0123456789abcdef@qingmail.invalid>\r\n\r\n";
+                r.get_mut()
+                    .write_all(
+                        format!(
+                            "* 1 FETCH (UID 7 BODY[HEADER.FIELDS (MESSAGE-ID)] {{{}}}\r\n",
+                            header.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .unwrap();
+                r.get_mut().write_all(header).unwrap();
+                r.get_mut().write_all(b")\r\nQM8 OK fetched\r\n").unwrap();
             }
             if !probe {
                 assert_eq!(
@@ -383,7 +542,10 @@ mod upload_tests {
                 .write_all(b"* OK [UIDVALIDITY 42] stable\r\nQM3 OK examined\r\n")
                 .unwrap();
             assert_eq!(line(&mut r), "QM4 UID FETCH 7 (UID BODY.PEEK[])\r\n");
-            let received = if server_mode == "probe_mismatch" {
+            let traced = [b"X-QQ-mid: synthetic-trace\r\n".as_slice(), raw].concat();
+            let received = if server_mode == "trace" {
+                traced.as_slice()
+            } else if server_mode == "probe_mismatch" {
                 b"Subject: different\r\n\r\nother\r\n".as_slice()
             } else {
                 raw.as_slice()
@@ -409,24 +571,56 @@ mod upload_tests {
         result
     }
     #[test]
+    fn server_trace_is_verified_but_body_headers_and_duplicate_trace_are_not_ignored() {
+        let raw = b"Subject: original\r\n\r\nbody";
+        assert!(verified_draft_bytes(
+            raw,
+            b"X-QQ-mid: trace\r\nSubject: original\r\n\r\nbody"
+        ));
+        for changed in [
+            b"X-QQ-mid: trace\r\nSubject: changed\r\n\r\nbody".as_slice(),
+            b"X-QQ-mid: trace\r\nSubject: original\r\n\r\nother",
+            b"X-QQ-mid: a\r\nX-QQ-mid: b\r\nSubject: original\r\n\r\nbody",
+        ] {
+            assert!(!verified_draft_bytes(raw, changed));
+        }
+        let Ok(UploadResult::Verified { raw, .. }) = fixture("trace") else {
+            panic!("trace verification");
+        };
+        assert!(raw.starts_with(b"X-QQ-mid: synthetic-trace\r\n"));
+    }
+    #[test]
+    fn false_negative_header_search_recovers_by_bounded_header_fetch_without_append() {
+        assert!(matches!(
+            fixture("probe_fallback"),
+            Ok(UploadResult::Verified {
+                uidvalidity: 42,
+                uid: 7,
+                ..
+            })
+        ));
+    }
+    #[test]
     fn append_draft_flag_and_verify_raw_even_with_appenduid() {
-        assert_eq!(
+        assert!(matches!(
             fixture("append"),
             Ok(UploadResult::Verified {
                 uidvalidity: 42,
-                uid: 7
+                uid: 7,
+                ..
             })
-        );
+        ));
     }
     #[test]
     fn large_draft_appends_and_verifies_above_ordinary_read_limit() {
-        assert_eq!(
+        assert!(matches!(
             fixture("large"),
             Ok(UploadResult::Verified {
                 uidvalidity: 42,
-                uid: 7
+                uid: 7,
+                ..
             })
-        );
+        ));
     }
     #[test]
     fn lost_response_recovery_is_query_only_and_wrong_content_is_not_success() {
@@ -435,13 +629,14 @@ mod upload_tests {
             Err(crate::sent::CopyError::ResultUnknown)
         );
         assert_eq!(fixture("probe_missing"), Ok(UploadResult::Uncertain));
-        assert_eq!(
+        assert!(matches!(
             fixture("probe_found"),
             Ok(UploadResult::Verified {
                 uidvalidity: 42,
-                uid: 7
+                uid: 7,
+                ..
             })
-        );
+        ));
         assert_eq!(
             fixture("probe_mismatch"),
             Err(crate::sent::CopyError::ResultUnknown)

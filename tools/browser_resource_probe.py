@@ -17,6 +17,8 @@ from websockets.sync.client import connect
 ROOT = Path(__file__).resolve().parents[1]
 EVIDENCE = ROOT / 'docs/reports/evidence'
 EVIDENCE.mkdir(parents=True, exist_ok=True)
+PREFIX = os.environ.get('QINGMAIL_BROWSER_EVIDENCE_PREFIX', 'P0-005')
+assert PREFIX and all(c.isalnum() or c == '-' for c in PREFIX)
 HITS = []
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -63,7 +65,7 @@ with tempfile.TemporaryDirectory(prefix='qingmail-browser-probe-') as temporary:
     with socket.socket() as port:
         port.bind(('127.0.0.1', 0))
         debug_port = port.getsockname()[1]
-    log = (EVIDENCE / 'P0-005-firefox.log').open('w')
+    log = (EVIDENCE / f'{PREFIX}-firefox.log').open('w')
     browser = subprocess.Popen(['firefox', '--headless', '--no-remote', '--profile', str(profile), '--remote-debugging-port', str(debug_port)], stdout=log, stderr=log)
     try:
         ws = None
@@ -109,7 +111,7 @@ with tempfile.TemporaryDirectory(prefix='qingmail-browser-probe-') as temporary:
                 report['cases'].append({'name':label, 'requests':list(HITS), 'state':state, 'passed':True})
                 if label == 'sanitized-with-csp':
                     screenshot = bidi.call('browsingContext.captureScreenshot', {'context':context, 'origin':'document'})['data']
-                    (EVIDENCE / 'P0-005-browser-safety.png').write_bytes(base64.b64decode(screenshot))
+                    (EVIDENCE / f'{PREFIX}-browser-safety.png').write_bytes(base64.b64decode(screenshot))
             # Positive control confirms both script execution and actual network probes work.
             control = temporary / 'unsafe-control.html'
             control.write_text('''<!doctype html><script>window.qingmailAttack=9;fetch('http://127.0.0.1:18765/script')</script><img src="http://127.0.0.1:18765/pixel"><img src="http://127.0.0.1:18765/redirect">''')
@@ -143,7 +145,7 @@ with tempfile.TemporaryDirectory(prefix='qingmail-browser-probe-') as temporary:
             assert state['text'] and state['tables'] == 2 and state['background'] == 'rgb(242, 246, 255)' and state['images'] == [32], state
             report['cases'].append({'name':'marketing-layout', 'state':state, 'passed':True})
             screenshot = bidi.call('browsingContext.captureScreenshot', {'context':context,'origin':'document'})['data']
-            (EVIDENCE / 'P0-005-browser-layout.png').write_bytes(base64.b64decode(screenshot))
+            (EVIDENCE / f'{PREFIX}-browser-layout.png').write_bytes(base64.b64decode(screenshot))
             bidi.call('session.end', {})
     finally:
         browser.terminate()
@@ -161,5 +163,5 @@ report['capabilities'].pop('moz:processID', None)
 for case in report['cases']:
     if 'state' in case:
         case['state'].pop('url', None)
-(EVIDENCE / 'P0-005-browser-probe.json').write_text(json.dumps(report,ensure_ascii=False,indent=2) + '\n')
+(EVIDENCE / f'{PREFIX}-browser-probe.json').write_text(json.dumps(report,ensure_ascii=False,indent=2) + '\n')
 print(json.dumps(report,ensure_ascii=False,indent=2))

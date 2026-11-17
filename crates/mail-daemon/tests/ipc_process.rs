@@ -1657,3 +1657,35 @@ fn draft_conflict_choice_replay_and_restart_preserve_two_versions_without_smtp()
     client.request(Command::PrepareShutdown).unwrap();
     daemon.exited();
 }
+
+#[test]
+fn cache_budget_and_clear_are_durable_and_idempotent() {
+    let root = private_root();
+    let mut daemon = Daemon::start(root.path());
+    let client = daemon.ready(root.path());
+    let Reply::Cache(initial) = client.request(Command::CacheStatus).unwrap() else {
+        panic!("cache status");
+    };
+    assert_eq!(initial.budget_bytes, 1073741824);
+    let request = Request::new(
+        transport::request_id().unwrap(),
+        Command::SetCacheBudget { bytes: 0 },
+    );
+    assert!(matches!(client.call(&request).unwrap(), Reply::Cache(_)));
+    assert!(matches!(client.call(&request).unwrap(), Reply::Cache(_)));
+    assert!(matches!(
+        client.request(Command::ClearCache).unwrap(),
+        Reply::Cache(_)
+    ));
+    client.request(Command::PrepareShutdown).unwrap();
+    daemon.exited();
+    let mut daemon = Daemon::start(root.path());
+    let client = daemon.ready(root.path());
+    let Reply::Cache(info) = client.request(Command::CacheStatus).unwrap() else {
+        panic!("cache status");
+    };
+    assert_eq!(info.budget_bytes, 0);
+    assert_eq!(info.evictable_bytes, 0);
+    client.request(Command::PrepareShutdown).unwrap();
+    daemon.exited();
+}

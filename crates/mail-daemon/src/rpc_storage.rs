@@ -21,6 +21,9 @@ fn local_error(message: String) -> RpcError {
     error(ErrorCode::Storage, message)
 }
 pub(crate) const COMMANDS: &[mail_protocol::CommandName] = &[
+    mail_protocol::CommandName::CacheStatus,
+    mail_protocol::CommandName::SetCacheBudget,
+    mail_protocol::CommandName::ClearCache,
     mail_protocol::CommandName::DraftConflicts,
     mail_protocol::CommandName::ResolveDraftConflict,
     mail_protocol::CommandName::DraftSyncStatus,
@@ -59,7 +62,9 @@ pub(crate) const COMMANDS: &[mail_protocol::CommandName] = &[
 fn mutates(command: &Rpc) -> bool {
     matches!(
         command,
-        Rpc::ResolveDraftConflict { .. }
+        Rpc::SetCacheBudget { .. }
+            | Rpc::ClearCache
+            | Rpc::ResolveDraftConflict { .. }
             | Rpc::FlushDraftSync { .. }
             | Rpc::DraftSyncFolder { .. }
             | Rpc::ConvertServerDraft { .. }
@@ -151,6 +156,15 @@ pub(super) fn dispatch(store: &mut Store, request: mail_protocol::Request) -> Re
 }
 fn execute(store: &mut Store, command: Rpc) -> Result<Reply, RpcError> {
     Ok(match command {
+        Rpc::CacheStatus => Reply::Cache(store.cache_status().map_err(storage_error)?),
+        Rpc::SetCacheBudget { bytes } => {
+            store.set_cache_budget(bytes).map_err(storage_error)?;
+            Reply::Cache(store.cache_status().map_err(storage_error)?)
+        }
+        Rpc::ClearCache => {
+            store.clear_cache().map_err(storage_error)?;
+            Reply::Cache(store.cache_status().map_err(storage_error)?)
+        }
         Rpc::DraftConflicts { account } => Reply::DraftConflicts(
             store
                 .draft_conflicts(account.as_ref())

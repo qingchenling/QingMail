@@ -615,7 +615,7 @@ fn v2_upgrade_keeps_existing_drafts_and_remote_account_identity() {
     drop(store);
     // 从当前库移除 v3/v4 的结构，恢复真实 v2 布局；正文和 v2 行保持原样。
     let conn = Connection::open(path.join("state.sqlite3")).unwrap();
-    conn.execute_batch("DROP TRIGGER stop_sent_draft_sync; DROP TRIGGER track_draft_scan_account; DROP TABLE draft_conflicts; DROP TABLE draft_scan_failures; DROP TABLE draft_scans; DROP TRIGGER track_server_draft_insert; DROP TRIGGER track_server_draft_update; DROP TABLE draft_uploads; DROP TABLE draft_sync; DROP TABLE server_draft_sources; DROP TABLE server_draft_folders; DROP TABLE part_resources; DROP TABLE message_structures; DROP VIEW visible_folder_messages; DROP TABLE mail_operations; DROP TRIGGER account_default_options; DROP TABLE account_options; DROP TRIGGER account_legacy_credential; DROP TABLE account_credentials; DROP TABLE mutation_results; DROP TABLE message_bodies; DROP TABLE remote_folders; DROP TABLE folder_sync; DROP TABLE catalog_sync; DROP TABLE local_editor; DROP INDEX one_local_workspace; ALTER TABLE accounts DROP COLUMN kind; ALTER TABLE send_tasks DROP COLUMN copy_folder; ALTER TABLE send_tasks DROP COLUMN copy_uidvalidity; ALTER TABLE send_tasks DROP COLUMN copy_uid; ALTER TABLE folder_messages DROP COLUMN seen; ALTER TABLE folder_messages DROP COLUMN flagged; ALTER TABLE messages DROP COLUMN has_attachments; PRAGMA user_version=2;").unwrap();
+    conn.execute_batch("DROP VIEW protected_objects; DROP TRIGGER cache_body_insert; DROP TRIGGER cache_part_insert; DROP TABLE cache_access; DROP TABLE cache_settings; DROP TRIGGER stop_sent_draft_sync; DROP TRIGGER track_draft_scan_account; DROP TABLE draft_conflicts; DROP TABLE draft_scan_failures; DROP TABLE draft_scans; DROP TRIGGER track_server_draft_insert; DROP TRIGGER track_server_draft_update; DROP TABLE draft_uploads; DROP TABLE draft_sync; DROP TABLE server_draft_sources; DROP TABLE server_draft_folders; DROP TABLE part_resources; DROP TABLE message_structures; DROP VIEW visible_folder_messages; DROP TABLE mail_operations; DROP TRIGGER account_default_options; DROP TABLE account_options; DROP TRIGGER account_legacy_credential; DROP TABLE account_credentials; DROP TABLE mutation_results; DROP TABLE message_bodies; DROP TABLE remote_folders; DROP TABLE folder_sync; DROP TABLE catalog_sync; DROP TABLE local_editor; DROP INDEX one_local_workspace; ALTER TABLE accounts DROP COLUMN kind; ALTER TABLE send_tasks DROP COLUMN copy_folder; ALTER TABLE send_tasks DROP COLUMN copy_uidvalidity; ALTER TABLE send_tasks DROP COLUMN copy_uid; ALTER TABLE folder_messages DROP COLUMN seen; ALTER TABLE folder_messages DROP COLUMN flagged; ALTER TABLE messages DROP COLUMN has_attachments; PRAGMA user_version=2;").unwrap();
     drop(conn);
     let mut store = Store::open(&path).unwrap();
     assert_eq!(store.draft(&account, &draft.id).unwrap(), draft);
@@ -723,7 +723,7 @@ fn v5_upgrade_adds_copy_columns_and_preserves_copy_pending_tasks() {
     drop(store);
     let conn = Connection::open(path.join("state.sqlite3")).unwrap();
     conn.execute_batch(
-        "DROP TRIGGER stop_sent_draft_sync; DROP TRIGGER track_draft_scan_account; DROP TABLE draft_conflicts; DROP TABLE draft_scan_failures; DROP TABLE draft_scans; DROP TRIGGER track_server_draft_insert; DROP TRIGGER track_server_draft_update; DROP TABLE draft_uploads; DROP TABLE draft_sync; DROP TABLE server_draft_sources; DROP TABLE server_draft_folders; DROP TABLE part_resources; DROP TABLE message_structures; DROP VIEW visible_folder_messages; DROP TABLE mail_operations; DROP TRIGGER account_default_options; DROP TABLE account_options; DROP TRIGGER account_legacy_credential; DROP TABLE account_credentials; DROP TABLE mutation_results; ALTER TABLE send_tasks DROP COLUMN copy_folder; \
+        "DROP VIEW protected_objects; DROP TRIGGER cache_body_insert; DROP TRIGGER cache_part_insert; DROP TABLE cache_access; DROP TABLE cache_settings; DROP TRIGGER stop_sent_draft_sync; DROP TRIGGER track_draft_scan_account; DROP TABLE draft_conflicts; DROP TABLE draft_scan_failures; DROP TABLE draft_scans; DROP TRIGGER track_server_draft_insert; DROP TRIGGER track_server_draft_update; DROP TABLE draft_uploads; DROP TABLE draft_sync; DROP TABLE server_draft_sources; DROP TABLE server_draft_folders; DROP TABLE part_resources; DROP TABLE message_structures; DROP VIEW visible_folder_messages; DROP TABLE mail_operations; DROP TRIGGER account_default_options; DROP TABLE account_options; DROP TRIGGER account_legacy_credential; DROP TABLE account_credentials; DROP TABLE mutation_results; ALTER TABLE send_tasks DROP COLUMN copy_folder; \
          ALTER TABLE send_tasks DROP COLUMN copy_uidvalidity; \
          ALTER TABLE send_tasks DROP COLUMN copy_uid; \
          ALTER TABLE folder_messages DROP COLUMN seen; ALTER TABLE folder_messages DROP COLUMN flagged; ALTER TABLE messages DROP COLUMN has_attachments; PRAGMA user_version=5;",
@@ -767,4 +767,29 @@ fn task_list_exposes_frozen_headers_for_the_task_entry() {
     assert_eq!(list[0].recipients.cc, vec!["cc@example.org".to_string()]);
     assert!(list[0].created_at > 0);
     assert_eq!(list[0].state, SendState::Pending);
+}
+
+#[test]
+fn cache_clear_preserves_drafts_and_send_snapshots() {
+    let (_root, mut store, account) = setup();
+    let draft = store
+        .create_draft(&account, &document("protected draft"))
+        .unwrap();
+    let send = store
+        .enqueue_draft(&account, &draft.id, draft.revision)
+        .unwrap();
+    let before = store.cache_status().unwrap().protected_bytes;
+    store.set_cache_budget(0).unwrap();
+    store.clear_cache().unwrap();
+    assert_eq!(
+        store
+            .draft(&account, &draft.id)
+            .unwrap()
+            .document
+            .body
+            .text(),
+        "protected draft"
+    );
+    assert!(store.task_snapshot(&account, &send).is_ok());
+    assert_eq!(store.cache_status().unwrap().protected_bytes, before);
 }
