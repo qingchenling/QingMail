@@ -35,7 +35,7 @@ impl CheckBackend for SystemBackend {
     }
 }
 
-/// 不实现 Debug/Clone；未来账号提交直接消费已检查的这份凭据，不重新信任临时项。
+/// 不实现 Debug/Clone；账号提交直接消费已检查的这份凭据，不重新信任临时项。
 pub struct CheckedAccount {
     pub account: Option<AccountId>,
     pub settings: AccountSettings,

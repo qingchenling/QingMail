@@ -4033,6 +4033,7 @@ dependencies = [
  "mail-content",
  "mail-core",
  "mail-daemon",
+ "mail-protocol",
  "mail-service",
  "mail-storage",
  "ropey",

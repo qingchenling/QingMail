@@ -1,4 +1,4 @@
-//! P0 进程内生命周期：窗口可销毁，后台/实例锁由 App 持有。
+//! 过渡期进程内生命周期：窗口可销毁，后台/实例锁由 App 持有；P3 逐步迁往独立后台。
 use crate::{
     composer::{self, Composer},
     reader,
@@ -26,6 +26,9 @@ pub(super) struct Lifecycle {
     accounts: Option<(AnyWindowHandle, WeakEntity<crate::accounts::Accounts>)>,
     editors: Vec<Editor>,
     worker: Background,
+    account_backend: Arc<mail_daemon::account_gateway::AccountGateway>,
+    pending_account_save: Option<crate::accounts::PendingSave>,
+    account_requests: Arc<mail_storage::ClientRequests>,
     storage: mail_daemon::storage::StorageWorker,
     sync: mail_daemon::SyncEngine,
     sending: mail_daemon::sending::SendCoordinator,
@@ -59,11 +62,29 @@ pub(super) fn start(instance: Option<Instance>, cx: &mut App) -> Result<(), Stri
             },
         )
     });
+    let request_path = match &storage_path {
+        Some(path) => path.join("client-requests"),
+        None => mail_storage::AppPaths::discover()
+            .map_err(|e| e.to_string())?
+            .config
+            .join("client-requests"),
+    };
+    let account_requests =
+        Arc::new(mail_storage::ClientRequests::open(&request_path).map_err(|e| e.to_string())?);
+    let pending_account_save = account_requests.load().map_err(|e| e.to_string())?;
     let storage =
         mail_daemon::storage::StorageWorker::start(storage_path).map_err(|e| e.to_string())?;
     let worker = Background::start().map_err(|e| e.to_string())?;
     let probe = std::env::args().any(|arg| arg.ends_with("-probe"));
     let sync = mail_daemon::SyncEngine::start_enabled(storage.client(), !probe);
+    let account_backend = Arc::new(
+        mail_daemon::account_gateway::AccountGateway::start(
+            !probe,
+            storage.client(),
+            Default::default(),
+        )
+        .map_err(|e| e.to_string())?,
+    );
     let tray_enabled = !std::env::args().any(|arg| {
         matches!(
             arg.as_str(),
@@ -79,6 +100,9 @@ pub(super) fn start(instance: Option<Instance>, cx: &mut App) -> Result<(), Stri
         accounts: None,
         editors: vec![],
         worker,
+        account_backend,
+        pending_account_save,
+        account_requests,
         storage,
         sync,
         sending: Default::default(),
@@ -213,6 +237,21 @@ pub(super) fn register_send_tasks(window: AnyWindowHandle, cx: &mut App) {
 pub(super) fn storage(cx: &App) -> mail_daemon::storage::StorageClient {
     cx.global::<Lifecycle>().storage.client()
 }
+pub(super) fn account_backend(cx: &App) -> Arc<mail_daemon::account_gateway::AccountGateway> {
+    cx.global::<Lifecycle>().account_backend.clone()
+}
+pub(super) fn account_requests(cx: &App) -> Arc<mail_storage::ClientRequests> {
+    cx.global::<Lifecycle>().account_requests.clone()
+}
+pub(super) fn pending_account_save(cx: &App) -> Option<crate::accounts::PendingSave> {
+    cx.global::<Lifecycle>().pending_account_save.clone()
+}
+pub(super) fn set_pending_account_save(
+    pending: Option<crate::accounts::PendingSave>,
+    cx: &mut App,
+) {
+    cx.global_mut::<Lifecycle>().pending_account_save = pending;
+}
 
 pub(super) fn sync_status(cx: &App) -> String {
     cx.global::<Lifecycle>().sync.status()
@@ -329,6 +368,7 @@ fn tick(cx: &mut App) {
             if state.quitting
                 && state.editors.is_empty()
                 && !account_saving
+                && !state.account_backend.saving()
                 && !state.sending.active()
             {
                 cx.quit();

@@ -1,6 +1,8 @@
 //! 本地索引与 P3 IPC 幂等记录：后台单写者、XDG 路径、事务迁移和 IMAP 定位隔离。
 //! 不保存密码/令牌；草稿与发送快照使用不可变对象和事务关联。
 mod account_credentials;
+mod client_requests;
+pub use client_requests::{ClientRequests, PendingAccountRequest};
 mod message_body;
 mod mutations;
 pub use account_credentials::AccountVersion;

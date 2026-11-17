@@ -2,8 +2,7 @@
 mod endpoint;
 use crate::{
     SyncEngine,
-    account_checks::CheckManager,
-    account_commits::AccountCommitter,
+    account_gateway::AccountGateway,
     storage::{RPC_COMMANDS, StorageClient, StorageWorker},
 };
 pub use endpoint::Endpoint;
@@ -62,8 +61,7 @@ pub struct Server {
 struct Service {
     storage: StorageClient,
     sync: SyncEngine,
-    checks: Arc<CheckManager>,
-    commits: AccountCommitter,
+    accounts: AccountGateway,
     epoch: String,
     revision: Arc<AtomicU64>,
     stopped: Arc<AtomicBool>,
@@ -80,20 +78,14 @@ impl Server {
             .recv_timeout(STORAGE_TIMEOUT)
             .map_err(|_| io::Error::other("后台存储就绪超时"))?
             .map_err(io::Error::other)?;
-        let checks = Arc::new(CheckManager::start(config.network_enabled)?);
         let revision = Arc::new(AtomicU64::new(0));
-        let commits = AccountCommitter::start(
-            config.network_enabled,
-            storage.client(),
-            checks.clone(),
-            revision.clone(),
-        )?;
+        let accounts =
+            AccountGateway::start(config.network_enabled, storage.client(), revision.clone())?;
         let sync = SyncEngine::start_enabled(storage.client(), config.network_enabled);
         let service = Arc::new(Service {
             storage: storage.client(),
             sync,
-            checks,
-            commits,
+            accounts,
             epoch: transport::request_id()?,
             revision,
             stopped: Arc::new(AtomicBool::new(false)),
@@ -146,10 +138,7 @@ impl Server {
         });
         let mut service = Arc::try_unwrap(self.service)
             .map_err(|_| io::Error::other("后台工作线程尚未释放状态"))?;
-        service.commits.stop();
-        let mut checks = Arc::try_unwrap(service.checks)
-            .map_err(|_| io::Error::other("账号检查线程状态尚未释放"))?;
-        checks.stop();
+        service.accounts.stop();
         service.sync.stop();
         self.storage.stop();
         result
@@ -223,7 +212,7 @@ impl Service {
                     CommandName::PrepareShutdown,
                 ];
                 commands.extend_from_slice(RPC_COMMANDS);
-                if self.checks.enabled() {
+                if self.accounts.enabled() {
                     commands.extend([
                         CommandName::CheckAccount,
                         CommandName::AccountCheckStatus,
@@ -248,53 +237,11 @@ impl Service {
                 self.stopped.store(true, Ordering::Release);
                 Ok(Reply::Acknowledged)
             }
-            Command::CheckAccount {
-                account,
-                settings,
-                credential_ref,
-            } => {
-                if !self.checks.enabled() {
-                    return Err(rpc_error(
-                        ErrorCode::Unsupported,
-                        "隔离后台未启用邮件网络或密钥库访问",
-                    ));
-                }
-                let baseline = if let Some(account) = account {
-                    Some(
-                        self.storage
-                            .account_version(account.clone())
-                            .map_err(|e| rpc_error(ErrorCode::Storage, e))?
-                            .recv_timeout(STORAGE_TIMEOUT)
-                            .map_err(|_| rpc_error(ErrorCode::Busy, "账号查询超时"))?
-                            .map_err(|e| rpc_error(ErrorCode::Storage, e))?,
-                    )
-                } else {
-                    None
-                };
-                self.checks.begin(
-                    &request.id,
-                    account.clone(),
-                    settings.clone(),
-                    credential_ref.clone(),
-                    baseline,
-                )
-            }
-            Command::AccountCheckStatus { task } if self.checks.enabled() => self.checks.poll(task),
-            Command::CommitAccount { .. } => self
-                .commits
-                .submit(request)?
-                .recv_timeout(STORAGE_TIMEOUT)
-                .map_err(|_| {
-                    rpc_error(
-                        ErrorCode::Uncertain,
-                        "账号提交确认超时，请查询原请求结果，不要重新提交",
-                    )
-                })?,
+            Command::CheckAccount { .. }
+            | Command::AccountCheckStatus { .. }
+            | Command::CommitAccount { .. }
+            | Command::MutationResult { .. } => self.accounts.call(request),
             command if RPC_COMMANDS.contains(&command.name()) => {
-                let mutation = match command {
-                    Command::MutationResult { mutation } => Some(mutation.clone()),
-                    _ => None,
-                };
                 let changes = matches!(
                     command,
                     Command::OpenDraft { .. }
@@ -316,14 +263,7 @@ impl Service {
                 if changes && response.result.is_ok() {
                     self.revision.fetch_add(1, Ordering::Release);
                 }
-                match response.result {
-                    Ok(Reply::Mutation(MutationStatus::InProgress))
-                        if mutation.as_ref().is_some_and(|id| !self.commits.active(id)) =>
-                    {
-                        Ok(Reply::Mutation(MutationStatus::Uncertain))
-                    }
-                    result => result,
-                }
+                response.result
             }
             _ => Err(rpc_error(
                 ErrorCode::Unsupported,

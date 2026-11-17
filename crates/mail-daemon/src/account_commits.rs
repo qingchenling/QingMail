@@ -64,7 +64,7 @@ impl AccountCommitter {
     ) -> io::Result<Self> {
         Self::with_vault(enabled, storage, checks, revision, Arc::new(SystemVault))
     }
-    fn with_vault<V: CredentialVault + CredentialStaging + Send + Sync + 'static>(
+    pub(crate) fn with_vault<V: CredentialVault + CredentialStaging + Send + Sync + 'static>(
         enabled: bool,
         storage: StorageClient,
         checks: Arc<CheckManager>,
@@ -130,6 +130,13 @@ impl AccountCommitter {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .contains_key(id)
+    }
+    pub(crate) fn has_active(&self) -> bool {
+        !self
+            .active
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty()
     }
     pub(crate) fn stop(&mut self) {
         self.sender.take();

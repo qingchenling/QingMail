@@ -15,6 +15,7 @@ gpui-fps = { workspace = true }
 mail-content = { workspace = true }
 mail-storage = { workspace = true }
 mail-core = { workspace = true }
+mail-protocol = { workspace = true }
 mail-service = { workspace = true }
 url = { workspace = true }
 ropey = { workspace = true }
