@@ -26,11 +26,11 @@ with tempfile.TemporaryDirectory(prefix='qingmail-p2-mailbox-') as directory:
     assert result.returncode == 0, args.evidence.with_suffix('.log').read_text()
     assert 'QINGMAIL_MAILBOX_PROBE: PASS' in args.evidence.with_suffix('.log').read_text()
     with sqlite3.connect(f'file:{data / "state.sqlite3"}?mode=ro', uri=True) as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0] == 5
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 8
         assert db.execute('SELECT count(*) FROM remote_folders').fetchone()[0] == 4
         assert db.execute('SELECT count(*) FROM messages').fetchone()[0] == 240
         assert db.execute('SELECT count(*) FROM send_tasks').fetchone()[0] == 0
-    args.evidence.write_text(json.dumps(dict(passed=True, schema=5, synthetic_only=True,
+    args.evidence.write_text(json.dumps(dict(passed=True, schema=8, synthetic_only=True,
         folders=4, cached_messages=240, visible_page=200, sends=0,
         checks=['cached account folder hierarchy', 'UID ordering and bounded page', '200/40 cache pages and return to newest',
                 'selection changes detail', 'account collapse preserves selected folder',

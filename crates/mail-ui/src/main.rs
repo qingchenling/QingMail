@@ -20,6 +20,7 @@ mod reply;
 mod send_labels;
 mod send_tasks;
 mod settings;
+mod ui;
 
 /// 设 QINGMAIL_FPS=1 显示性能 HUD（帧率/帧耗时/GPU/CPU/内存）。
 fn show_fps() -> bool {
@@ -348,7 +349,11 @@ fn main() {
     } else if args.iter().any(|arg| {
         matches!(
             arg.as_str(),
-            "--mailbox" | "--mailbox-probe" | "--body-probe" | "--send-review-probe"
+            "--mailbox"
+                | "--mailbox-ui-probe"
+                | "--mailbox-probe"
+                | "--body-probe"
+                | "--send-review-probe"
         )
     }) {
         Command::Mailbox
@@ -394,7 +399,11 @@ fn main() {
     if args.iter().any(|arg| {
         matches!(
             arg.as_str(),
-            "--accounts-probe" | "--mailbox-probe" | "--body-probe" | "--send-review-probe"
+            "--accounts-probe"
+                | "--mailbox-ui-probe"
+                | "--mailbox-probe"
+                | "--body-probe"
+                | "--send-review-probe"
         )
     }) && (std::env::var_os("QINGMAIL_P0_RUNTIME_ROOT").is_none()
         || std::env::var_os("QINGMAIL_P0_DRAFT_ROOT").is_none())

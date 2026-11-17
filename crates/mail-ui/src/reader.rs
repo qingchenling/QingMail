@@ -1,5 +1,8 @@
 //! 复用安全阅读组件：合成验证与按需下载的邮件均使用同一受控文档。
-use crate::reply::ReplyMode;
+use crate::{
+    reply::ReplyMode,
+    ui::{icon, quiet, tool},
+};
 use gpui_kit::{
     App, Bounds, Context, Entity, Image, ImageFormat, KeyDownEvent, Render, TitlebarOptions,
     Window, WindowBounds, WindowOptions,
@@ -113,6 +116,7 @@ pub(super) fn open_content(
 
 pub(super) struct Reader {
     external: bool,
+    embedded: bool,
     account: Option<(AccountId, String)>,
     selected: usize,
     content: MailContent,
@@ -138,6 +142,7 @@ impl Reader {
         let text = cx.new(|cx| TextViewState::html(&content.document.native_html(), cx));
         let mut this = Self {
             external,
+            embedded: false,
             account,
             selected: 0,
             content,
@@ -172,6 +177,16 @@ impl Reader {
             }).detach();
         }
         this
+    }
+
+    pub(super) fn embedded(
+        content: MailContent,
+        account: Option<(AccountId, String)>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut reader = Self::from_content(content, true, account, cx);
+        reader.embedded = true;
+        reader
     }
 
     fn refresh_text(&mut self, cx: &mut Context<Self>) {
@@ -346,7 +361,7 @@ impl Reader {
 }
 
 impl Reader {
-    fn compose(&mut self, mode: ReplyMode, cx: &mut Context<Self>) {
+    pub(super) fn compose(&mut self, mode: ReplyMode, cx: &mut Context<Self>) {
         let Some((account, address)) = self.account.clone() else {
             return;
         };
@@ -379,76 +394,84 @@ impl Reader {
 
 impl Render for Reader {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut toolbar = div().flex().flex_wrap().gap_2();
-        if self.account.is_some() {
-            toolbar = toolbar
-                .child(
-                    MaterialButton::new("reply")
-                        .child("回复")
-                        .on_click(cx.listener(|this, _, _, cx| this.compose(ReplyMode::Reply, cx))),
-                )
-                .child(
-                    MaterialButton::new("reply-all")
-                        .variant(ButtonVariant::Tonal)
-                        .child("全部回复")
-                        .on_click(
-                            cx.listener(|this, _, _, cx| this.compose(ReplyMode::ReplyAll, cx)),
-                        ),
-                )
-                .child(
-                    MaterialButton::new("forward")
-                        .variant(ButtonVariant::Tonal)
-                        .child("转发")
-                        .on_click(
-                            cx.listener(|this, _, _, cx| this.compose(ReplyMode::Forward, cx)),
-                        ),
+        let mut replies = div().flex().flex_wrap().gap_2();
+        if self.account.is_some() && !self.embedded {
+            for (id, label, symbol, mode) in [
+                ("reply", "回复", "reply", ReplyMode::Reply),
+                ("reply-all", "回复全部", "reply_all", ReplyMode::ReplyAll),
+                ("forward", "转发", "forward", ReplyMode::Forward),
+            ] {
+                replies = replies.child(
+                    quiet(id, label)
+                        .icon(icon(symbol))
+                        .on_click(cx.listener(move |this, _, _, cx| this.compose(mode, cx))),
                 );
+            }
         }
-        toolbar = toolbar
+        let toolbar = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_1()
             .child(
-                MaterialButton::new("browser-copy")
-                    .child("在浏览器中打开")
+                div()
+                    .px_3()
+                    .py_1()
+                    .rounded_full()
+                    .text_size(px(12.))
+                    .bg(theme::color(ColorRole::SECONDARY_CONTAINER))
+                    .text_color(theme::color(ColorRole::ON_SECONDARY_CONTAINER))
+                    .child(if self.plain {
+                        "纯文本"
+                    } else {
+                        "简化阅读"
+                    }),
+            )
+            .child(
+                quiet(
+                    "plain-toggle",
+                    if self.plain {
+                        "简化阅读"
+                    } else {
+                        "纯文本"
+                    },
+                )
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.plain = !this.plain;
+                    this.refresh_text(cx);
+                })),
+            )
+            .child(
+                tool("font-smaller", "text_decrease", "缩小字号")
+                    .button_size(ButtonSize::ExtraSmall)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.font_size = (this.font_size - 2.).max(12.);
+                        let mut preferences = crate::settings::prefs(cx);
+                        preferences.reader_font = this.font_size;
+                        crate::settings::set(cx, preferences);
+                        cx.notify();
+                    })),
+            )
+            .child(
+                tool("font-larger", "text_increase", "放大字号")
+                    .button_size(ButtonSize::ExtraSmall)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.font_size = (this.font_size + 2.).min(28.);
+                        let mut preferences = crate::settings::prefs(cx);
+                        preferences.reader_font = this.font_size;
+                        crate::settings::set(cx, preferences);
+                        cx.notify();
+                    })),
+            )
+            .child(
+                quiet("browser-copy", "在浏览器中打开")
+                    .icon(icon("open_in_new"))
                     .disabled(self.busy)
                     .on_click(cx.listener(|this, _, _, cx| this.browser_copy(cx))),
             )
             .child(
-                MaterialButton::new("plain-toggle")
-                    .variant(ButtonVariant::Tonal)
-                    .child(if self.plain {
-                        "简化阅读"
-                    } else {
-                        "纯文本"
-                    })
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.plain = !this.plain;
-                        this.refresh_text(cx);
-                    })),
-            )
-            .child(
-                MaterialButton::new("font-smaller")
-                    .child("字号 −")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.font_size = (this.font_size - 2.0).max(12.0);
-                        let mut preferences = crate::settings::prefs(cx);
-                        preferences.reader_font = this.font_size;
-                        crate::settings::set(cx, preferences);
-                        cx.notify();
-                    })),
-            )
-            .child(
-                MaterialButton::new("font-larger")
-                    .child("字号 ＋")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.font_size = (this.font_size + 2.0).min(28.0);
-                        let mut preferences = crate::settings::prefs(cx);
-                        preferences.reader_font = this.font_size;
-                        crate::settings::set(cx, preferences);
-                        cx.notify();
-                    })),
-            )
-            .child(
-                MaterialButton::new("clear-copies")
-                    .child("立即清理副本")
+                tool("clear-copies", "cleaning_services", "清理浏览器副本")
+                    .button_size(ButtonSize::ExtraSmall)
                     .disabled(self.busy)
                     .on_click(cx.listener(|this, _, _, cx| this.clear_copies(cx))),
             );
@@ -474,32 +497,93 @@ impl Render for Reader {
                 .flex_1()
                 .min_w_0()
                 .overflow_y_scroll()
-                .p_4()
+                .px_6()
+                .py_5()
                 .flex()
                 .flex_col()
-                .gap_3()
+                .gap_4()
+                .when(!self.embedded && self.account.is_some(), |body| {
+                    body.child(replies)
+                })
                 .child(
                     div()
-                        .text_size(px(22.0))
+                        .text_size(px(26.0))
+                        .font_weight(gpui_kit::FontWeight::BOLD)
                         .child(self.content.subject.clone()),
                 )
-                .child(div().child(self.content.sender.clone()))
-                .child(div().child(if self.plain {
-                    "纯文本 · 合成邮件"
-                } else {
-                    "简化阅读 · 合成邮件"
-                }))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .pb_4()
+                        .border_b_1()
+                        .border_color(theme::color(ColorRole::OUTLINE_VARIANT))
+                        .child(
+                            div()
+                                .w(px(44.))
+                                .h(px(44.))
+                                .flex_none()
+                                .rounded_full()
+                                .bg(theme::color(ColorRole::SECONDARY_CONTAINER))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(icon("person")),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .text_size(px(14.))
+                                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                        .child(self.content.sender.clone()),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(12.))
+                                        .text_color(theme::color(ColorRole::ON_SURFACE_VARIANT))
+                                        .child(format!("收件人：{}", self.content.to.join("、"))),
+                                ),
+                        )
+                        .when(!self.content.date_text.is_empty(), |header| {
+                            header.child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(theme::color(ColorRole::ON_SURFACE_VARIANT))
+                                    .child(self.content.date_text.clone()),
+                            )
+                        }),
+                )
                 .child(toolbar)
-                .child(div().child(format!(
-                    "远程资源默认阻止 · 可授权图片 {} 项",
-                    self.content.remote_images.len()
-                )))
                 .when(!self.content.remote_images.is_empty(), |body| {
                     body.child(
-                        MaterialButton::new("remote-consent")
-                            .child("仅为此邮件加载远程图片")
-                            .disabled(self.busy)
-                            .on_click(cx.listener(|this, _, _, cx| this.load_remote(cx))),
+                        div()
+                            .px_3()
+                            .py_2()
+                            .rounded_lg()
+                            .bg(theme::color(ColorRole::TERTIARY_CONTAINER))
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap_2()
+                            .child(icon("shield"))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_sm()
+                                    .child("已阻止远程图片，加载可能暴露阅读行为"),
+                            )
+                            .child(
+                                quiet("remote-consent", "仅此邮件加载")
+                                    .disabled(self.busy)
+                                    .on_click(cx.listener(|this, _, _, cx| this.load_remote(cx))),
+                            ),
                     )
                 })
                 .children(self.content.warnings.iter().map(|warning| {
@@ -538,8 +622,8 @@ impl Render for Reader {
                                 attachment.bytes.len()
                             ))
                             .child(
-                                MaterialButton::new(("save-attachment", index))
-                                    .child("另存为")
+                                quiet(("save-attachment", index), "另存为")
+                                    .icon(icon("download"))
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.save_attachment(index, cx)
                                     })),
@@ -559,13 +643,22 @@ impl Render for Reader {
                 }
             }))
             .child(TextSelectionLayer)
-            .child(div().p_3().text_size(px(18.0)).child(if self.external {
-                "QingMail · 简化阅读"
-            } else {
-                "QingMail · P0 邮件内容验证"
-            }))
+            .when(!self.embedded, |root| {
+                root.child(div().p_3().text_size(px(18.0)).child(if self.external {
+                    "QingMail · 简化阅读"
+                } else {
+                    "QingMail · P0 邮件内容验证"
+                }))
+            })
             .child(div().flex().flex_1().min_h_0().child(samples).child(body))
-            .child(div().p_3().text_size(px(12.0)).child(self.status.clone()))
+            .child(
+                div()
+                    .px_6()
+                    .py_2()
+                    .text_size(px(11.0))
+                    .text_color(theme::color(ColorRole::ON_SURFACE_VARIANT))
+                    .child(self.status.clone()),
+            )
     }
 }
 
