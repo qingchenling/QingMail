@@ -1,4 +1,6 @@
 //! 进程内事件驱动的存储线程；SQLite 连接仅在此线程建立和使用。
+#[path = "remote_storage.rs"]
+mod remote;
 #[path = "rpc_storage.rs"]
 mod rpc;
 use mail_content::draft::Draft;
@@ -20,6 +22,7 @@ pub type AccountList = Vec<(AccountId, mail_core::AccountSettings)>;
 #[derive(Clone)]
 pub struct StorageClient {
     queue: SyncSender<Request>,
+    remote: Option<mail_protocol::transport::Client>,
 }
 
 pub struct StorageWorker {
@@ -79,6 +82,13 @@ enum Request {
     ImportAttachment {
         account: AccountId,
         path: PathBuf,
+        reply: SyncSender<StorageResult<mail_storage::AttachmentInfo>>,
+    },
+    ImportBytes {
+        account: AccountId,
+        name: String,
+        media_type: String,
+        bytes: Vec<u8>,
         reply: SyncSender<StorageResult<mail_storage::AttachmentInfo>>,
     },
     AttachmentInfos {
@@ -200,6 +210,12 @@ enum Request {
         draft: Box<StoredDraft>,
         reply: SyncSender<StorageResult<crate::sending::SendReview>>,
     },
+    ReviewVersion {
+        account: AccountId,
+        draft: mail_core::DraftId,
+        revision: u32,
+        reply: SyncSender<StorageResult<crate::sending::SendReview>>,
+    },
     BeginSend {
         review: crate::sending::SendReview,
         allow_empty_subject: bool,
@@ -278,7 +294,10 @@ impl StorageWorker {
             .name("qingmail-storage".into())
             .spawn(move || run(path, receiver))?;
         Ok(Self {
-            client: StorageClient { queue },
+            client: StorageClient {
+                queue,
+                remote: None,
+            },
             thread: Some(thread),
         })
     }
@@ -299,6 +318,37 @@ impl Drop for StorageWorker {
 }
 
 impl StorageClient {
+    pub(crate) fn import_bytes(
+        &self,
+        account: AccountId,
+        name: String,
+        media_type: String,
+        bytes: Vec<u8>,
+    ) -> StorageResult<Receiver<StorageResult<mail_storage::AttachmentInfo>>> {
+        self.request(|reply| Request::ImportBytes {
+            account,
+            name,
+            media_type,
+            bytes,
+            reply,
+        })
+    }
+    pub(crate) fn remote_client(&self) -> Option<mail_protocol::transport::Client> {
+        self.remote.clone()
+    }
+    pub(crate) fn review_version(
+        &self,
+        account: AccountId,
+        draft: mail_core::DraftId,
+        revision: u32,
+    ) -> StorageResult<Receiver<StorageResult<crate::sending::SendReview>>> {
+        self.request(|reply| Request::ReviewVersion {
+            account,
+            draft,
+            revision,
+            reply,
+        })
+    }
     pub(crate) fn credential_referenced(
         &self,
         key: AccountId,
@@ -954,6 +1004,24 @@ fn run(path: Option<PathBuf>, receiver: Receiver<Request>) {
                     .map_err(|e| e.to_string())
                 }));
             }
+            Request::ImportBytes {
+                account,
+                name,
+                media_type,
+                bytes,
+                reply,
+            } => {
+                let _ = reply.send(opened.and_then(|store| {
+                    store
+                        .import_attachment(
+                            &account,
+                            &name,
+                            &media_type,
+                            &mut std::io::Cursor::new(bytes),
+                        )
+                        .map_err(|e| e.to_string())
+                }));
+            }
             Request::ImportAttachment {
                 account,
                 path,
@@ -1194,6 +1262,20 @@ fn run(path: Option<PathBuf>, receiver: Receiver<Request>) {
                         .map_err(|e| e.to_string())
                 }));
             }
+            Request::ReviewVersion {
+                account,
+                draft,
+                revision,
+                reply,
+            } => {
+                let _ = reply.send(opened.and_then(|store| {
+                    let draft = store.draft(&account, &draft).map_err(|e| e.to_string())?;
+                    if draft.revision != revision {
+                        return Err("草稿版本已改变，请重新检查发送".into());
+                    }
+                    crate::sending::review(store, &draft)
+                }));
+            }
             Request::ReviewSend { draft, reply } => {
                 let _ = reply.send(opened.and_then(|s| crate::sending::review(s, &draft)));
             }
@@ -1332,11 +1414,7 @@ fn run(path: Option<PathBuf>, receiver: Receiver<Request>) {
         }
     }
 }
-fn import_attachment(
-    store: &mut Store,
-    account: &AccountId,
-    path: &std::path::Path,
-) -> StorageResult<mail_storage::AttachmentInfo> {
+fn selected_attachment_file(path: &std::path::Path) -> StorageResult<(String, std::fs::File)> {
     use rustix::fs::{Mode, OFlags, open};
     if !path.is_absolute() {
         return Err("请选择绝对路径的普通文件".into());
@@ -1352,13 +1430,21 @@ fn import_attachment(
         Mode::empty(),
     )
     .map_err(|_| "无法打开附件，请选择可读的普通文件")?;
-    let mut file = std::fs::File::from(fd);
+    let file = std::fs::File::from(fd);
     let metadata = file.metadata().map_err(|_| "无法读取附件信息")?;
     if !metadata.is_file() || metadata.len() > mail_storage::MAX_ATTACHMENT_BYTES {
         return Err("附件须为不超过25MiB的普通文件".into());
     }
+    Ok((name.into(), file))
+}
+fn import_attachment(
+    store: &mut Store,
+    account: &AccountId,
+    path: &std::path::Path,
+) -> StorageResult<mail_storage::AttachmentInfo> {
+    let (name, mut file) = selected_attachment_file(path)?;
     store
-        .import_attachment(account, name, "application/octet-stream", &mut file)
+        .import_attachment(account, &name, "application/octet-stream", &mut file)
         .map_err(|e| e.to_string())
 }
 

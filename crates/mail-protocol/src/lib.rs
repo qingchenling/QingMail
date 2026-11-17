@@ -265,6 +265,21 @@ pub enum Command {
 impl Command {
     fn validate(&self) -> Result<(), ProtocolError> {
         match self {
+            Self::AttachUi { session }
+            | Self::DetachUi { session }
+            | Self::UiHeartbeat { session, .. }
+            | Self::FinishShutdown { session, .. }
+                if !valid_id(session) =>
+            {
+                Err(ProtocolError::Invalid)
+            }
+            Self::FinishUpload { resource }
+            | Self::CancelResource { resource }
+            | Self::DownloadAttachment { resource }
+                if !valid_id(resource) =>
+            {
+                Err(ProtocolError::Invalid)
+            }
             Self::UnifiedInbox { limit, .. } if !(1..=MAX_PAGE).contains(limit) => {
                 Err(ProtocolError::Invalid)
             }
@@ -293,12 +308,22 @@ impl Command {
                 Err(ProtocolError::Invalid)
             }
             Self::AttachmentInfos { ids, .. } if ids.len() > 32 => Err(ProtocolError::Invalid),
-            Self::CreateUpload { name, size, .. }
-                if *size > 25 * 1024 * 1024
-                    || name.is_empty()
-                    || name.len() > 1024
-                    || name.contains(['/', '\\'])
-                    || name.chars().any(char::is_control) =>
+            Self::CreateUpload {
+                name,
+                size,
+                media_type,
+                ..
+            } if *size > 25 * 1024 * 1024
+                || matches!(name.as_str(), "." | "..")
+                || media_type.len() > 128
+                || !media_type.contains('/')
+                || !media_type
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"/!#$&^_.+-".contains(&b))
+                || name.is_empty()
+                || name.len() > 1024
+                || name.contains(['/', '\\'])
+                || name.chars().any(char::is_control) =>
             {
                 Err(ProtocolError::Invalid)
             }
@@ -592,6 +617,14 @@ pub enum Reply {
         epoch: String,
     },
     Status(DaemonStatus),
+    /// attached=false 表示已有前台；不返回现有会话的秘密令牌。
+    UiAttached {
+        attached: bool,
+    },
+    UiState {
+        activation: Option<Activation>,
+        shutdown_requested: bool,
+    },
     Snapshot(AppSnapshot),
     Events(EventBatch),
     Mutation(MutationStatus),
@@ -631,6 +664,12 @@ pub enum Reply {
     },
     Count(u64),
     Acknowledged,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Activation {
+    pub sequence: u64,
+    pub target: WindowTarget,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

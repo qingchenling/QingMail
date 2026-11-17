@@ -22,7 +22,8 @@ pub struct SendReview {
     pub(crate) account: AccountId,
     pub(crate) draft: DraftId,
     pub(crate) revision: u32,
-    settings: mail_core::AccountSettings,
+    settings: Option<mail_core::AccountSettings>,
+    remote_token: Option<String>,
 }
 pub(crate) struct ReadySend {
     attempt: SmtpAttempt,
@@ -76,10 +77,13 @@ pub(crate) fn review(store: &Store, draft: &StoredDraft) -> StorageResult<SendRe
         account: draft.account.clone(),
         draft: draft.id.clone(),
         revision: draft.revision,
-        settings: store
-            .account(&draft.account)
-            .map_err(|e| e.to_string())?
-            .ok_or("发件账号不存在")?,
+        settings: Some(
+            store
+                .account(&draft.account)
+                .map_err(|e| e.to_string())?
+                .ok_or("发件账号不存在")?,
+        ),
+        remote_token: None,
     })
 }
 pub(crate) fn begin(
@@ -103,7 +107,7 @@ pub(crate) fn begin(
         .account(&draft.account)
         .map_err(|e| e.to_string())?
         .ok_or("发件账号不存在")?;
-    if settings != review.settings {
+    if Some(settings.clone()) != review.settings || review.remote_token.is_some() {
         return Err("发件账号配置已改变，请重新检查发送内容".into());
     }
     let server = settings.smtp;
@@ -305,6 +309,18 @@ impl SendCoordinator {
         review: SendReview,
         allow_empty_subject: bool,
     ) -> StorageResult<Receiver<StorageResult<SendTask>>> {
+        if let Some(client) = store.remote_client() {
+            let token = review.remote_token.ok_or("远端发送预览缺少令牌")?;
+            return self.start(move || {
+                remote_send(
+                    client,
+                    mail_protocol::Command::ConfirmSend {
+                        review: token,
+                        allow_empty_subject,
+                    },
+                )
+            });
+        }
         self.start(move || {
             dispatch(
                 store,
@@ -324,6 +340,11 @@ impl SendCoordinator {
         account: AccountId,
         task: SendTaskId,
     ) -> StorageResult<Receiver<StorageResult<SendTask>>> {
+        if let Some(client) = store.remote_client() {
+            return self.start(move || {
+                remote_send(client, mail_protocol::Command::Resend { account, task })
+            });
+        }
         self.start(move || {
             resend_once(
                 store,
@@ -343,6 +364,11 @@ impl SendCoordinator {
         account: AccountId,
         task: SendTaskId,
     ) -> StorageResult<Receiver<StorageResult<SendTask>>> {
+        if let Some(client) = store.remote_client() {
+            return self.start(move || {
+                remote_send(client, mail_protocol::Command::RetryCopy { account, task })
+            });
+        }
         self.start(move || retry_copy_once(store, &SystemVault, account, task, sent::save_copy))
     }
 
@@ -370,3 +396,68 @@ impl SendCoordinator {
 #[cfg(test)]
 #[path = "sending_tests.rs"]
 mod tests;
+
+impl SendReview {
+    pub(crate) fn from_remote(preview: mail_protocol::SendPreview, draft: &StoredDraft) -> Self {
+        Self {
+            sender: preview.sender,
+            headers: preview.headers,
+            attachments: preview.attachments,
+            attachment_bytes: preview.attachment_bytes,
+            preview: preview.preview,
+            account: draft.account.clone(),
+            draft: draft.id.clone(),
+            revision: draft.revision,
+            settings: None,
+            remote_token: Some(preview.token),
+        }
+    }
+}
+fn remote_send(
+    client: mail_protocol::transport::Client,
+    command: mail_protocol::Command,
+) -> StorageResult<SendTask> {
+    use mail_protocol::{
+        Command, ErrorCode, MutationStatus, Reply, Request,
+        transport::{ClientError, request_id},
+    };
+    let request = Request::new(request_id().map_err(|e| e.to_string())?, command);
+    // 只发一次确认。确认响应丢失后查询相同ID；不得自动重放原命令。
+    match client.call(&request) {
+        Ok(Reply::Task(task)) => return Ok(task),
+        Ok(Reply::Mutation(MutationStatus::InProgress)) => (),
+        Err(ClientError::Remote(error))
+            if !matches!(error.code, ErrorCode::Busy | ErrorCode::Uncertain) =>
+        {
+            return Err(error.message);
+        }
+        Err(_) => (),
+        _ => return Err("发送确认返回非预期响应，请核对发送记录".into()),
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+    while std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        match client.request(Command::MutationResult {
+            mutation: request.id.clone(),
+        }) {
+            Ok(Reply::Mutation(MutationStatus::Finished(result))) => {
+                return match *result {
+                    Ok(Reply::Task(task)) => Ok(task),
+                    Err(error) => Err(error.message),
+                    _ => Err("确认记录类型不符，请核对发送记录".into()),
+                };
+            }
+            Ok(Reply::Mutation(MutationStatus::InProgress)) => (),
+            _ => {
+                return Err(format!(
+                    "确认结果未确定，请查看发送记录；不会自动重发（请求{}）",
+                    request.id
+                ));
+            }
+        }
+    }
+    Err(format!(
+        "确认查询超时，请查看发送记录；不会自动重发（请求{}）",
+        request.id
+    ))
+}
