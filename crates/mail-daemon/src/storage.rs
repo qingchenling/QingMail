@@ -15,6 +15,7 @@ use std::{
 };
 
 pub type StorageResult<T> = Result<T, String>;
+type OperationClaim = Option<(mail_protocol::OperationInfo, bool)>;
 pub(crate) type RpcStorageResult<T> = StorageResult<Result<T, mail_protocol::RpcError>>;
 pub type CatalogCache = (Vec<mail_core::RemoteFolder>, Option<i64>);
 pub type RemovedAccount = (mail_storage::AccountImpact, Vec<AccountId>);
@@ -32,6 +33,15 @@ pub struct StorageWorker {
 }
 
 enum Request {
+    ClaimOperation {
+        reply: SyncSender<StorageResult<OperationClaim>>,
+    },
+    FinishOperation {
+        id: String,
+        state: mail_protocol::OperationState,
+        detail: Option<mail_protocol::RpcError>,
+        reply: SyncSender<StorageResult<()>>,
+    },
     RemoveLocal {
         account: AccountId,
         reply: SyncSender<StorageResult<(mail_storage::AccountImpact, Vec<AccountId>)>>,
@@ -419,6 +429,22 @@ impl StorageClient {
             settings: Box::new(settings),
             key,
             baseline: baseline.map(Box::new),
+            reply,
+        })
+    }
+    pub(crate) fn claim_operation(&self) -> StorageResult<Receiver<StorageResult<OperationClaim>>> {
+        self.request(|reply| Request::ClaimOperation { reply })
+    }
+    pub(crate) fn finish_operation(
+        &self,
+        id: String,
+        state: mail_protocol::OperationState,
+        detail: Option<mail_protocol::RpcError>,
+    ) -> StorageResult<Receiver<StorageResult<()>>> {
+        self.request(|reply| Request::FinishOperation {
+            id,
+            state,
+            detail,
             reply,
         })
     }
@@ -975,6 +1001,21 @@ fn run(path: Option<PathBuf>, receiver: Receiver<Request>) {
                         baseline.as_deref(),
                     )
                     .map_err(rpc::storage_error)
+                }));
+            }
+            Request::ClaimOperation { reply } => {
+                let _ =
+                    reply.send(opened.and_then(|s| s.claim_operation().map_err(|e| e.to_string())));
+            }
+            Request::FinishOperation {
+                id,
+                state,
+                detail,
+                reply,
+            } => {
+                let _ = reply.send(opened.and_then(|s| {
+                    s.finish_operation(&id, state, detail)
+                        .map_err(|e| e.to_string())
                 }));
             }
             Request::Rpc { request, reply } => {

@@ -150,6 +150,15 @@ impl Business {
         let Command::Business { operation } = &request.command else {
             return Err(rpc_error(ErrorCode::InvalidRequest, "业务命令无效"));
         };
+        if matches!(
+            operation,
+            BusinessOperation::Flags { .. } | BusinessOperation::Move { .. }
+        ) {
+            return Err(rpc_error(
+                ErrorCode::Unsupported,
+                "邮件修改须使用持久 EnqueueOperation 队列",
+            ));
+        }
         let mut results = self.results.lock().unwrap_or_else(|e| e.into_inner());
         results.retain(|_, (_, at, r)| r.is_none() || at.elapsed() < Duration::from_secs(600));
         if let Some((original, _, _)) = results.get(&request.id) {

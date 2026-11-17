@@ -231,6 +231,9 @@ impl SyncEngine {
     pub fn revision(&self) -> u64 {
         self.revision.load(Ordering::Acquire)
     }
+    pub(crate) fn pause_signal(&self) -> Arc<AtomicBool> {
+        self.paused.clone()
+    }
     pub fn paused(&self) -> bool {
         self.paused.load(Ordering::Acquire)
     }

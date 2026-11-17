@@ -338,6 +338,11 @@ impl Command {
                 Err(ProtocolError::Invalid)
             }
             Self::AccountCheckStatus { task } if !valid_id(task) => Err(ProtocolError::Invalid),
+            Self::RetryOperation { operation } | Self::ResolveOperation { operation, .. }
+                if !valid_id(operation) =>
+            {
+                Err(ProtocolError::Invalid)
+            }
             Self::CommitAccount { check, account }
                 if !valid_id(check) || account.as_ref().is_some_and(|id| !valid_id(&id.0)) =>
             {

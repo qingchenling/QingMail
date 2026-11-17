@@ -130,3 +130,5 @@ mod tests {
         assert_eq!(ticks, worker.ticks());
     }
 }
+
+mod operations;

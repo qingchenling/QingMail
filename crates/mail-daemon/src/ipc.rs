@@ -85,6 +85,7 @@ pub struct Server {
 struct Service {
     storage: StorageClient,
     sync: SyncEngine,
+    operations: crate::operations::Operations,
     accounts: AccountGateway,
     epoch: String,
     revision: Arc<AtomicU64>,
@@ -112,6 +113,12 @@ impl Server {
         let accounts =
             AccountGateway::start(config.network_enabled, storage.client(), revision.clone())?;
         let sync = SyncEngine::start_enabled(storage.client(), config.network_enabled);
+        let operations = crate::operations::Operations::start(
+            storage.client(),
+            config.network_enabled,
+            sync.pause_signal(),
+            revision.clone(),
+        )?;
         let resources = Arc::new(Mutex::new(resources::Resources::default()));
         let business = business::Business::start(
             storage.client(),
@@ -124,6 +131,7 @@ impl Server {
             storage: storage.client(),
             ownership: Mutex::new(()),
             sync,
+            operations,
             accounts,
             epoch: transport::request_id()?,
             revision: revision.clone(),
@@ -256,6 +264,7 @@ impl Server {
         });
         let mut service = Arc::try_unwrap(self.service)
             .map_err(|_| io::Error::other("后台工作线程尚未释放状态"))?;
+        service.operations.stop();
         service.business.stop();
         service.accounts.stop();
         service.sending.stop();
@@ -702,9 +711,21 @@ impl Service {
             | Command::AccountCheckStatus { .. }
             | Command::MutationResult { .. } => self.accounts.call(request),
             command if RPC_COMMANDS.contains(&command.name()) => {
+                if matches!(
+                    command,
+                    Command::EnqueueOperation { .. }
+                        | Command::RetryOperation { .. }
+                        | Command::ResolveOperation { .. }
+                ) && self.sessions().closing()
+                {
+                    return Err(rpc_error(ErrorCode::Busy, "后台正在退出，未接受新邮件操作"));
+                }
                 let changes = matches!(
                     command,
-                    Command::SetDefaultAccount { .. }
+                    Command::EnqueueOperation { .. }
+                        | Command::RetryOperation { .. }
+                        | Command::ResolveOperation { .. }
+                        | Command::SetDefaultAccount { .. }
                         | Command::OpenDraft { .. }
                         | Command::NewDraft { .. }
                         | Command::SelectDraft { .. }

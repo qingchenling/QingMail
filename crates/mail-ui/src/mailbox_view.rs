@@ -249,6 +249,17 @@ impl Mailbox {
                             .on_click(|_, _, cx| crate::send_tasks::open(cx)),
                     )
                     .child(
+                        quiet(
+                            "mailbox-operations",
+                            &crate::lifecycle::operation_summary(cx),
+                        )
+                        .icon(icon("sync"))
+                        .w_full()
+                        .shape(ButtonShape::Square)
+                        .rounded_none()
+                        .on_click(|_, _, cx| crate::operations::open(cx)),
+                    )
+                    .child(
                         quiet("mailbox-settings", "设置")
                             .icon(icon("settings"))
                             .w_full()
@@ -614,8 +625,9 @@ impl Mailbox {
                                         gpui_kit::FontWeight::BOLD
                                     })
                                     .child(format!(
-                                        "{}{}",
+                                        "{}{}{}",
                                         message.envelope.sender,
+                                        crate::lifecycle::operation_label(&message.location, cx),
                                         if self.unified || self.search_scope == 2 {
                                             self.accounts
                                                 .iter()
