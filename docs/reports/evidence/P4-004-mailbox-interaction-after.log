@@ -1,0 +1,7 @@
+five isolated accounts seeded; messages_per_account=10000; private_credentials=false
+MAILBOX_ACTION step=0 completed_ms=177.22
+MAILBOX_ACTION step=1 completed_ms=50.81
+MAILBOX_ACTION step=2 completed_ms=25.42
+MAILBOX_ACTION step=3 completed_ms=25.81
+MAILBOX_ACTION step=4 completed_ms=25.35
+MAILBOX_ACTION PASS rapid_selection=30 search=Chinese paging=200 narrow_requested=900x760 scale=1.25 viewport=Size { 900px × 760px }

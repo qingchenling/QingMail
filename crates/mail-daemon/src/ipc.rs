@@ -318,7 +318,10 @@ impl Server {
                         Some(stream) => {
                             let _ = sender.try_send(stream);
                         }
-                        None => thread::park_timeout(Duration::from_millis(50)),
+                        None => {
+                            self.endpoint
+                                .wait_for_connection(Duration::from_millis(50))?;
+                        }
                     }
                 }
                 Ok(())
