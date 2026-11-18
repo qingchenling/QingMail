@@ -150,6 +150,9 @@ pub(crate) fn open(cx: &mut App) {
 struct Settings {
     store: mail_daemon::storage::StorageClient,
     cache: Option<mail_protocol::CacheInfo>,
+    desktop: Option<mail_protocol::DesktopSettings>,
+    desktop_busy: bool,
+    desktop_error: String,
     busy: bool,
     confirm_clear: bool,
     status: String,
@@ -159,12 +162,57 @@ impl Settings {
         let mut this = Self {
             store: crate::lifecycle::storage(cx),
             cache: None,
+            desktop: None,
+            desktop_busy: false,
+            desktop_error: String::new(),
             busy: false,
             confirm_clear: false,
             status: String::new(),
         };
         this.cache_command(mail_protocol::Command::CacheStatus, cx);
+        this.desktop_command(None, cx);
         this
+    }
+    fn desktop_command(&mut self, change: Option<u8>, cx: &mut Context<Self>) {
+        if self.desktop_busy {
+            return;
+        }
+        let command = if let Some(change) = change {
+            let Some(settings) = &self.desktop else {
+                return;
+            };
+            let mut preferences = settings.preferences.clone();
+            match change {
+                0 => preferences.notifications = !preferences.notifications,
+                1 => preferences.show_sender_subject = !preferences.show_sender_subject,
+                _ => preferences.show_preview = !preferences.show_preview,
+            }
+            mail_protocol::Command::UpdateDesktopSettings { preferences }
+        } else {
+            mail_protocol::Command::DesktopSettings
+        };
+        self.desktop_busy = true;
+        self.desktop_error.clear();
+        let store = self.store.clone();
+        let task = cx
+            .background_executor()
+            .spawn(async move { store.control(command) });
+        cx.spawn(async move |entity, cx| {
+            let result = task.await;
+            let _ = entity.update(cx, |this, cx| {
+                this.desktop_busy = false;
+                match result {
+                    Ok(mail_protocol::Reply::DesktopSettings(settings)) => {
+                        this.desktop = Some(settings)
+                    }
+                    Ok(_) => this.desktop_error = "后台桌面设置响应无效".into(),
+                    Err(e) => this.desktop_error = format!("{e}；请刷新设置核对已保存状态"),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
     }
     fn cache_command(&mut self, command: mail_protocol::Command, cx: &mut Context<Self>) {
         if self.busy {
@@ -200,6 +248,8 @@ impl Render for Settings {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let preferences = prefs(cx);
         let mut column = div()
+            .id("settings-scroll")
+            .overflow_y_scroll()
             .flex()
             .flex_col()
             .gap_3()
@@ -312,6 +362,32 @@ impl Render for Settings {
                 .text_size(px(12.))
                 .child("减少动态用于关闭主题过渡；产品窗口本身没有持续动画。"),
         );
+        column = column.child(div().text_size(px(20.)).child("桌面通知"));
+        if let Some(settings) = &self.desktop {
+            let p = &settings.preferences;
+            let mut row = div().flex().flex_wrap().gap_2();
+            for (id, label, on, change) in [
+                ("desktop-notifications", "新信通知", p.notifications, 0),
+                ("desktop-sender", "发件人和主题", p.show_sender_subject, 1),
+                ("desktop-preview", "已缓存正文预览", p.show_preview, 2),
+            ] {
+                row = row.child(
+                    MaterialButton::new(id)
+                        .variant(ButtonVariant::Tonal)
+                        .disabled(self.desktop_busy)
+                        .child(format!("{label}：{}", if on { "开" } else { "关" }))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.desktop_command(Some(change), cx)
+                        })),
+                );
+            }
+            column = column
+                .child(row)
+                .child(settings.notification_status.clone());
+        }
+        column=column.child("默认只显示账号与数量；预览不触发下载。锁屏及勿扰展示由系统决定。登录后后台启动选项将在后续迭代接入。")
+            .child(MaterialButton::new("desktop-refresh").disabled(self.desktop_busy).child("刷新通知状态").on_click(cx.listener(|this,_,_,cx|this.desktop_command(None,cx))))
+            .child(self.desktop_error.clone());
         column = column.child(div().text_size(px(20.)).child("邮件缓存"));
         if let Some(info) = &self.cache {
             let mib = |v: u64| v as f64 / 1048576.;

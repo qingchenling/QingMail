@@ -18,14 +18,15 @@ impl StorageWorker {
         })
     }
 }
-fn call(client: &Client, command: Rpc) -> StorageResult<Reply> {
+pub(super) fn call(client: &Client, command: Rpc) -> StorageResult<Reply> {
     use mail_protocol::{
         MutationStatus, Request,
         transport::{ClientError, request_id},
     };
     let write = matches!(
         command,
-        Rpc::OpenDraft { .. }
+        Rpc::UpdateDesktopSettings { .. }
+            | Rpc::OpenDraft { .. }
             | Rpc::NewDraft { .. }
             | Rpc::SelectDraft { .. }
             | Rpc::SaveDraft { .. }

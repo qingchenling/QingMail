@@ -113,6 +113,9 @@ fn compatible(reply: Reply) -> Result<(), String> {
                 CommandName::Business,
                 CommandName::JobResult,
                 CommandName::SaveDraft,
+                CommandName::DesktopSettings,
+                CommandName::UpdateDesktopSettings,
+                CommandName::OpenMail,
             ]
             .iter()
             .all(|c| commands.contains(c)) =>

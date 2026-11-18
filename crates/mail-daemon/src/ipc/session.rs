@@ -21,6 +21,7 @@ pub(super) struct Sessions {
     revision: u64,
     observed: (u64, u64),
     events: VecDeque<Event>,
+    pending_mail: Option<OpenMailTarget>,
 }
 impl Sessions {
     fn expire(&mut self, now: Instant) {
@@ -101,7 +102,13 @@ impl Sessions {
                 self.frontend = Some(Frontend {
                     token: token.into(),
                     seen: now,
-                    activation: None,
+                    activation: self.pending_mail.take().map(|target| {
+                        self.sequence += 1;
+                        Activation {
+                            sequence: self.sequence,
+                            target: WindowTarget::Mail { target },
+                        }
+                    }),
                 });
                 true
             }
@@ -120,6 +127,26 @@ impl Sessions {
             target,
         });
         Ok(Reply::Acknowledged)
+    }
+    /// Keeps only the newest intent while a frontend starts. Never carries arbitrary paths.
+    pub fn open_mail(&mut self, target: OpenMailTarget, now: Instant) -> bool {
+        if self
+            .activate(
+                WindowTarget::Mail {
+                    target: target.clone(),
+                },
+                now,
+            )
+            .is_ok()
+        {
+            true
+        } else {
+            self.pending_mail = Some(target);
+            false
+        }
+    }
+    pub fn clear_mail(&mut self) {
+        self.pending_mail = None;
     }
     fn check(&mut self, token: &str, now: Instant) -> Result<&mut Frontend, RpcError> {
         self.expire(now);
@@ -259,5 +286,41 @@ mod tests {
         assert!(s.events(0).resnapshot);
         assert!(!s.events(s.revision() - 1).resnapshot);
         assert!(s.events(s.revision() + 1).resnapshot);
+    }
+}
+
+#[cfg(test)]
+mod notification_tests {
+    use super::*;
+    #[test]
+    fn latest_mail_intent_survives_frontend_start_and_acknowledges_once() {
+        let mut sessions = Sessions::default();
+        let now = Instant::now();
+        let first = OpenMailTarget {
+            account: mail_core::AccountId("a".repeat(32)),
+            message: None,
+        };
+        let second = OpenMailTarget {
+            account: mail_core::AccountId("b".repeat(32)),
+            message: None,
+        };
+        assert!(!sessions.open_mail(first, now));
+        assert!(!sessions.open_mail(second.clone(), now));
+        sessions.attach("ui", now).unwrap();
+        let Reply::UiState {
+            activation: Some(a),
+            ..
+        } = sessions.heartbeat("ui", 0, now).unwrap()
+        else {
+            panic!()
+        };
+        assert!(matches!(a.target,WindowTarget::Mail {target} if target==second));
+        assert!(matches!(
+            sessions.heartbeat("ui", a.sequence, now).unwrap(),
+            Reply::UiState {
+                activation: None,
+                ..
+            }
+        ));
     }
 }

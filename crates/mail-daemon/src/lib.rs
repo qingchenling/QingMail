@@ -9,6 +9,7 @@ mod instance;
 pub mod ipc;
 pub mod launcher;
 mod network_gate;
+mod notifications;
 pub mod sending;
 pub mod storage;
 pub mod sync_engine;

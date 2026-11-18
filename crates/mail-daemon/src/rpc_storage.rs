@@ -21,6 +21,8 @@ fn local_error(message: String) -> RpcError {
     error(ErrorCode::Storage, message)
 }
 pub(crate) const COMMANDS: &[mail_protocol::CommandName] = &[
+    mail_protocol::CommandName::DesktopSettings,
+    mail_protocol::CommandName::UpdateDesktopSettings,
     mail_protocol::CommandName::CacheStatus,
     mail_protocol::CommandName::SetCacheBudget,
     mail_protocol::CommandName::ClearCache,
@@ -62,7 +64,8 @@ pub(crate) const COMMANDS: &[mail_protocol::CommandName] = &[
 fn mutates(command: &Rpc) -> bool {
     matches!(
         command,
-        Rpc::SetCacheBudget { .. }
+        Rpc::UpdateDesktopSettings { .. }
+            | Rpc::SetCacheBudget { .. }
             | Rpc::ClearCache
             | Rpc::ResolveDraftConflict { .. }
             | Rpc::FlushDraftSync { .. }
@@ -156,6 +159,18 @@ pub(super) fn dispatch(store: &mut Store, request: mail_protocol::Request) -> Re
 }
 fn execute(store: &mut Store, command: Rpc) -> Result<Reply, RpcError> {
     Ok(match command {
+        Rpc::DesktopSettings => Reply::DesktopSettings(mail_protocol::DesktopSettings {
+            preferences: store.desktop_preferences().map_err(storage_error)?,
+            notification_status: String::new(),
+        }),
+        Rpc::UpdateDesktopSettings { preferences } => {
+            Reply::DesktopSettings(mail_protocol::DesktopSettings {
+                preferences: store
+                    .update_desktop_preferences(&preferences)
+                    .map_err(storage_error)?,
+                notification_status: String::new(),
+            })
+        }
         Rpc::CacheStatus => Reply::Cache(store.cache_status().map_err(storage_error)?),
         Rpc::SetCacheBudget { bytes } => {
             store.set_cache_budget(bytes).map_err(storage_error)?;

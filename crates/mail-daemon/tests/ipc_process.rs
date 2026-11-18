@@ -402,7 +402,7 @@ fn wrong_version_unknown_fields_and_client_disconnect_never_write() {
             ErrorCode::VersionMismatch,
         ),
         (
-            "{\"version\":1,\"id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"password\":\"forbidden\",\"command\":{\"type\":\"accounts\"}}\n",
+            "{\"version\":2,\"id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"password\":\"forbidden\",\"command\":{\"type\":\"accounts\"}}\n",
             ErrorCode::InvalidRequest,
         ),
     ];
@@ -417,7 +417,7 @@ fn wrong_version_unknown_fields_and_client_disconnect_never_write() {
     }
     // 未完成的控制帧断开，不是退出信号。
     let mut stream = UnixStream::connect(path).unwrap();
-    stream.write_all(b"{\"version\":1").unwrap();
+    stream.write_all(b"{\"version\":2").unwrap();
     drop(stream);
     assert!(
         matches!(client.request(Command::Accounts).unwrap(),Reply::Accounts(accounts) if accounts.is_empty())
@@ -1686,6 +1686,89 @@ fn cache_budget_and_clear_are_durable_and_idempotent() {
     };
     assert_eq!(info.budget_bytes, 0);
     assert_eq!(info.evictable_bytes, 0);
+    client.request(Command::PrepareShutdown).unwrap();
+    daemon.exited();
+}
+
+#[test]
+fn desktop_settings_lost_reply_revision_guard_and_restart_are_idempotent() {
+    let root = private_root();
+    let mut daemon = Daemon::start(root.path());
+    let client = daemon.ready(root.path());
+    let Reply::DesktopSettings(initial) = client.request(Command::DesktopSettings).unwrap() else {
+        panic!()
+    };
+    assert_eq!(initial.preferences, DesktopPreferences::default());
+    assert!(
+        initial.notification_status.contains("隔离")
+            || initial.notification_status.contains("检查")
+    );
+    let mut preferences = initial.preferences.clone();
+    preferences.show_sender_subject = true;
+    let request = Request::new(
+        "d".repeat(32),
+        Command::UpdateDesktopSettings { preferences },
+    );
+    let path = root.path().join("runtime/qingmail/daemon.sock");
+    let mut socket = UnixStream::connect(&path).unwrap();
+    write_json(&mut socket, &request).unwrap();
+    drop(socket);
+    let end = Instant::now() + Duration::from_secs(5);
+    loop {
+        if matches!(
+            client
+                .request(Command::MutationResult {
+                    mutation: request.id.clone()
+                })
+                .unwrap(),
+            Reply::Mutation(MutationStatus::Finished(_))
+        ) {
+            break;
+        }
+        assert!(Instant::now() < end);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let Reply::DesktopSettings(saved) = client.call(&request).unwrap() else {
+        panic!()
+    };
+    assert_eq!(saved.preferences.revision, 1);
+    assert!(saved.preferences.show_sender_subject);
+    let error = client
+        .request(Command::UpdateDesktopSettings {
+            preferences: initial.preferences,
+        })
+        .unwrap_err();
+    assert!(error.to_string().contains("版本"));
+    client.request(Command::PrepareShutdown).unwrap();
+    daemon.exited();
+    let mut daemon = Daemon::start(root.path());
+    let client = daemon.ready(root.path());
+    let Reply::DesktopSettings(after) = client.call(&request).unwrap() else {
+        panic!()
+    };
+    assert_eq!(after.preferences, saved.preferences);
+    assert!(
+        client
+            .request(Command::OpenMail {
+                target: OpenMailTarget {
+                    account: mail_core::AccountId("a".repeat(32)),
+                    message: None
+                }
+            })
+            .is_err()
+    );
+    // A P3 frontend must be rejected before any write, including commands it knows.
+    let old = format!(
+        "{{\"version\":1,\"id\":\"{}\",\"command\":{{\"type\":\"new_draft\"}}}}\n",
+        "b".repeat(32)
+    );
+    let mut socket = UnixStream::connect(&path).unwrap();
+    socket.write_all(old.as_bytes()).unwrap();
+    let response: Response = read_json(&mut BufReader::new(socket)).unwrap();
+    assert_eq!(
+        response.result.unwrap_err().code,
+        ErrorCode::VersionMismatch
+    );
     client.request(Command::PrepareShutdown).unwrap();
     daemon.exited();
 }

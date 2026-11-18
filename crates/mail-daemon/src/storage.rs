@@ -15,6 +15,7 @@ use std::{
 };
 
 pub type StorageResult<T> = Result<T, String>;
+type NotificationDrain = (Vec<mail_storage::NotificationBatch>, Option<i64>);
 type OperationClaim = Option<(mail_protocol::OperationInfo, bool)>;
 pub(crate) type RpcStorageResult<T> = StorageResult<Result<T, mail_protocol::RpcError>>;
 pub type CatalogCache = (Vec<mail_core::RemoteFolder>, Option<i64>);
@@ -33,6 +34,17 @@ pub struct StorageWorker {
 }
 
 enum Request {
+    RegisterNotificationWake {
+        wake: SyncSender<()>,
+    },
+    Notifications {
+        now: i64,
+        reply: SyncSender<StorageResult<NotificationDrain>>,
+    },
+    NotificationTarget {
+        target: mail_protocol::OpenMailTarget,
+        reply: SyncSender<StorageResult<bool>>,
+    },
     DeferDraftUpload {
         account: AccountId,
         id: String,
@@ -446,6 +458,24 @@ impl Drop for StorageWorker {
 }
 
 impl StorageClient {
+    pub(crate) fn notification_wake(&self, wake: SyncSender<()>) -> StorageResult<()> {
+        self.queue
+            .try_send(Request::RegisterNotificationWake { wake })
+            .map_err(|_| "通知队列不可用".into())
+    }
+    pub(crate) fn notifications(
+        &self,
+        now: i64,
+    ) -> StorageResult<Receiver<StorageResult<NotificationDrain>>> {
+        self.request(|reply| Request::Notifications { now, reply })
+    }
+    pub(crate) fn notification_target(
+        &self,
+        target: mail_protocol::OpenMailTarget,
+    ) -> StorageResult<Receiver<StorageResult<bool>>> {
+        self.request(|reply| Request::NotificationTarget { target, reply })
+    }
+
     pub(crate) fn defer_draft_upload(
         &self,
         account: AccountId,
@@ -789,6 +819,13 @@ impl StorageClient {
     }
     /// 类型化控制查询；不在前台重放不确定的写操作。
     pub fn control(&self, command: mail_protocol::Command) -> StorageResult<mail_protocol::Reply> {
+        if matches!(
+            command,
+            mail_protocol::Command::UpdateDesktopSettings { .. }
+        ) && let Some(client) = &self.remote
+        {
+            return remote::call(client, command);
+        }
         let id = mail_protocol::transport::request_id().map_err(|e| e.to_string())?;
         self.rpc(mail_protocol::Request::new(id, command))?
             .recv_timeout(std::time::Duration::from_secs(5))
@@ -1273,6 +1310,7 @@ pub fn receive<T>(reply: StorageResult<Receiver<StorageResult<T>>>) -> StorageRe
 
 fn run(path: Option<PathBuf>, receiver: Receiver<Request>) {
     let mut store: Option<Store> = None;
+    let mut notification_wake: Option<SyncSender<()>> = None;
     let mut maintenance = std::time::Instant::now();
     loop {
         let request = match receiver.recv_timeout(std::time::Duration::from_secs(60)) {
@@ -1861,16 +1899,38 @@ fn run(path: Option<PathBuf>, receiver: Receiver<Request>) {
                         .map_err(|e| e.to_string())
                 }));
             }
+            Request::RegisterNotificationWake { wake } => {
+                notification_wake = Some(wake);
+            }
+            Request::Notifications { now, reply } => {
+                let _ = reply.send(opened.and_then(|s| {
+                    let batches = s.take_notifications(now).map_err(|e| e.to_string())?;
+                    let due = s.notification_due().map_err(|e| e.to_string())?;
+                    Ok((batches, due))
+                }));
+            }
+            Request::NotificationTarget { target, reply } => {
+                let _ = reply.send(opened.and_then(|s| {
+                    s.validate_notification_target(&target)
+                        .map_err(|e| e.to_string())
+                }));
+            }
             Request::PublishFolder {
                 account,
                 batch,
                 now,
                 reply,
             } => {
-                let _ = reply.send(opened.and_then(|s| {
+                let result = opened.and_then(|s| {
                     s.apply_folder_batch(&account, &batch, now)
                         .map_err(|e| e.to_string())
-                }));
+                });
+                if result.is_ok()
+                    && let Some(wake) = &notification_wake
+                {
+                    let _ = wake.try_send(());
+                }
+                let _ = reply.send(result);
             }
             Request::MessageBody { location, reply } => {
                 let _ = reply.send(

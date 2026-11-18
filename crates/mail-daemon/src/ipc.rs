@@ -99,6 +99,8 @@ struct Service {
     sending: send::Sending,
     tray_status: Mutex<String>,
     ownership: Mutex<()>,
+    notification_status: Arc<Mutex<String>>,
+    frontend_launch: Mutex<Option<Instant>>,
 }
 impl Server {
     pub fn start(config: Config) -> io::Result<Self> {
@@ -144,6 +146,8 @@ impl Server {
         let service = Arc::new(Service {
             storage: storage.client(),
             ownership: Mutex::new(()),
+            frontend_launch: Mutex::new(None),
+            notification_status: Arc::new(Mutex::new("正在检查通知服务".into())),
             sync,
             operations,
             drafts,
@@ -184,6 +188,17 @@ impl Server {
                 let _ = tray_result.send(crate::Tray::start(tray_queue));
             });
         }
+        let notification_requests = crate::notifications::OpenIntents::default();
+        let notification_open = notification_requests.clone();
+        let mut notifications = crate::notifications::Notifications::start(
+            self.service.storage.clone(),
+            self.service.accounts.enabled() && self.tray_enabled,
+            notification_open,
+        )?;
+        // Share the worker status without asking the UI to contact D-Bus.
+        if let Some(service) = Arc::get_mut(&mut self.service) {
+            service.notification_status = notifications.status.clone();
+        }
         let mut tray = None;
         let mut exit_intent = false;
         let (sender, receiver) = mpsc::sync_channel::<UnixStream>(WAITING_CONNECTIONS);
@@ -221,6 +236,25 @@ impl Server {
                             }
                         };
                     }
+                    if let Some(target) = notification_requests.take() {
+                        let _ = self.service.open_mail(target);
+                    }
+                    let mut launching = self
+                        .service
+                        .frontend_launch
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    if launching.is_some_and(|at| at.elapsed() >= Duration::from_secs(12)) {
+                        self.service.sessions().clear_mail();
+                        *launching = None;
+                        *self
+                            .service
+                            .notification_status
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner()) =
+                            "前台未能就绪，请重新打开 QingMail".into();
+                    }
+                    drop(launching);
                     for command in tray_commands.try_iter() {
                         match command {
                             crate::Command::Open => {
@@ -229,21 +263,8 @@ impl Server {
                                     .sessions()
                                     .activate(WindowTarget::Mailbox, Instant::now())
                                     .is_err()
-                                    && let Ok(exe) = std::env::current_exe()
                                 {
-                                    let _ =
-                                        std::process::Command::new(exe.with_file_name("mail-ui"))
-                                            .env_remove("QINGMAIL_IPC_TEST_EDITOR")
-                                            .env_remove("QINGMAIL_IPC_TEST_MAILBOX")
-                                            .stdin(std::process::Stdio::null())
-                                            .stdout(std::process::Stdio::null())
-                                            .stderr(std::process::Stdio::null())
-                                            .spawn()
-                                            .map(|mut child| {
-                                                thread::spawn(move || {
-                                                    let _ = child.wait();
-                                                })
-                                            });
+                                    let _ = launch_frontend();
                                 }
                             }
                             crate::Command::Quit => {
@@ -278,6 +299,7 @@ impl Server {
             drop(sender);
             result
         });
+        notifications.stop();
         let mut service = Arc::try_unwrap(self.service)
             .map_err(|_| io::Error::other("后台工作线程尚未释放状态"))?;
         service.drafts.stop();
@@ -291,6 +313,20 @@ impl Server {
         result
     }
 }
+fn launch_frontend() -> io::Result<()> {
+    let exe = std::env::current_exe()?.with_file_name("mail-ui");
+    let mut child = std::process::Command::new(exe)
+        .env_remove("QINGMAIL_IPC_TEST_EDITOR")
+        .env_remove("QINGMAIL_IPC_TEST_MAILBOX")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+    thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
 fn rpc_error(code: ErrorCode, message: impl Into<String>) -> RpcError {
     RpcError {
         code,
@@ -298,6 +334,31 @@ fn rpc_error(code: ErrorCode, message: impl Into<String>) -> RpcError {
     }
 }
 impl Service {
+    fn open_mail(&self, target: OpenMailTarget) -> Result<Reply, RpcError> {
+        let mut launching = self
+            .frontend_launch
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut sessions = self.sessions();
+        if sessions.closing() {
+            return Err(rpc_error(ErrorCode::Busy, "后台正在协调退出"));
+        }
+        if !sessions.open_mail(target, Instant::now()) && launching.is_none() {
+            match launch_frontend() {
+                Ok(()) => *launching = Some(Instant::now()),
+                Err(e) => {
+                    sessions.clear_mail();
+                    *self
+                        .notification_status
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner()) =
+                        "无法打开前台，请重新打开 QingMail".into();
+                    return Err(rpc_error(ErrorCode::NotFound, e.to_string()));
+                }
+            }
+        }
+        Ok(Reply::Acknowledged)
+    }
     fn sessions(&self) -> std::sync::MutexGuard<'_, session::Sessions> {
         let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
         sessions.observe(self.revision.load(Ordering::Acquire), self.sync.revision());
@@ -440,6 +501,7 @@ impl Service {
             Command::Hello => {
                 let mut commands = vec![
                     CommandName::Hello,
+                    CommandName::OpenMail,
                     CommandName::Status,
                     CommandName::PrepareShutdown,
                     CommandName::AttachUi,
@@ -645,7 +707,25 @@ impl Service {
                 .map_err(|e| rpc_error(ErrorCode::Storage, e))??;
                 result
             }
-            Command::AttachUi { session } => self.sessions().attach(session, Instant::now()),
+            Command::OpenMail { target } => {
+                if !crate::storage::receive(self.storage.notification_target(target.clone()))
+                    .map_err(|e| rpc_error(ErrorCode::Storage, e))?
+                {
+                    return Err(rpc_error(
+                        ErrorCode::NotFound,
+                        "邮件或账号已失效，请返回收件箱",
+                    ));
+                }
+                self.open_mail(target.clone())
+            }
+            Command::AttachUi { session } => {
+                let reply = self.sessions().attach(session, Instant::now())?;
+                *self
+                    .frontend_launch
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = None;
+                Ok(reply)
+            }
             Command::UiHeartbeat {
                 session,
                 acknowledged,
@@ -653,7 +733,9 @@ impl Service {
                 .sessions()
                 .heartbeat(session, *acknowledged, Instant::now()),
             Command::DetachUi { session } => self.sessions().detach(session, Instant::now()),
-            Command::Activate { target } => self.sessions().activate(*target, Instant::now()),
+            Command::Activate { target } => {
+                self.sessions().activate(target.clone(), Instant::now())
+            }
             Command::Events { after } => Ok(Reply::Events(self.sessions().events(*after))),
             Command::SyncNow {
                 account,
@@ -789,6 +871,7 @@ impl Service {
                         | Command::StopUncertain { .. }
                         | Command::SetCacheBudget { .. }
                         | Command::ClearCache
+                        | Command::UpdateDesktopSettings { .. }
                 );
                 let mut response = self
                     .storage
@@ -805,6 +888,13 @@ impl Service {
                         .lock()
                         .unwrap_or_else(|e| e.into_inner())
                         .downloading_bytes();
+                }
+                if let Ok(Reply::DesktopSettings(settings)) = &mut response.result {
+                    settings.notification_status = self
+                        .notification_status
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clone();
                 }
                 if changes && response.result.is_ok() {
                     self.revision.fetch_add(1, Ordering::Release);

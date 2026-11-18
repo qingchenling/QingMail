@@ -1,5 +1,7 @@
-//! QingMail IPC v1：有界 NDJSON 控制帧；资源数据通过单独连接的二进制帧传输。
+//! QingMail IPC v2：有界 NDJSON 控制帧；资源数据通过单独连接的二进制帧传输。
 mod business;
+mod desktop;
+pub use desktop::*;
 mod domain;
 pub use business::*;
 pub mod transport;
@@ -10,7 +12,7 @@ use mail_core::*;
 use serde::{Deserialize, Serialize};
 pub use wire::*;
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 pub const MAX_STORAGE_PAYLOAD: u64 = 16 * 1024 * 1024;
 pub const MAX_CONTROL_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_CHUNK_BYTES: u32 = 64 * 1024;
@@ -74,6 +76,13 @@ pub enum Command {
         task: String,
     },
     Hello,
+    DesktopSettings,
+    UpdateDesktopSettings {
+        preferences: DesktopPreferences,
+    },
+    OpenMail {
+        target: OpenMailTarget,
+    },
     Status,
     Activate {
         target: WindowTarget,
@@ -305,6 +314,17 @@ pub enum Command {
 impl Command {
     fn validate(&self) -> Result<(), ProtocolError> {
         match self {
+            Self::OpenMail { target }
+                if !valid_id(&target.account.0)
+                    || target.message.as_ref().is_some_and(|m| {
+                        m.account != target.account
+                            || !valid_id(&m.folder_id)
+                            || m.uid == 0
+                            || m.uidvalidity == 0
+                    }) =>
+            {
+                Err(ProtocolError::Invalid)
+            }
             Self::CreateStorageRequest { size } if *size == 0 || *size > MAX_STORAGE_PAYLOAD => {
                 Err(ProtocolError::Invalid)
             }
@@ -403,10 +423,11 @@ impl Command {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WindowTarget {
     Mailbox,
+    Mail { target: OpenMailTarget },
     Composer,
     Reader,
     Accounts,
@@ -559,6 +580,9 @@ pub enum CommandName {
     Business,
     JobResult,
     Hello,
+    DesktopSettings,
+    UpdateDesktopSettings,
+    OpenMail,
     Status,
     Activate,
     AttachUi,
@@ -644,6 +668,9 @@ impl Command {
             Self::ConvertServerDraft { .. } => CommandName::ConvertServerDraft,
             Self::DraftConflicts { .. } => CommandName::DraftConflicts,
             Self::Hello => CommandName::Hello,
+            Self::DesktopSettings => CommandName::DesktopSettings,
+            Self::UpdateDesktopSettings { .. } => CommandName::UpdateDesktopSettings,
+            Self::OpenMail { .. } => CommandName::OpenMail,
             Self::Status => CommandName::Status,
             Self::Activate { .. } => CommandName::Activate,
             Self::AttachUi { .. } => CommandName::AttachUi,
@@ -808,6 +835,7 @@ pub enum Reply {
     DraftSyncStatus(Vec<DraftSyncInfo>),
     DraftConflicts(Vec<DraftConflict>),
     Cache(CacheInfo),
+    DesktopSettings(DesktopSettings),
     BrowserCopy {
         url: String,
     },
