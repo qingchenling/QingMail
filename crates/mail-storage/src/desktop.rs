@@ -314,7 +314,7 @@ mod tests {
     fn notification_schema17_migration_and_account_removal() {
         let (root, mut s, a) = setup();
         s.apply_folder_batch(&a, &batch(1, &[1]), 1).unwrap();
-        s.connection.execute_batch("DROP TABLE notification_candidates; DROP TABLE notification_pending; DROP TABLE notification_baselines; DROP TABLE desktop_settings; PRAGMA user_version=17;").unwrap();
+        s.connection.execute_batch("DROP TABLE autostart_intent; DROP TABLE notification_candidates; DROP TABLE notification_pending; DROP TABLE notification_baselines; DROP TABLE desktop_settings; PRAGMA user_version=17;").unwrap();
         drop(s);
         let mut s = Store::open(&root.path().join("data")).unwrap();
         assert_eq!(

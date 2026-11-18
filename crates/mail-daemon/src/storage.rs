@@ -34,6 +34,11 @@ pub struct StorageWorker {
 }
 
 enum Request {
+    Autostart {
+        controller: Option<crate::autostart::Controller>,
+        request: Box<mail_protocol::Request>,
+        reply: SyncSender<StorageResult<mail_protocol::Response>>,
+    },
     RegisterNotificationWake {
         wake: SyncSender<()>,
     },
@@ -821,7 +826,8 @@ impl StorageClient {
     pub fn control(&self, command: mail_protocol::Command) -> StorageResult<mail_protocol::Reply> {
         if matches!(
             command,
-            mail_protocol::Command::UpdateDesktopSettings { .. }
+            mail_protocol::Command::SetAutostart { .. }
+                | mail_protocol::Command::UpdateDesktopSettings { .. }
         ) && let Some(client) = &self.remote
         {
             return remote::call(client, command);
@@ -832,6 +838,17 @@ impl StorageClient {
             .map_err(|_| "后台控制查询超时，请重新读取状态".to_string())??
             .result
             .map_err(|e| e.message)
+    }
+    pub(crate) fn autostart(
+        &self,
+        controller: Option<crate::autostart::Controller>,
+        request: mail_protocol::Request,
+    ) -> StorageResult<Receiver<StorageResult<mail_protocol::Response>>> {
+        self.request(|reply| Request::Autostart {
+            controller,
+            request: Box::new(request),
+            reply,
+        })
     }
     pub fn rpc(
         &self,
@@ -1608,6 +1625,16 @@ fn run(path: Option<PathBuf>, receiver: Receiver<Request>) {
                     s.save_part(&location, &part, file)
                         .map_err(|e| e.to_string())
                 }));
+            }
+            Request::Autostart {
+                controller,
+                request,
+                reply,
+            } => {
+                let _ =
+                    reply.send(opened.map(|store| {
+                        crate::autostart::dispatch(store, controller.as_ref(), *request)
+                    }));
             }
             Request::Rpc { request, reply } => {
                 let _ = reply.send(opened.map(|store| rpc::dispatch(store, *request)));

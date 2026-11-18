@@ -1772,3 +1772,30 @@ fn desktop_settings_lost_reply_revision_guard_and_restart_are_idempotent() {
     client.request(Command::PrepareShutdown).unwrap();
     daemon.exited();
 }
+
+#[test]
+fn autostart_isolated_daemon_refuses_xdg_writes_without_stopping() {
+    let root = private_root();
+    let mut daemon = Daemon::start(root.path());
+    let client = daemon.ready(root.path());
+    assert!(
+        matches!(client.request(Command::Hello).unwrap(), Reply::Hello {commands,..} if commands.contains(&CommandName::SetAutostart) && commands.contains(&CommandName::AutostartSettings))
+    );
+    for command in [
+        Command::AutostartSettings,
+        Command::SetAutostart {
+            enabled: true,
+            revision: 0,
+        },
+    ] {
+        let error = client.request(command).unwrap_err();
+        assert!(error.to_string().contains("隔离/测试"));
+    }
+    assert!(
+        matches!(client.request(Command::Status).unwrap(),Reply::Status(s) if s.pid==daemon.0.id())
+    );
+    client.request(Command::PrepareShutdown).unwrap();
+    daemon.exited();
+    let store = mail_storage::Store::open(&root.path().join("data")).unwrap();
+    assert_eq!(store.autostart_intent().unwrap().revision, 0);
+}

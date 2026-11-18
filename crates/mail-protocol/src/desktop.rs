@@ -75,3 +75,14 @@ mod tests {
         assert!(serde_json::from_str::<DesktopPreferences>(r#"{"revision":0,"notifications":true,"show_sender_subject":false,"show_preview":false,"password":"secret"}"#).is_err());
     }
 }
+
+/// Actual XDG entry state; the desired value alone never implies success.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AutostartSettings {
+    pub revision: u64,
+    pub desired: bool,
+    pub pending: bool,
+    pub enabled: bool,
+    pub status: String,
+}
