@@ -152,6 +152,9 @@ struct Settings {
     cache: Option<mail_protocol::CacheInfo>,
     desktop: Option<mail_protocol::DesktopSettings>,
     desktop_busy: bool,
+    autostart: Option<mail_protocol::AutostartSettings>,
+    autostart_busy: bool,
+    autostart_error: String,
     desktop_error: String,
     busy: bool,
     confirm_clear: bool,
@@ -164,6 +167,9 @@ impl Settings {
             cache: None,
             desktop: None,
             desktop_busy: false,
+            autostart: None,
+            autostart_busy: false,
+            autostart_error: String::new(),
             desktop_error: String::new(),
             busy: false,
             confirm_clear: false,
@@ -171,7 +177,46 @@ impl Settings {
         };
         this.cache_command(mail_protocol::Command::CacheStatus, cx);
         this.desktop_command(None, cx);
+        this.autostart_command(None, cx);
         this
+    }
+    fn autostart_command(&mut self, enabled: Option<bool>, cx: &mut Context<Self>) {
+        if self.autostart_busy {
+            return;
+        }
+        let command = if let Some(enabled) = enabled {
+            let Some(settings) = &self.autostart else {
+                return;
+            };
+            mail_protocol::Command::SetAutostart {
+                enabled,
+                revision: settings.revision,
+            }
+        } else {
+            mail_protocol::Command::AutostartSettings
+        };
+        self.autostart_busy = true;
+        self.autostart_error.clear();
+        let store = self.store.clone();
+        let task = cx
+            .background_executor()
+            .spawn(async move { store.control(command) });
+        cx.spawn(async move |entity, cx| {
+            let result = task.await;
+            let _ = entity.update(cx, |this, cx| {
+                this.autostart_busy = false;
+                match result {
+                    Ok(mail_protocol::Reply::AutostartSettings(settings)) => {
+                        this.autostart = Some(settings)
+                    }
+                    Ok(_) => this.autostart_error = "自启动设置响应无效，请刷新".into(),
+                    Err(e) => this.autostart_error = format!("{e}；请刷新核对实际状态"),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
     }
     fn desktop_command(&mut self, change: Option<u8>, cx: &mut Context<Self>) {
         if self.desktop_busy {
@@ -385,9 +430,66 @@ impl Render for Settings {
                 .child(row)
                 .child(settings.notification_status.clone());
         }
-        column=column.child("默认只显示账号与数量；预览不触发下载。锁屏及勿扰展示由系统决定。登录后后台启动选项将在后续迭代接入。")
-            .child(MaterialButton::new("desktop-refresh").disabled(self.desktop_busy).child("刷新通知状态").on_click(cx.listener(|this,_,_,cx|this.desktop_command(None,cx))))
+        column = column
+            .child("默认只显示账号与数量；预览不触发下载。锁屏及勿扰展示由系统决定。")
+            .child(
+                MaterialButton::new("desktop-refresh")
+                    .disabled(self.desktop_busy)
+                    .child("刷新通知状态")
+                    .on_click(cx.listener(|this, _, _, cx| this.desktop_command(None, cx))),
+            )
             .child(self.desktop_error.clone());
+        column = column.child(div().text_size(px(20.)).child("登录后后台启动"));
+        if let Some(settings) = &self.autostart {
+            let desired = settings.desired;
+            column = column
+                .child(format!(
+                    "登录启动项：{}{}",
+                    if settings.enabled {
+                        "已启用"
+                    } else {
+                        "未启用"
+                    },
+                    if settings.pending {
+                        " · 设置尚未完成"
+                    } else {
+                        ""
+                    }
+                ))
+                .child(settings.status.clone())
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap_2()
+                        .child(
+                            MaterialButton::new("autostart-toggle")
+                                .variant(ButtonVariant::Tonal)
+                                .disabled(self.autostart_busy)
+                                .child(if desired {
+                                    "关闭登录启动"
+                                } else {
+                                    "开启登录启动"
+                                })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.autostart_command(Some(!desired), cx)
+                                })),
+                        )
+                        .child(
+                            MaterialButton::new("autostart-retry")
+                                .disabled(self.autostart_busy)
+                                .child("重新应用当前选择")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.autostart_command(Some(desired), cx)
+                                })),
+                        ),
+                );
+        }
+        column=column.child(MaterialButton::new("autostart-refresh").disabled(self.autostart_busy).child("刷新启动状态")
+            .on_click(cx.listener(|this,_,_,cx|this.autostart_command(None,cx))))
+            .child(self.autostart_error.clone())
+            .child("启动项需要桌面会话支持 XDG 自启动；仅启动后台，不打开主窗口。关闭此选项不会停止当前后台；保存并退出只结束本次会话。")
+            .child("没有可见托盘时，后台仍可运行；再次打开 QingMail 返回前台，使用保存并退出停止后台。");
         column = column.child(div().text_size(px(20.)).child("邮件缓存"));
         if let Some(info) = &self.cache {
             let mib = |v: u64| v as f64 / 1048576.;

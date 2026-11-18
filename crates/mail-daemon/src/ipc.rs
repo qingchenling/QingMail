@@ -37,6 +37,7 @@ pub struct Config {
 }
 impl Config {
     pub fn production() -> io::Result<Self> {
+        desktop_environment(|name| std::env::var_os(name).is_some_and(|v| !v.is_empty()))?;
         let paths = mail_storage::AppPaths::discover().map_err(io::Error::other)?;
         let runtime_root = paths
             .runtime
@@ -77,6 +78,15 @@ impl Config {
         })
     }
 }
+// Fail before opening the database when launched outside a usable desktop session.
+fn desktop_environment(has: impl Fn(&str) -> bool) -> io::Result<()> {
+    if !has("DBUS_SESSION_BUS_ADDRESS") || !(has("WAYLAND_DISPLAY") || has("DISPLAY")) {
+        return Err(io::Error::other(
+            "桌面会话未就绪：需要会话 D-Bus 和 Wayland/显示环境；请在桌面会话中重新启动后台",
+        ));
+    }
+    Ok(())
+}
 pub struct Server {
     endpoint: Endpoint,
     storage: StorageWorker,
@@ -101,6 +111,7 @@ struct Service {
     ownership: Mutex<()>,
     notification_status: Arc<Mutex<String>>,
     frontend_launch: Mutex<Option<Instant>>,
+    autostart: Option<crate::autostart::Controller>,
 }
 impl Server {
     pub fn start(config: Config) -> io::Result<Self> {
@@ -144,6 +155,11 @@ impl Server {
             revision.clone(),
         )?;
         let service = Arc::new(Service {
+            autostart: if config.network_enabled {
+                Some(crate::autostart::Controller::production()?)
+            } else {
+                None
+            },
             storage: storage.client(),
             ownership: Mutex::new(()),
             frontend_launch: Mutex::new(None),
@@ -166,6 +182,17 @@ impl Server {
             }),
             sending: send::Sending::new(storage.client(), config.network_enabled, revision.clone()),
         });
+        // Resume only previously pending user intent; do not silently repair external edits.
+        service
+            .storage
+            .autostart(
+                service.autostart.clone(),
+                Request::new(transport::request_id()?, Command::AutostartSettings),
+            )
+            .map_err(io::Error::other)?
+            .recv_timeout(STORAGE_TIMEOUT)
+            .map_err(io::Error::other)?
+            .map_err(io::Error::other)?;
         Ok(Self {
             endpoint,
             storage,
@@ -844,6 +871,28 @@ impl Service {
             Command::CheckAccount { .. }
             | Command::AccountCheckStatus { .. }
             | Command::MutationResult { .. } => self.accounts.call(request),
+            Command::AutostartSettings | Command::SetAutostart { .. } => {
+                if self.sessions().closing() {
+                    return Err(rpc_error(ErrorCode::Busy, "后台正在保存并退出"));
+                }
+                let changes = matches!(request.command, Command::SetAutostart { .. });
+                let response = self
+                    .storage
+                    .autostart(self.autostart.clone(), request)
+                    .map_err(|e| rpc_error(ErrorCode::Storage, e))?
+                    .recv_timeout(STORAGE_TIMEOUT)
+                    .map_err(|_| {
+                        rpc_error(
+                            ErrorCode::Uncertain,
+                            "设置结果尚未确认，请查询原请求或刷新状态",
+                        )
+                    })?
+                    .map_err(|e| rpc_error(ErrorCode::Storage, e))?;
+                if changes && response.result.is_ok() {
+                    self.revision.fetch_add(1, Ordering::Release);
+                }
+                response.result
+            }
             command if RPC_COMMANDS.contains(&command.name()) => {
                 if matches!(
                     command,
@@ -906,5 +955,99 @@ impl Service {
                 "此命令尚未接入独立后台，请查询 Hello 能力列表",
             )),
         }
+    }
+}
+
+#[cfg(test)]
+mod autostart_tests {
+    use super::*;
+    use std::{fs, os::unix::fs::PermissionsExt};
+    #[test]
+    fn autostart_session_environment_requires_bus_and_display_before_storage() {
+        assert!(desktop_environment(|_| false).is_err());
+        assert!(desktop_environment(|n| n == "WAYLAND_DISPLAY").is_err());
+        assert!(desktop_environment(|n| n == "DBUS_SESSION_BUS_ADDRESS").is_err());
+        assert!(
+            desktop_environment(|n| n == "DBUS_SESSION_BUS_ADDRESS" || n == "WAYLAND_DISPLAY")
+                .is_ok()
+        );
+        assert!(desktop_environment(|n| n == "DBUS_SESSION_BUS_ADDRESS" || n == "DISPLAY").is_ok());
+    }
+    #[test]
+    fn autostart_ipc_lost_reply_queries_original_result_and_preserves_current_daemon() {
+        let root = tempfile::tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let executable = root.path().join("mail-daemon");
+        fs::write(&executable, b"not executed").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let config = Config::isolated(root.path().to_path_buf()).unwrap();
+        let mut server = Server::start(config).unwrap();
+        Arc::get_mut(&mut server.service).unwrap().autostart = Some(
+            crate::autostart::Controller::fixture(root.path().join("autostart"), executable),
+        );
+        let socket = server.socket_path().to_path_buf();
+        let stop = server.stop_handle();
+        let runner = thread::spawn(move || server.run().unwrap());
+        let client = transport::Client::new(root.path().join("runtime"));
+        let request = Request::new(
+            transport::request_id().unwrap(),
+            Command::SetAutostart {
+                enabled: true,
+                revision: 0,
+            },
+        );
+        let mut stream = UnixStream::connect(&socket).unwrap();
+        write_json(&mut stream, &request).unwrap();
+        drop(stream);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if matches!(
+                client
+                    .request(Command::MutationResult {
+                        mutation: request.id.clone()
+                    })
+                    .unwrap(),
+                Reply::Mutation(MutationStatus::Finished(_))
+            ) {
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            matches!(client.call(&request).unwrap(),Reply::AutostartSettings(s) if s.enabled && s.revision==1)
+        );
+        let worker = StorageWorker::connect(client.clone()).unwrap();
+        assert!(
+            matches!(worker.client().control(Command::SetAutostart{enabled:false,revision:1}).unwrap(),Reply::AutostartSettings(s) if !s.enabled && s.revision==2)
+        );
+        assert!(matches!(
+            client.request(Command::Status).unwrap(),
+            Reply::Status(_)
+        ));
+        assert!(
+            !root
+                .path()
+                .join("autostart/org.qingmail.QingMail.desktop")
+                .exists()
+        );
+        // Enable remains a next-login choice; normal shutdown must leave it intact.
+        client
+            .request(Command::SetAutostart {
+                enabled: true,
+                revision: 2,
+            })
+            .unwrap();
+        client.request(Command::PrepareShutdown).unwrap();
+        drop(worker);
+        runner.join().unwrap();
+        assert!(stop.load(Ordering::Acquire));
+        assert!(
+            root.path()
+                .join("autostart/org.qingmail.QingMail.desktop")
+                .is_file()
+        );
+        let store = mail_storage::Store::open(&root.path().join("data")).unwrap();
+        assert!(store.autostart_intent().unwrap().desired);
     }
 }

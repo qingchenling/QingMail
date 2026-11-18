@@ -25,7 +25,8 @@ pub(super) fn call(client: &Client, command: Rpc) -> StorageResult<Reply> {
     };
     let write = matches!(
         command,
-        Rpc::UpdateDesktopSettings { .. }
+        Rpc::SetAutostart { .. }
+            | Rpc::UpdateDesktopSettings { .. }
             | Rpc::OpenDraft { .. }
             | Rpc::NewDraft { .. }
             | Rpc::SelectDraft { .. }

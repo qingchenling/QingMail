@@ -113,6 +113,8 @@ fn compatible(reply: Reply) -> Result<(), String> {
                 CommandName::Business,
                 CommandName::JobResult,
                 CommandName::SaveDraft,
+                CommandName::AutostartSettings,
+                CommandName::SetAutostart,
                 CommandName::DesktopSettings,
                 CommandName::UpdateDesktopSettings,
                 CommandName::OpenMail,

@@ -21,6 +21,8 @@ fn local_error(message: String) -> RpcError {
     error(ErrorCode::Storage, message)
 }
 pub(crate) const COMMANDS: &[mail_protocol::CommandName] = &[
+    mail_protocol::CommandName::AutostartSettings,
+    mail_protocol::CommandName::SetAutostart,
     mail_protocol::CommandName::DesktopSettings,
     mail_protocol::CommandName::UpdateDesktopSettings,
     mail_protocol::CommandName::CacheStatus,

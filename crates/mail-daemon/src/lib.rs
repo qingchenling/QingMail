@@ -3,6 +3,7 @@
 pub mod account_checks;
 mod account_commits;
 pub mod account_gateway;
+mod autostart;
 pub mod client;
 mod draft_sync;
 mod instance;

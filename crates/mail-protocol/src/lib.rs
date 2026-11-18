@@ -76,6 +76,11 @@ pub enum Command {
         task: String,
     },
     Hello,
+    AutostartSettings,
+    SetAutostart {
+        enabled: bool,
+        revision: u64,
+    },
     DesktopSettings,
     UpdateDesktopSettings {
         preferences: DesktopPreferences,
@@ -580,6 +585,8 @@ pub enum CommandName {
     Business,
     JobResult,
     Hello,
+    AutostartSettings,
+    SetAutostart,
     DesktopSettings,
     UpdateDesktopSettings,
     OpenMail,
@@ -668,6 +675,8 @@ impl Command {
             Self::ConvertServerDraft { .. } => CommandName::ConvertServerDraft,
             Self::DraftConflicts { .. } => CommandName::DraftConflicts,
             Self::Hello => CommandName::Hello,
+            Self::AutostartSettings => CommandName::AutostartSettings,
+            Self::SetAutostart { .. } => CommandName::SetAutostart,
             Self::DesktopSettings => CommandName::DesktopSettings,
             Self::UpdateDesktopSettings { .. } => CommandName::UpdateDesktopSettings,
             Self::OpenMail { .. } => CommandName::OpenMail,
@@ -835,6 +844,7 @@ pub enum Reply {
     DraftSyncStatus(Vec<DraftSyncInfo>),
     DraftConflicts(Vec<DraftConflict>),
     Cache(CacheInfo),
+    AutostartSettings(AutostartSettings),
     DesktopSettings(DesktopSettings),
     BrowserCopy {
         url: String,

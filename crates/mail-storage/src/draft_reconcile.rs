@@ -568,7 +568,7 @@ mod tests {
         s.fail_draft_sync(&a, &old.draft.id, "conflict", "old conflict")
             .unwrap();
         let version = s.account_version(&a).unwrap();
-        s.connection.execute_batch("DROP TABLE notification_candidates; DROP TABLE notification_pending; DROP TABLE notification_baselines; DROP TABLE desktop_settings; DROP VIEW protected_objects; DROP TRIGGER cache_body_insert; DROP TRIGGER cache_part_insert; DROP TABLE cache_access; DROP TABLE cache_settings; DROP TRIGGER stop_sent_draft_sync; DROP TRIGGER track_draft_scan_account; DROP TABLE draft_conflicts; DROP TABLE draft_scan_failures; DROP TABLE draft_scans; ALTER TABLE draft_sync DROP COLUMN lineage; PRAGMA user_version=15;").unwrap();
+        s.connection.execute_batch("DROP TABLE autostart_intent; DROP TABLE notification_candidates; DROP TABLE notification_pending; DROP TABLE notification_baselines; DROP TABLE desktop_settings; DROP VIEW protected_objects; DROP TRIGGER cache_body_insert; DROP TRIGGER cache_part_insert; DROP TABLE cache_access; DROP TABLE cache_settings; DROP TRIGGER stop_sent_draft_sync; DROP TRIGGER track_draft_scan_account; DROP TABLE draft_conflicts; DROP TABLE draft_scan_failures; DROP TABLE draft_scans; ALTER TABLE draft_sync DROP COLUMN lineage; PRAGMA user_version=15;").unwrap();
         drop(s);
         let s = Store::open(&path).unwrap();
         assert_eq!(s.draft(&a, &old.draft.id).unwrap(), old.draft);
