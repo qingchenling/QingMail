@@ -8,7 +8,8 @@ import subprocess
 import tempfile
 
 repo=Path(__file__).resolve().parents[1]
-evidence=repo/'docs/reports/evidence/P2-010-send-review.json'
+evidence=repo/'dist/verification/send-review.json'
+evidence.parent.mkdir(parents=True,exist_ok=True)
 with tempfile.TemporaryDirectory(prefix='qingmail-send-review-') as directory:
     root=Path(directory)
     root.chmod(0o700)

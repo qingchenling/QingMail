@@ -15,7 +15,7 @@ import time
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--binary', type=Path, default=Path('target/release/mail-ui'))
 parser.add_argument('--fixture', type=Path, default=Path('target/debug/examples/sync_fixture'))
-parser.add_argument('--evidence', type=Path, default=Path('docs/reports/evidence/P3-002-split.json'))
+parser.add_argument('--evidence', type=Path, default=Path('dist/verification/split.json'))
 args = parser.parse_args()
 binary = args.binary.resolve()
 evidence = args.evidence.resolve()

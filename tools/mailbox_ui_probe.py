@@ -11,7 +11,7 @@ import time
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--binary', type=Path, default=Path('target/release/mail-ui'))
-parser.add_argument('--evidence', type=Path, default=Path('docs/reports/evidence/UI-001-mailbox.json'))
+parser.add_argument('--evidence', type=Path, default=Path('dist/verification/mailbox-ui.json'))
 parser.add_argument('--screenshots', action='store_true', help='使用 grim/hyprctl 捕获探针窗口')
 args = parser.parse_args()
 args.evidence.parent.mkdir(parents=True, exist_ok=True)
