@@ -1,8 +1,0 @@
-FONT_PROBE sans-serif: regular=FontId(1) bold=FontId(1) italic=FontId(1)
-FONT_PROBE Noto Sans: regular=FontId(13) bold=FontId(6) italic=FontId(8)
-QINGMAIL_EDITOR_PROBE: PASS native layout; UTF-8 selection; UTF-16 emoji replacement; marked preedit/commit; composition undo/redo; keyboard format undo/redo; inline bold/italic/link; controlled list export; background save/load equality; input accepted during 900ms simulated slow save; old save acknowledgement does not mark new edits saved
-
-
-FONT_PROBE sans-serif: regular=FontId(1) bold=FontId(1) italic=FontId(1)
-FONT_PROBE Noto Sans: regular=FontId(13) bold=FontId(6) italic=FontId(8)
-QINGMAIL_COMPOSE_RESTORE_PROBE: PASS

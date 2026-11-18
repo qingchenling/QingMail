@@ -15,6 +15,7 @@ import time
 
 
 def run(binary, evidence):
+    evidence.parent.mkdir(parents=True, exist_ok=True)
     checks = []
     processes = []
     log = evidence.with_suffix('.log')
@@ -162,6 +163,6 @@ def run(binary, evidence):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary', type=Path, default=Path('target/release/mail-ui'))
-    parser.add_argument('--evidence', type=Path, default=Path('docs/reports/evidence/P2-003-lifecycle.json'))
+    parser.add_argument('--evidence', type=Path, default=Path('dist/verification/lifecycle.json'))
     args = parser.parse_args()
     run(args.binary.resolve(), args.evidence)

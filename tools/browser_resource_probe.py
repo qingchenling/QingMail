@@ -15,9 +15,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from websockets.sync.client import connect
 
 ROOT = Path(__file__).resolve().parents[1]
-EVIDENCE = ROOT / 'docs/reports/evidence'
+EVIDENCE = ROOT / 'dist/verification'
 EVIDENCE.mkdir(parents=True, exist_ok=True)
-PREFIX = os.environ.get('QINGMAIL_BROWSER_EVIDENCE_PREFIX', 'P0-005')
+PREFIX = os.environ.get('QINGMAIL_BROWSER_EVIDENCE_PREFIX', 'browser')
 assert PREFIX and all(c.isalnum() or c == '-' for c in PREFIX)
 HITS = []
 class Handler(BaseHTTPRequestHandler):

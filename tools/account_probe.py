@@ -10,8 +10,9 @@ import tempfile
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--binary', type=Path, default=Path('target/release/mail-ui'))
-parser.add_argument('--evidence', type=Path, default=Path('docs/reports/evidence/P2-004-accounts.json'))
+parser.add_argument('--evidence', type=Path, default=Path('dist/verification/accounts.json'))
 args = parser.parse_args()
+args.evidence.parent.mkdir(parents=True, exist_ok=True)
 with tempfile.TemporaryDirectory(prefix='qingmail-p2-accounts-') as directory:
     root = Path(directory)
     root.chmod(0o700)

@@ -14,7 +14,7 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--resume-draft', help='Existing test draft ID; queries only, never creates another version')
 parser.add_argument('--draft-folder', help='Explicit user-selected existing folder; never guessed')
 parser.add_argument('--drafts', action='store_true', help='Create labelled server test drafts (requires user authorization)')
-parser.add_argument('--evidence', type=Path, default=Path('docs/reports/evidence/P3-007-real-accounts.json'))
+parser.add_argument('--evidence', type=Path, default=Path('dist/verification/real-accounts.json'))
 args = parser.parse_args()
 runtime = Path(os.environ['XDG_RUNTIME_DIR']) / 'qingmail/daemon.sock'
 # Strict allowlist: no send/review/confirmation/flag/move/removal command can be called.

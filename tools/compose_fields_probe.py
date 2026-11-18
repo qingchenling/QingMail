@@ -11,8 +11,9 @@ import tempfile
 
 repo = Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument('--evidence', type=Path, default=repo / 'docs/reports/evidence/P2-007-compose.json')
+parser.add_argument('--evidence', type=Path, default=repo / 'dist/verification/compose.json')
 evidence = parser.parse_args().evidence
+evidence.parent.mkdir(parents=True, exist_ok=True)
 with tempfile.TemporaryDirectory(prefix='qingmail-compose-') as directory:
     root = Path(directory)
     root.chmod(0o700)
