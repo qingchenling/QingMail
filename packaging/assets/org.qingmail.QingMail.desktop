@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Name=QingMail
+Name[zh_CN]=QingMail 邮件
+GenericName=Email Client
+GenericName[zh_CN]=邮件客户端
+Comment=Read and write email with your IMAP and SMTP accounts
+Comment[zh_CN]=使用 IMAP 和 SMTP 账号收发邮件
+Exec=/usr/bin/mail-ui
+TryExec=/usr/bin/mail-ui
+Icon=org.qingmail.QingMail
+Terminal=false
+Categories=Network;Email;
+Keywords=mail;email;IMAP;SMTP;
+StartupNotify=true
+StartupWMClass=org.qingmail.QingMail

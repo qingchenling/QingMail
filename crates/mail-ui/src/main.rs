@@ -324,7 +324,7 @@ fn open_home(cx: &mut App) -> Result<gpui_kit::AnyWindowHandle, String> {
             title: Some("QingMail — P0 交互验证".into()),
             ..Default::default()
         }),
-        ..Default::default()
+        ..crate::ui::window_options()
     };
     gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| Home::new(window, cx)))
         .map(|(window, _)| window)
@@ -335,7 +335,10 @@ fn main() {
     use mail_daemon::{Command, Instance, Launch};
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "--version") {
-        println!("QingMail {} (P3 test build)", env!("CARGO_PKG_VERSION"));
+        println!(
+            "QingMail {} (P4 preview; IPC v2)",
+            env!("CARGO_PKG_VERSION")
+        );
         return;
     }
     if (std::env::var_os("QINGMAIL_IPC_TEST_EDITOR").is_some()
@@ -495,6 +498,7 @@ fn main() {
         .with_quit_mode(gpui_kit::QuitMode::Explicit)
         .with_assets(Assets::new())
         .run(move |cx: &mut App| {
+            cx.set_app_identity(ui::APP_ID, "QingMail");
             gpui_kit::init(cx);
             gpui_kit_material::init(cx);
             settings::init(cx);

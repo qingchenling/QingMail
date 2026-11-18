@@ -1,0 +1,47 @@
+# Local P4 preview. tools/build_arch_package.py supplies a checked source snapshot.
+pkgname=qingmail
+pkgver=0.1.0.p4
+pkgrel=1
+pkgdesc='Native IMAP/SMTP email client for Linux (P4 local preview)'
+arch=('x86_64')
+# No project license has been chosen. This metadata does not grant distribution rights.
+license=('LicenseRef-Unspecified')
+depends=('glibc' 'gcc-libs' 'openssl' 'libxcb' 'libxkbcommon' 'libxkbcommon-x11'
+         'wayland' 'vulkan-icd-loader' 'fontconfig' 'freetype2' 'dbus'
+         'ca-certificates' 'xdg-utils')
+makedepends=('rust>=1.100.0' 'clang' 'cmake' 'pkgconf' 'desktop-file-utils')
+optdepends=('vulkan-driver: Vulkan implementation matching your GPU'
+            'org.freedesktop.secrets: unlocked Secret Service provider for account credentials'
+            'noto-fonts-cjk: Chinese glyphs'
+            'noto-fonts: text glyphs'
+            'xdg-desktop-portal: desktop integration where supported')
+# Keep Cargo's pinned release profile; avoid packaging an additional debug binary package.
+options=('!lto' '!debug')
+source=("qingmail-${pkgver}.tar.gz")
+sha256sums=('@SOURCE_SHA256@')
+
+build() {
+  cd "${srcdir}/qingmail-${pkgver}"
+  cargo build --release --locked -p mail-ui -p mail-daemon
+}
+
+check() {
+  cd "${srcdir}/qingmail-${pkgver}"
+  desktop-file-validate packaging/assets/org.qingmail.QingMail.desktop
+  "${CARGO_TARGET_DIR:-target}/release/mail-ui" --version
+}
+
+package() {
+  cd "${srcdir}/qingmail-${pkgver}"
+  local output="${CARGO_TARGET_DIR:-target}/release"
+  install -Dm755 "${output}/mail-ui" "${pkgdir}/usr/bin/mail-ui"
+  install -Dm755 "${output}/mail-daemon" "${pkgdir}/usr/bin/mail-daemon"
+  install -Dm644 packaging/assets/org.qingmail.QingMail.desktop \
+    "${pkgdir}/usr/share/applications/org.qingmail.QingMail.desktop"
+  install -Dm644 packaging/assets/org.qingmail.QingMail.svg \
+    "${pkgdir}/usr/share/icons/hicolor/scalable/apps/org.qingmail.QingMail.svg"
+  install -Dm644 packaging/arch/NOTICE \
+    "${pkgdir}/usr/share/licenses/qingmail/NOTICE"
+  install -Dm644 packaging/arch/README.md "${pkgdir}/usr/share/doc/qingmail/README.md"
+  install -Dm644 BUILD-INFO.json "${pkgdir}/usr/share/doc/qingmail/BUILD-INFO.json"
+}

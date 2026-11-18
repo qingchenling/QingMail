@@ -44,7 +44,7 @@ impl Item {
     }
     #[zbus(property)]
     fn icon_name(&self) -> &str {
-        "mail-unread"
+        "org.qingmail.QingMail"
     }
     #[zbus(property)]
     fn icon_pixmap(&self) -> Vec<(i32, i32, Vec<u8>)> {

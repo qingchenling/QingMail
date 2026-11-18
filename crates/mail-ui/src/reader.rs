@@ -77,7 +77,7 @@ pub(super) fn open(cx: &mut App) {
                 title: Some("QingMail — P0 邮件内容验证".into()),
                 ..Default::default()
             }),
-            ..Default::default()
+            ..crate::ui::window_options()
         },
         cx,
         |_, cx| cx.new(Reader::new),
@@ -103,7 +103,7 @@ pub(super) fn open_content(
             title: Some("QingMail — 简化阅读".into()),
             ..Default::default()
         }),
-        ..Default::default()
+        ..crate::ui::window_options()
     };
     if gpui_kit::open_window(options, cx, |_, cx| {
         cx.new(|cx| Reader::from_content(content, true, account, cx))

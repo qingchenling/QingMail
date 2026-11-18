@@ -267,7 +267,7 @@ fn open_scoped(
                 title: Some("QingMail — 写信草稿".into()),
                 ..Default::default()
             }),
-            ..Default::default()
+            ..crate::ui::window_options()
         },
         cx,
         |window, cx| cx.new(|cx| Composer::new(account, document, window, cx)),

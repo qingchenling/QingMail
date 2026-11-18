@@ -17,7 +17,7 @@ pub(super) fn open(cx: &mut App) {
             title: Some("QingMail — 待同步操作".into()),
             ..Default::default()
         }),
-        ..Default::default()
+        ..crate::ui::window_options()
     };
     if let Err(e) = gpui_kit::open_window(options, cx, |_, cx| cx.new(Operations::new)) {
         eprintln!("无法打开待同步操作：{e}");

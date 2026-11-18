@@ -26,7 +26,7 @@ pub(super) fn open(cx: &mut App) {
             title: Some("QingMail — 发送任务".into()),
             ..Default::default()
         }),
-        ..Default::default()
+        ..crate::ui::window_options()
     };
     match gpui_kit::open_window(options, cx, |window, cx| {
         cx.new(|cx| SendTasks::new(window, cx))

@@ -29,3 +29,12 @@ pub(super) fn folder_label(name: &str) -> String {
         mail_service::accounts::folder_label(name)
     }
 }
+
+/// Must match the desktop entry and hicolor icon basename for Wayland grouping.
+pub(super) const APP_ID: &str = "org.qingmail.QingMail";
+pub(super) fn window_options() -> gpui_kit::WindowOptions {
+    gpui_kit::WindowOptions {
+        app_id: Some(APP_ID.into()),
+        ..Default::default()
+    }
+}

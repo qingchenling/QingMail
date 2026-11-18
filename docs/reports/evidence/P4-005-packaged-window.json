@@ -1,0 +1,62 @@
+{
+  "passed": true,
+  "synthetic_only": true,
+  "accounts": 5,
+  "messages_per_account": 10000,
+  "window_samples": [
+    {
+      "at": 19824.120939455,
+      "pids": [
+        115208
+      ],
+      "pss_kib": 11822,
+      "cpu_seconds": 0.0
+    },
+    {
+      "at": 19824.435466903,
+      "pids": [
+        115208,
+        115209
+      ],
+      "pss_kib": 110951,
+      "cpu_seconds": 0.32
+    },
+    {
+      "at": 19824.702505397,
+      "pids": [
+        115208,
+        115209
+      ],
+      "pss_kib": 119111,
+      "cpu_seconds": 0.45
+    },
+    {
+      "at": 19824.964998213,
+      "pids": [
+        115208,
+        115209
+      ],
+      "pss_kib": 119323,
+      "cpu_seconds": 0.51
+    }
+  ],
+  "frame_observation": [
+    "MAILBOX_ACTION step=0 completed_ms=155.75",
+    "MAILBOX_ACTION step=1 completed_ms=76.44",
+    "MAILBOX_ACTION step=2 completed_ms=27.40",
+    "MAILBOX_ACTION step=3 completed_ms=25.45",
+    "MAILBOX_ACTION step=4 completed_ms=25.79",
+    "MAILBOX_ACTION PASS rapid_selection=30 search=Chinese paging=200 narrow_requested=900x760 scale=1.25 viewport=Size { 900px \u00d7 760px }"
+  ],
+  "ui_exited_backend_retained": true,
+  "display": {
+    "wayland": "wayland-1",
+    "driver": "/usr/share/vulkan/icd.d/intel_icd.json"
+  },
+  "window_identity": {
+    "class": "org.qingmail.QingMail",
+    "initialClass": "org.qingmail.QingMail",
+    "xwayland": false
+  },
+  "diagnostics": []
+}

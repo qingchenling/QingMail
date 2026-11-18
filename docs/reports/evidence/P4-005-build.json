@@ -1,0 +1,13 @@
+{
+  "package": "dist/arch-p4-005-final/qingmail-0.1.0.p4-1-x86_64.pkg.tar.zst",
+  "sha256": "9983dd5b88190c30a5622688c3a5aff9dde417d9eaf67270f4fc25526618b1f2",
+  "size_bytes": 52301272,
+  "source_commit": "8082f0ce2d80790849a408a0b551d7c07d02ac97",
+  "workspace_dirty": true,
+  "built_at": "2026-11-18T10:16:53.560646+00:00",
+  "rustc": "rustc 1.100.0 (0ef1bc386 2026-11-09) (Arch Linux rust 1:1.100.0-1)",
+  "cargo_lock_sha256": "b4e1fa269d546a777586168f4a6bd922eaac61d248354b41906dfa13e5915b0f",
+  "source_archive_sha256": "8710e9ca9f5df71fa0faf9c2e45142fbe3c2b219b73f9bc9315a4c200e381827",
+  "host_installed": false,
+  "package_info": "Name            : qingmail\nVersion         : 0.1.0.p4-1\nDescription     : Native IMAP/SMTP email client for Linux (P4 local preview)\nArchitecture    : x86_64\nURL             : None\nLicenses        : LicenseRef-Unspecified\nGroups          : None\nProvides        : None\nDepends On      : glibc  gcc-libs  openssl  libxcb  libxkbcommon  libxkbcommon-x11  wayland  vulkan-icd-loader  fontconfig  freetype2  dbus  ca-certificates  xdg-utils\nOptional Deps   : vulkan-driver: Vulkan implementation matching your GPU\n                  org.freedesktop.secrets: unlocked Secret Service provider for account credentials\n                  noto-fonts-cjk: Chinese glyphs\n                  noto-fonts: text glyphs\n                  xdg-desktop-portal: desktop integration where supported\nConflicts With  : None\nReplaces        : None\nCompressed Size : 49.88 MiB\nInstalled Size  : 138.15 MiB\nPackager        : Unknown Packager\nBuild Date      : Wed Nov 18 18:16:54 2026\nInstall Script  : No\nValidated By    : None\nSignatures      : None\n\n"
+}
