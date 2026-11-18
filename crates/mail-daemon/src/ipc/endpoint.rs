@@ -119,6 +119,25 @@ impl Endpoint {
     pub fn socket_path(&self) -> &Path {
         &self.socket
     }
+    /// Sleep until a connection arrives, with a bounded timeout for tray/shutdown work.
+    pub fn wait_for_connection(&self, timeout: std::time::Duration) -> io::Result<bool> {
+        use rustix::event::{PollFd, PollFlags, Timespec, poll};
+        let timeout = Timespec::try_from(timeout)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "IPC等待时间越界"))?;
+        let mut fds = [PollFd::new(&self.listener, PollFlags::IN)];
+        match poll(&mut fds, Some(&timeout)) {
+            Ok(_)
+                if fds[0]
+                    .revents()
+                    .intersects(PollFlags::ERR | PollFlags::HUP | PollFlags::NVAL) =>
+            {
+                Err(io::Error::other("IPC监听端点不可用"))
+            }
+            Ok(_) => Ok(fds[0].revents().contains(PollFlags::IN)),
+            Err(rustix::io::Errno::INTR) => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
     pub fn accept(&self) -> io::Result<Option<UnixStream>> {
         match self.listener.accept() {
             Ok((stream, _)) => {
@@ -133,6 +152,7 @@ impl Endpoint {
         }
     }
 }
+
 impl Drop for Endpoint {
     fn drop(&mut self) {
         if let Ok(m) = fs::symlink_metadata(&self.socket)
@@ -145,5 +165,41 @@ impl Drop for Endpoint {
         // fork 与 exec 之间可能短暂继承锁描述符；显式解锁避免旧实例退出后
         // 无关子进程暂时延长锁的生命周期。此时 socket 已清理，服务已停止。
         let _ = rfs::flock(&self._lock, FlockOperation::Unlock);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn listener_wait_times_out_and_wakes_for_a_new_connection() {
+        let root = tempfile::tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let endpoint = Endpoint::bind(root.path()).unwrap();
+        assert!(
+            !endpoint
+                .wait_for_connection(Duration::from_millis(10))
+                .unwrap()
+        );
+        let socket = endpoint.socket_path().to_owned();
+        let worker = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(20));
+            UnixStream::connect(socket).unwrap()
+        });
+        let start = Instant::now();
+        assert!(
+            endpoint
+                .wait_for_connection(Duration::from_secs(2))
+                .unwrap()
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "connection must wake listener before timeout"
+        );
+        let _client = worker.join().unwrap();
+        let _server = endpoint.accept().unwrap().unwrap();
+        assert!(!endpoint.wait_for_connection(Duration::ZERO).unwrap());
     }
 }

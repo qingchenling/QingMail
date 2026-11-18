@@ -23,6 +23,7 @@ class Imap(socketserver.ThreadingTCPServer):
         self.tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         self.tls.load_cert_chain(cert, key)
         self.idle = idle
+        self.online = True
         self.counts = collections.Counter()
         self.active = collections.Counter()
         self.lock = threading.Lock()
@@ -39,6 +40,10 @@ class Handler(socketserver.StreamRequestHandler):
     def handle(self):
         account = None
         try:
+            with self.server.lock: online = self.server.online
+            if not online:
+                self.wfile.write(b'* BYE controlled network outage\r\n')
+                return
             self.wfile.write(b'* OK controlled QingMail fixture\r\n')
             for raw in self.rfile:
                 parts = raw.decode().strip().split(' ', 2)
@@ -108,6 +113,56 @@ def tree_sample(pid):
         cpu += (int(stats[11])+int(stats[12]))/os.sysconf('SC_CLK_TCK')
     return dict(pids=sorted(pids), pss_kib=pss, cpu_seconds=cpu)
 
+def healthy_accounts(status):
+    states = status['account_sync']
+    # Periodic work belongs in the sample. A legitimate in-progress transition
+    # is not a failure, but credential errors/backoff/paused accounts are.
+    return (len(states) == 5 and len({a['account'] for a in states}) == 5
+            and all(not a['paused'] and (a['status'].startswith('已更新')
+                    or a['status'] == '正在同步') for a in states))
+
+def measurement_result(report, interval):
+    samples = report['samples']
+    first, last = samples[0], samples[-1]
+    elapsed = last['elapsed_seconds']-first['elapsed_seconds']
+    assert elapsed > 0, 'measurement requires a positive elapsed interval'
+    cpu = (last['cpu_seconds']-first['cpu_seconds'])/elapsed*100
+    pss = max(s['pss_kib'] for s in samples)/1024
+    duration = report['stabilization_seconds']>=300 and elapsed>=1800 and interval<=5
+    stable = all(s['fixture_services_alive'] and healthy_accounts(s['status'])
+                 and not s['imap_commands'].get('ERROR',0) for s in samples)
+    resources = 0 <= cpu < .5 and pss<=80
+    return dict(elapsed_seconds=elapsed,cpu_single_core_percent=cpu,max_pss_mib=pss,
+                duration_qualifies=duration,stable_fixture=stable,
+                resource_numbers_within_budget=resources,
+                budget_passed=duration and stable and resources)
+
+def recovery_probe(root, imap, daemon):
+    """Transport loss and automatic account backoff, not an OS suspend/network test."""
+    start = tree_sample(daemon.pid)
+    with imap.lock: imap.online = False
+    rpc(root, 'sync_now', account=None)
+    deadline = time.monotonic()+40
+    while True:
+        failed = rpc(root,'status')['data']
+        if len(failed['account_sync'])==5 and all('退避' in a['status'] for a in failed['account_sync']): break
+        assert time.monotonic()<deadline, 'accounts did not expose network failure'
+        time.sleep(.25)
+    # Bring transport back without issuing SyncNow: existing backoff must recover.
+    with imap.lock: imap.online = True
+    recovering = time.monotonic()
+    while True:
+        recovered = rpc(root,'status')['data']
+        with imap.lock: active = sum(v>0 for v in imap.active.values())
+        if healthy_accounts(recovered) and all(a['status'].startswith('已更新') for a in recovered['account_sync']) and active==5: break
+        assert time.monotonic()-recovering<180, 'automatic recovery exceeded account backoff'
+        time.sleep(1)
+    for account,_ in rpc(root,'accounts')['data']:
+        assert not rpc(root,'tasks',account=account)['data'], 'recovery created an SMTP task'
+    end = tree_sample(daemon.pid)
+    return dict(passed=True,transport_only=True,failed=failed,recovered=recovered,
+                recovery_seconds=time.monotonic()-recovering,cpu_seconds=end['cpu_seconds']-start['cpu_seconds'],smtp_tasks=0)
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--daemon', type=Path, default=Path('target/release/mail-daemon'))
@@ -116,6 +171,9 @@ def main():
     parser.add_argument('--seconds', type=float, default=1800)
     parser.add_argument('--interval', type=float, default=5)
     parser.add_argument('--polling', action='store_true')
+    parser.add_argument('--credential-stress', type=int, default=0,
+                        help='diagnose private keyring with N reads per worker before daemon startup')
+    parser.add_argument('--recovery',action='store_true',help='after sampling, test transport outage and automatic backoff recovery')
     parser.add_argument('--evidence', type=Path, required=True)
     args = parser.parse_args()
     assert args.warmup >= 0 and args.seconds > 0 and args.interval > 0
@@ -148,6 +206,8 @@ def main():
             # Match production AppPaths without following a data-directory symlink.
             (root/'share').mkdir(exist_ok=True)
             (root/'data').rename(root/'share/qingmail')
+            if args.credential_stress:
+                subprocess.run([str(fixture.with_name('credential_stress')),str(args.credential_stress)],env=env,check=True,stdout=log,stderr=log,timeout=300)
             daemon = launch([str(binary),'--production'])
             deadline = time.monotonic()+90
             while True:
@@ -156,7 +216,7 @@ def main():
                     states = rpc(root,'snapshot')['data']['status']
                     # Sync state exposes five independently updated account statuses.
                     accounts = rpc(root,'accounts')['data']
-                    if len(accounts)==5 and '已更新' in states['sync_status']:
+                    if len(accounts)==5 and len(states['account_sync'])==5 and all(a['status'].startswith('已更新') for a in states['account_sync']):
                         with imap.lock: connected = sum(v>0 for v in imap.active.values())
                         if args.polling or connected==5: break
                 except (OSError, KeyError, RuntimeError): pass
@@ -165,7 +225,10 @@ def main():
             report['ready_at_utc'] = time.strftime('%Y-%m-%dT%H:%M:%SZ',time.gmtime()); persist()
             stable = time.monotonic()
             while time.monotonic()-stable < args.warmup:
-                assert daemon.poll() is None; time.sleep(min(5,args.warmup-(time.monotonic()-stable)))
+                assert daemon.poll() is None
+                assert keyring.poll() is None and bus.poll() is None, 'private services failed during stabilization'
+                assert healthy_accounts(rpc(root,'status')['data']), 'account failed during stabilization'
+                time.sleep(min(5,max(0,args.warmup-(time.monotonic()-stable))))
             started = time.monotonic()
             while True:
                 elapsed = time.monotonic()-started
@@ -178,14 +241,9 @@ def main():
                 report['samples'].append(sample); persist()
                 if elapsed >= args.seconds: break
                 time.sleep(min(args.interval,args.seconds-elapsed))
-            first,last=report['samples'][0], report['samples'][-1]
-            report['elapsed_seconds']=last['elapsed_seconds']-first['elapsed_seconds']
-            report['cpu_single_core_percent']=(last['cpu_seconds']-first['cpu_seconds'])/report['elapsed_seconds']*100
-            report['max_pss_mib']=max(s['pss_kib'] for s in report['samples'])/1024
-            report['duration_qualifies']=args.warmup>=300 and report['elapsed_seconds']>=1800
-            report['stable_fixture'] = all(s['fixture_services_alive'] and len(s['status']['account_sync'])==5 and all(a['status'].startswith('已更新') for a in s['status']['account_sync']) for s in report['samples'])
-            report['resource_numbers_within_budget'] = report['max_pss_mib']<=80 and report['cpu_single_core_percent']<.5
-            report['budget_passed']=report['duration_qualifies'] and report['stable_fixture'] and report['resource_numbers_within_budget']
+            report.update(measurement_result(report, args.interval))
+            if args.recovery:
+                report['recovery'] = recovery_probe(root, imap, daemon)
             report['complete']=True; persist()
             rpc(root,'prepare_shutdown')
             daemon.wait(timeout=40)

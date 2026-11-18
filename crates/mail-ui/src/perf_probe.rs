@@ -131,7 +131,7 @@ fn summarize(label: &str, mut values: Vec<f64>) {
 }
 
 /// Opt-in sampling of the actual mailbox window. Observing never requests a frame.
-pub(super) fn mailbox_idle<T: 'static>(window: &Window, cx: &mut Context<T>) {
+pub(super) fn mailbox_idle<T: 'static>(window: &mut Window, cx: &mut Context<T>) {
     if std::env::var("QINGMAIL_WINDOW_PERF").as_deref() != Ok("idle") {
         return;
     }
@@ -139,6 +139,33 @@ pub(super) fn mailbox_idle<T: 'static>(window: &Window, cx: &mut Context<T>) {
         eprintln!("QINGMAIL_WINDOW_PERF requires isolated QINGMAIL_IPC_ROOT");
         return;
     }
+    let observed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let bounds_observed = observed.clone();
+    cx.observe_window_bounds(window, move |_, window, _| {
+        if bounds_observed.load(std::sync::atomic::Ordering::Relaxed) {
+            eprintln!(
+                "MAILBOX_ENV bounds_changed viewport={:?} scale={}",
+                window.viewport_size(),
+                window.scale_factor()
+            );
+        }
+    })
+    .detach();
+    let activation_observed = observed.clone();
+    cx.observe_window_activation(window, move |_, window, _| {
+        if activation_observed.load(std::sync::atomic::Ordering::Relaxed) {
+            eprintln!(
+                "MAILBOX_ENV activation_changed active={}",
+                window.is_window_active()
+            );
+        }
+    })
+    .detach();
+    let seconds = std::env::var("QINGMAIL_WINDOW_PERF_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(12)
+        .clamp(5, 120);
     cx.spawn_in(window, async move |_, cx| {
         // Let initial catalog loading, the first status observation and compositor
         // focus/tiling settle before counting idle frames.
@@ -148,17 +175,18 @@ pub(super) fn mailbox_idle<T: 'static>(window: &Window, cx: &mut Context<T>) {
         let mut collector = profiler::FrameTimingCollector::new();
         let Ok(id) = cx.update(|window, cx| {
             eprintln!(
-                "MAILBOX_PERF scale={} viewport={:?} power={:?} reduce_motion={}",
+                "MAILBOX_PERF scale={} viewport={:?} power={:?} reduce_motion={} active={} mouse={:?}",
                 window.scale_factor(),
                 window.viewport_size(),
                 cx.power_mode(),
-                cx.reduce_motion()
+                cx.reduce_motion(), window.is_window_active(), window.mouse_position()
             );
             window.window_handle().window_id()
         }) else {
             profiler::set_trace_enabled(enabled);
             return;
         };
+        observed.store(true, std::sync::atomic::Ordering::Relaxed);
         let executor = cx.background_executor().clone();
         let sample = cx
             .background_executor()
@@ -166,11 +194,23 @@ pub(super) fn mailbox_idle<T: 'static>(window: &Window, cx: &mut Context<T>) {
                 let started = std::time::Instant::now();
                 let mut draws = 0;
                 let mut submissions = 0;
-                for _ in 0..120 {
+                let mut bins = vec![0; seconds + 1];
+                let mut durations = Vec::new();
+                let mut intervals = Vec::new();
+                let mut previous = None;
+                for _ in 0..seconds * 10 {
                     executor.timer(Duration::from_millis(100)).await;
                     for event in collector.collect_unseen() {
                         match event {
-                            profiler::FrameEvent::Draw(t) if t.window_id == id => draws += 1,
+                            profiler::FrameEvent::Draw(t) if t.window_id == id => {
+                                draws += 1;
+                                bins[started.elapsed().as_secs().min(seconds as u64) as usize] += 1;
+                                durations.push(t.draw_duration().as_secs_f64() * 1000.);
+                                if let Some(previous) = previous {
+                                    intervals.push(t.draw_start.duration_since(previous).as_secs_f64() * 1000.);
+                                }
+                                previous = Some(t.draw_start);
+                            }
                             profiler::FrameEvent::Present(t) if t.window_id == id => {
                                 submissions += 1
                             }
@@ -178,6 +218,9 @@ pub(super) fn mailbox_idle<T: 'static>(window: &Window, cx: &mut Context<T>) {
                         }
                     }
                 }
+                eprintln!("MAILBOX_TRACE draws_by_second={bins:?}");
+                summarize("mailbox_draw_ms", durations);
+                summarize("mailbox_interval_ms", intervals);
                 (started.elapsed().as_secs_f64(), draws, submissions)
             })
             .await;
@@ -189,6 +232,7 @@ pub(super) fn mailbox_idle<T: 'static>(window: &Window, cx: &mut Context<T>) {
             crate::show_fps()
         );
         profiler::set_trace_enabled(enabled);
+        observed.store(false, std::sync::atomic::Ordering::Relaxed);
         // Normal lifecycle saves and detaches; do not terminate a daemon under measurement.
         let _ = cx.update(|_, cx| crate::lifecycle::close_frontend(cx));
     })

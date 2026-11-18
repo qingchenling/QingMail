@@ -1,0 +1,8 @@
+five isolated accounts seeded; messages_per_account=10000; private_credentials=false
+MAILBOX_PERF scale=1.25 viewport=Size { 1440px × 900px } power=HighPower reduce_motion=false active=true mouse=Point { x: 112.94531px, y: 497.60156px }
+MAILBOX_ENV activation_changed active=false
+MAILBOX_ENV bounds_changed viewport=Size { 1440px × 900px } scale=1.25
+MAILBOX_TRACE draws_by_second=[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 17, 3, 0, 0, 0, 0, 0]
+PERF mailbox_draw_ms samples=20 mean=2.293 p50=2.197 p95=2.919 max=3.066 over_8ms=0 over_16ms=0
+PERF mailbox_interval_ms samples=19 mean=48.254 p50=8.407 p95=701.103 max=701.103 over_8ms=18 over_16ms=2
+MAILBOX_PERF idle_seconds=60.213 draws=20 submissions=20 hud=false
