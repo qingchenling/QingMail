@@ -1,0 +1,3 @@
+five isolated accounts seeded; messages_per_account=10000; private_credentials=false
+MAILBOX_PERF scale=1.25 viewport=Size { 1440px × 900px } power=HighPower reduce_motion=false
+MAILBOX_PERF idle_seconds=12.042 draws=1 submissions=1 hud=false

@@ -129,3 +129,68 @@ fn summarize(label: &str, mut values: Vec<f64>) {
         values.iter().filter(|value| **value > 16.0).count(),
     );
 }
+
+/// Opt-in sampling of the actual mailbox window. Observing never requests a frame.
+pub(super) fn mailbox_idle<T: 'static>(window: &Window, cx: &mut Context<T>) {
+    if std::env::var("QINGMAIL_WINDOW_PERF").as_deref() != Ok("idle") {
+        return;
+    }
+    if std::env::var_os("QINGMAIL_IPC_ROOT").is_none() {
+        eprintln!("QINGMAIL_WINDOW_PERF requires isolated QINGMAIL_IPC_ROOT");
+        return;
+    }
+    cx.spawn_in(window, async move |_, cx| {
+        // Let initial catalog loading, the first status observation and compositor
+        // focus/tiling settle before counting idle frames.
+        cx.background_executor().timer(Duration::from_secs(8)).await;
+        let enabled = profiler::trace_enabled();
+        profiler::set_trace_enabled(true);
+        let mut collector = profiler::FrameTimingCollector::new();
+        let Ok(id) = cx.update(|window, cx| {
+            eprintln!(
+                "MAILBOX_PERF scale={} viewport={:?} power={:?} reduce_motion={}",
+                window.scale_factor(),
+                window.viewport_size(),
+                cx.power_mode(),
+                cx.reduce_motion()
+            );
+            window.window_handle().window_id()
+        }) else {
+            profiler::set_trace_enabled(enabled);
+            return;
+        };
+        let executor = cx.background_executor().clone();
+        let sample = cx
+            .background_executor()
+            .spawn(async move {
+                let started = std::time::Instant::now();
+                let mut draws = 0;
+                let mut submissions = 0;
+                for _ in 0..120 {
+                    executor.timer(Duration::from_millis(100)).await;
+                    for event in collector.collect_unseen() {
+                        match event {
+                            profiler::FrameEvent::Draw(t) if t.window_id == id => draws += 1,
+                            profiler::FrameEvent::Present(t) if t.window_id == id => {
+                                submissions += 1
+                            }
+                            _ => (),
+                        }
+                    }
+                }
+                (started.elapsed().as_secs_f64(), draws, submissions)
+            })
+            .await;
+        eprintln!(
+            "MAILBOX_PERF idle_seconds={:.3} draws={} submissions={} hud={}",
+            sample.0,
+            sample.1,
+            sample.2,
+            crate::show_fps()
+        );
+        profiler::set_trace_enabled(enabled);
+        // Normal lifecycle saves and detaches; do not terminate a daemon under measurement.
+        let _ = cx.update(|_, cx| crate::lifecycle::close_frontend(cx));
+    })
+    .detach();
+}

@@ -1,0 +1,83 @@
+{
+  "passed": true,
+  "synthetic_only": true,
+  "accounts": 5,
+  "messages_per_account": 10000,
+  "window_samples": [
+    {
+      "at": 12222.571126644,
+      "pids": [
+        56709
+      ],
+      "pss_kib": 11214,
+      "cpu_seconds": 0.0
+    },
+    {
+      "at": 12222.88480789,
+      "pids": [
+        56709,
+        56712
+      ],
+      "pss_kib": 82856,
+      "cpu_seconds": 0.15000000000000002
+    },
+    {
+      "at": 12223.186184024,
+      "pids": [
+        56709,
+        56712
+      ],
+      "pss_kib": 108262,
+      "cpu_seconds": 0.29000000000000004
+    },
+    {
+      "at": 12223.48737103,
+      "pids": [
+        56709,
+        56712
+      ],
+      "pss_kib": 109343,
+      "cpu_seconds": 0.31
+    },
+    {
+      "at": 12223.78902375,
+      "pids": [
+        56709,
+        56712
+      ],
+      "pss_kib": 112841,
+      "cpu_seconds": 0.37
+    },
+    {
+      "at": 12224.090207249,
+      "pids": [
+        56709,
+        56712
+      ],
+      "pss_kib": 114193,
+      "cpu_seconds": 0.4
+    },
+    {
+      "at": 12224.391999154,
+      "pids": [
+        56709,
+        56712
+      ],
+      "pss_kib": 114939,
+      "cpu_seconds": 0.49
+    }
+  ],
+  "frame_observation": [
+    "MAILBOX_ACTION step=0 completed_ms=357.35",
+    "MAILBOX_ACTION step=1 completed_ms=101.35",
+    "MAILBOX_ACTION step=2 completed_ms=51.43",
+    "MAILBOX_ACTION step=3 completed_ms=50.59",
+    "MAILBOX_ACTION step=4 completed_ms=50.84",
+    "MAILBOX_ACTION PASS rapid_selection=30 search=Chinese paging=200 narrow_requested=900x760 scale=1.25 viewport=Size { 900px \u00d7 760px }"
+  ],
+  "ui_exited_backend_retained": true,
+  "display": {
+    "wayland": "wayland-1",
+    "driver": "/usr/share/vulkan/icd.d/intel_icd.json"
+  }
+}

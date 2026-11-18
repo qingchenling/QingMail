@@ -1,0 +1,1348 @@
+{
+  "complete": true,
+  "synthetic_only": true,
+  "mode": "polling",
+  "requested_seconds": 120.0,
+  "stabilization_seconds": 5.0,
+  "samples": [
+    {
+      "elapsed_seconds": 4.920002538710833e-07,
+      "pids": [
+        47694
+      ],
+      "pss_kib": 11839,
+      "cpu_seconds": 0.09,
+      "status": {
+        "account_sync": [
+          {
+            "account": "5af6b60e2968b1613116f76be3854b6b",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          },
+          {
+            "account": "8d5fd6d4e87d4c610922cf4c2a0a8cb1",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          },
+          {
+            "account": "a4e738456112abba2779972be29d39d8",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          },
+          {
+            "account": "ca3c2424a6903d868894c2c82b97c55c",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          },
+          {
+            "account": "e09f6e99fcf8f92d96b3051bd4c8d358",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          }
+        ],
+        "pid": 47694,
+        "revision": 7,
+        "sync_paused": false,
+        "sync_status": "8d5fd6d4: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z\uff1be09f6e99: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z\uff1ba4e73845: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z\uff1bca3c2424: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z\uff1b5af6b60e: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z",
+        "sending": false,
+        "account_saving": false,
+        "tray_status": "\u6258\u76d8\u4e0d\u53ef\u7528\uff1aorg.freedesktop.DBus.Error.ServiceUnknown: The name org.kde.StatusNotifierWatcher was not provided by any .service files\uff1b\u518d\u6b21\u542f\u52a8\u6253\u5f00\u524d\u53f0\uff0c--quit \u53ef\u505c\u6b62\u540e\u53f0"
+      },
+      "active_idle_accounts": 0,
+      "imap_commands": {
+        "LOGIN": 20,
+        "LIST": 10,
+        "LOGOUT": 20,
+        "EXAMINE": 5,
+        "UID": 5,
+        "CAPABILITY": 5
+      }
+    },
+    {
+      "elapsed_seconds": 5.059184903999267,
+      "pids": [
+        47694
+      ],
+      "pss_kib": 11839,
+      "cpu_seconds": 0.11,
+      "status": {
+        "account_sync": [
+          {
+            "account": "5af6b60e2968b1613116f76be3854b6b",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          },
+          {
+            "account": "8d5fd6d4e87d4c610922cf4c2a0a8cb1",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          },
+          {
+            "account": "a4e738456112abba2779972be29d39d8",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          },
+          {
+            "account": "ca3c2424a6903d868894c2c82b97c55c",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          },
+          {
+            "account": "e09f6e99fcf8f92d96b3051bd4c8d358",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          }
+        ],
+        "pid": 47694,
+        "revision": 7,
+        "sync_paused": false,
+        "sync_status": "8d5fd6d4: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z\uff1be09f6e99: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z\uff1ba4e73845: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z\uff1bca3c2424: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z\uff1b5af6b60e: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z",
+        "sending": false,
+        "account_saving": false,
+        "tray_status": "\u6258\u76d8\u4e0d\u53ef\u7528\uff1aorg.freedesktop.DBus.Error.ServiceUnknown: The name org.kde.StatusNotifierWatcher was not provided by any .service files\uff1b\u518d\u6b21\u542f\u52a8\u6253\u5f00\u524d\u53f0\uff0c--quit \u53ef\u505c\u6b62\u540e\u53f0"
+      },
+      "active_idle_accounts": 0,
+      "imap_commands": {
+        "LOGIN": 20,
+        "LIST": 10,
+        "LOGOUT": 20,
+        "EXAMINE": 5,
+        "UID": 5,
+        "CAPABILITY": 5
+      }
+    },
+    {
+      "elapsed_seconds": 10.06707915699917,
+      "pids": [
+        47694
+      ],
+      "pss_kib": 11839,
+      "cpu_seconds": 0.12,
+      "status": {
+        "account_sync": [
+          {
+            "account": "5af6b60e2968b1613116f76be3854b6b",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          },
+          {
+            "account": "8d5fd6d4e87d4c610922cf4c2a0a8cb1",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          },
+          {
+            "account": "a4e738456112abba2779972be29d39d8",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          },
+          {
+            "account": "ca3c2424a6903d868894c2c82b97c55c",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          },
+          {
+            "account": "e09f6e99fcf8f92d96b3051bd4c8d358",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          }
+        ],
+        "pid": 47694,
+        "revision": 7,
+        "sync_paused": false,
+        "sync_status": "8d5fd6d4: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z\uff1be09f6e99: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z\uff1ba4e73845: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z\uff1bca3c2424: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z\uff1b5af6b60e: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z",
+        "sending": false,
+        "account_saving": false,
+        "tray_status": "\u6258\u76d8\u4e0d\u53ef\u7528\uff1aorg.freedesktop.DBus.Error.ServiceUnknown: The name org.kde.StatusNotifierWatcher was not provided by any .service files\uff1b\u518d\u6b21\u542f\u52a8\u6253\u5f00\u524d\u53f0\uff0c--quit \u53ef\u505c\u6b62\u540e\u53f0"
+      },
+      "active_idle_accounts": 0,
+      "imap_commands": {
+        "LOGIN": 20,
+        "LIST": 10,
+        "LOGOUT": 20,
+        "EXAMINE": 5,
+        "UID": 5,
+        "CAPABILITY": 5
+      }
+    },
+    {
+      "elapsed_seconds": 15.074566838000464,
+      "pids": [
+        47694
+      ],
+      "pss_kib": 11839,
+      "cpu_seconds": 0.13,
+      "status": {
+        "account_sync": [
+          {
+            "account": "5af6b60e2968b1613116f76be3854b6b",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          },
+          {
+            "account": "8d5fd6d4e87d4c610922cf4c2a0a8cb1",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          },
+          {
+            "account": "a4e738456112abba2779972be29d39d8",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          },
+          {
+            "account": "ca3c2424a6903d868894c2c82b97c55c",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          },
+          {
+            "account": "e09f6e99fcf8f92d96b3051bd4c8d358",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          }
+        ],
+        "pid": 47694,
+        "revision": 7,
+        "sync_paused": false,
+        "sync_status": "8d5fd6d4: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z\uff1be09f6e99: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z\uff1ba4e73845: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z\uff1bca3c2424: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z\uff1b5af6b60e: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z",
+        "sending": false,
+        "account_saving": false,
+        "tray_status": "\u6258\u76d8\u4e0d\u53ef\u7528\uff1aorg.freedesktop.DBus.Error.ServiceUnknown: The name org.kde.StatusNotifierWatcher was not provided by any .service files\uff1b\u518d\u6b21\u542f\u52a8\u6253\u5f00\u524d\u53f0\uff0c--quit \u53ef\u505c\u6b62\u540e\u53f0"
+      },
+      "active_idle_accounts": 0,
+      "imap_commands": {
+        "LOGIN": 20,
+        "LIST": 10,
+        "LOGOUT": 20,
+        "EXAMINE": 5,
+        "UID": 5,
+        "CAPABILITY": 5
+      }
+    },
+    {
+      "elapsed_seconds": 20.084459347999655,
+      "pids": [
+        47694
+      ],
+      "pss_kib": 11839,
+      "cpu_seconds": 0.14,
+      "status": {
+        "account_sync": [
+          {
+            "account": "5af6b60e2968b1613116f76be3854b6b",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          },
+          {
+            "account": "8d5fd6d4e87d4c610922cf4c2a0a8cb1",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          },
+          {
+            "account": "a4e738456112abba2779972be29d39d8",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          },
+          {
+            "account": "ca3c2424a6903d868894c2c82b97c55c",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          },
+          {
+            "account": "e09f6e99fcf8f92d96b3051bd4c8d358",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          }
+        ],
+        "pid": 47694,
+        "revision": 7,
+        "sync_paused": false,
+        "sync_status": "8d5fd6d4: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z\uff1be09f6e99: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z\uff1ba4e73845: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z\uff1bca3c2424: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z\uff1b5af6b60e: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z",
+        "sending": false,
+        "account_saving": false,
+        "tray_status": "\u6258\u76d8\u4e0d\u53ef\u7528\uff1aorg.freedesktop.DBus.Error.ServiceUnknown: The name org.kde.StatusNotifierWatcher was not provided by any .service files\uff1b\u518d\u6b21\u542f\u52a8\u6253\u5f00\u524d\u53f0\uff0c--quit \u53ef\u505c\u6b62\u540e\u53f0"
+      },
+      "active_idle_accounts": 0,
+      "imap_commands": {
+        "LOGIN": 20,
+        "LIST": 10,
+        "LOGOUT": 20,
+        "EXAMINE": 5,
+        "UID": 5,
+        "CAPABILITY": 5
+      }
+    },
+    {
+      "elapsed_seconds": 25.101872295999783,
+      "pids": [
+        47694
+      ],
+      "pss_kib": 11839,
+      "cpu_seconds": 0.16,
+      "status": {
+        "account_sync": [
+          {
+            "account": "5af6b60e2968b1613116f76be3854b6b",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          },
+          {
+            "account": "8d5fd6d4e87d4c610922cf4c2a0a8cb1",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          },
+          {
+            "account": "a4e738456112abba2779972be29d39d8",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          },
+          {
+            "account": "ca3c2424a6903d868894c2c82b97c55c",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          },
+          {
+            "account": "e09f6e99fcf8f92d96b3051bd4c8d358",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          }
+        ],
+        "pid": 47694,
+        "revision": 7,
+        "sync_paused": false,
+        "sync_status": "8d5fd6d4: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z\uff1be09f6e99: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z\uff1ba4e73845: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z\uff1bca3c2424: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z\uff1b5af6b60e: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z",
+        "sending": false,
+        "account_saving": false,
+        "tray_status": "\u6258\u76d8\u4e0d\u53ef\u7528\uff1aorg.freedesktop.DBus.Error.ServiceUnknown: The name org.kde.StatusNotifierWatcher was not provided by any .service files\uff1b\u518d\u6b21\u542f\u52a8\u6253\u5f00\u524d\u53f0\uff0c--quit \u53ef\u505c\u6b62\u540e\u53f0"
+      },
+      "active_idle_accounts": 0,
+      "imap_commands": {
+        "LOGIN": 20,
+        "LIST": 10,
+        "LOGOUT": 20,
+        "EXAMINE": 5,
+        "UID": 5,
+        "CAPABILITY": 5
+      }
+    },
+    {
+      "elapsed_seconds": 30.115784599000108,
+      "pids": [
+        47694
+      ],
+      "pss_kib": 11839,
+      "cpu_seconds": 0.17,
+      "status": {
+        "account_sync": [
+          {
+            "account": "5af6b60e2968b1613116f76be3854b6b",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          },
+          {
+            "account": "8d5fd6d4e87d4c610922cf4c2a0a8cb1",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          },
+          {
+            "account": "a4e738456112abba2779972be29d39d8",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          },
+          {
+            "account": "ca3c2424a6903d868894c2c82b97c55c",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          },
+          {
+            "account": "e09f6e99fcf8f92d96b3051bd4c8d358",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          }
+        ],
+        "pid": 47694,
+        "revision": 7,
+        "sync_paused": false,
+        "sync_status": "8d5fd6d4: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z\uff1be09f6e99: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z\uff1ba4e73845: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z\uff1bca3c2424: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z\uff1b5af6b60e: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z",
+        "sending": false,
+        "account_saving": false,
+        "tray_status": "\u6258\u76d8\u4e0d\u53ef\u7528\uff1aorg.freedesktop.DBus.Error.ServiceUnknown: The name org.kde.StatusNotifierWatcher was not provided by any .service files\uff1b\u518d\u6b21\u542f\u52a8\u6253\u5f00\u524d\u53f0\uff0c--quit \u53ef\u505c\u6b62\u540e\u53f0"
+      },
+      "active_idle_accounts": 0,
+      "imap_commands": {
+        "LOGIN": 20,
+        "LIST": 10,
+        "LOGOUT": 20,
+        "EXAMINE": 5,
+        "UID": 5,
+        "CAPABILITY": 5
+      }
+    },
+    {
+      "elapsed_seconds": 35.12571949099947,
+      "pids": [
+        47694
+      ],
+      "pss_kib": 11839,
+      "cpu_seconds": 0.19,
+      "status": {
+        "account_sync": [
+          {
+            "account": "5af6b60e2968b1613116f76be3854b6b",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          },
+          {
+            "account": "8d5fd6d4e87d4c610922cf4c2a0a8cb1",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          },
+          {
+            "account": "a4e738456112abba2779972be29d39d8",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          },
+          {
+            "account": "ca3c2424a6903d868894c2c82b97c55c",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          },
+          {
+            "account": "e09f6e99fcf8f92d96b3051bd4c8d358",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          }
+        ],
+        "pid": 47694,
+        "revision": 7,
+        "sync_paused": false,
+        "sync_status": "8d5fd6d4: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z\uff1be09f6e99: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z\uff1ba4e73845: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z\uff1bca3c2424: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z\uff1b5af6b60e: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z",
+        "sending": false,
+        "account_saving": false,
+        "tray_status": "\u6258\u76d8\u4e0d\u53ef\u7528\uff1aorg.freedesktop.DBus.Error.ServiceUnknown: The name org.kde.StatusNotifierWatcher was not provided by any .service files\uff1b\u518d\u6b21\u542f\u52a8\u6253\u5f00\u524d\u53f0\uff0c--quit \u53ef\u505c\u6b62\u540e\u53f0"
+      },
+      "active_idle_accounts": 0,
+      "imap_commands": {
+        "LOGIN": 20,
+        "LIST": 10,
+        "LOGOUT": 20,
+        "EXAMINE": 5,
+        "UID": 5,
+        "CAPABILITY": 5
+      }
+    },
+    {
+      "elapsed_seconds": 40.14014899999893,
+      "pids": [
+        47694
+      ],
+      "pss_kib": 11764,
+      "cpu_seconds": 0.2,
+      "status": {
+        "account_sync": [
+          {
+            "account": "5af6b60e2968b1613116f76be3854b6b",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          },
+          {
+            "account": "8d5fd6d4e87d4c610922cf4c2a0a8cb1",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          },
+          {
+            "account": "a4e738456112abba2779972be29d39d8",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          },
+          {
+            "account": "ca3c2424a6903d868894c2c82b97c55c",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          },
+          {
+            "account": "e09f6e99fcf8f92d96b3051bd4c8d358",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          }
+        ],
+        "pid": 47694,
+        "revision": 7,
+        "sync_paused": false,
+        "sync_status": "8d5fd6d4: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z\uff1be09f6e99: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z\uff1ba4e73845: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z\uff1bca3c2424: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z\uff1b5af6b60e: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z",
+        "sending": false,
+        "account_saving": false,
+        "tray_status": "\u6258\u76d8\u4e0d\u53ef\u7528\uff1aorg.freedesktop.DBus.Error.ServiceUnknown: The name org.kde.StatusNotifierWatcher was not provided by any .service files\uff1b\u518d\u6b21\u542f\u52a8\u6253\u5f00\u524d\u53f0\uff0c--quit \u53ef\u505c\u6b62\u540e\u53f0"
+      },
+      "active_idle_accounts": 0,
+      "imap_commands": {
+        "LOGIN": 20,
+        "LIST": 10,
+        "LOGOUT": 20,
+        "EXAMINE": 5,
+        "UID": 5,
+        "CAPABILITY": 5
+      }
+    },
+    {
+      "elapsed_seconds": 45.15046528899984,
+      "pids": [
+        47694
+      ],
+      "pss_kib": 11776,
+      "cpu_seconds": 0.22,
+      "status": {
+        "account_sync": [
+          {
+            "account": "5af6b60e2968b1613116f76be3854b6b",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          },
+          {
+            "account": "8d5fd6d4e87d4c610922cf4c2a0a8cb1",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          },
+          {
+            "account": "a4e738456112abba2779972be29d39d8",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          },
+          {
+            "account": "ca3c2424a6903d868894c2c82b97c55c",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          },
+          {
+            "account": "e09f6e99fcf8f92d96b3051bd4c8d358",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          }
+        ],
+        "pid": 47694,
+        "revision": 7,
+        "sync_paused": false,
+        "sync_status": "8d5fd6d4: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z\uff1be09f6e99: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z\uff1ba4e73845: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z\uff1bca3c2424: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z\uff1b5af6b60e: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z",
+        "sending": false,
+        "account_saving": false,
+        "tray_status": "\u6258\u76d8\u4e0d\u53ef\u7528\uff1aorg.freedesktop.DBus.Error.ServiceUnknown: The name org.kde.StatusNotifierWatcher was not provided by any .service files\uff1b\u518d\u6b21\u542f\u52a8\u6253\u5f00\u524d\u53f0\uff0c--quit \u53ef\u505c\u6b62\u540e\u53f0"
+      },
+      "active_idle_accounts": 0,
+      "imap_commands": {
+        "LOGIN": 20,
+        "LIST": 10,
+        "LOGOUT": 20,
+        "EXAMINE": 5,
+        "UID": 5,
+        "CAPABILITY": 5
+      }
+    },
+    {
+      "elapsed_seconds": 50.21202377000009,
+      "pids": [
+        47694
+      ],
+      "pss_kib": 11784,
+      "cpu_seconds": 0.23,
+      "status": {
+        "account_sync": [
+          {
+            "account": "5af6b60e2968b1613116f76be3854b6b",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          },
+          {
+            "account": "8d5fd6d4e87d4c610922cf4c2a0a8cb1",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          },
+          {
+            "account": "a4e738456112abba2779972be29d39d8",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          },
+          {
+            "account": "ca3c2424a6903d868894c2c82b97c55c",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          },
+          {
+            "account": "e09f6e99fcf8f92d96b3051bd4c8d358",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          }
+        ],
+        "pid": 47694,
+        "revision": 7,
+        "sync_paused": false,
+        "sync_status": "8d5fd6d4: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z\uff1be09f6e99: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z\uff1ba4e73845: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z\uff1bca3c2424: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z\uff1b5af6b60e: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z",
+        "sending": false,
+        "account_saving": false,
+        "tray_status": "\u6258\u76d8\u4e0d\u53ef\u7528\uff1aorg.freedesktop.DBus.Error.ServiceUnknown: The name org.kde.StatusNotifierWatcher was not provided by any .service files\uff1b\u518d\u6b21\u542f\u52a8\u6253\u5f00\u524d\u53f0\uff0c--quit \u53ef\u505c\u6b62\u540e\u53f0"
+      },
+      "active_idle_accounts": 0,
+      "imap_commands": {
+        "LOGIN": 20,
+        "LIST": 10,
+        "LOGOUT": 20,
+        "EXAMINE": 5,
+        "UID": 5,
+        "CAPABILITY": 5
+      }
+    },
+    {
+      "elapsed_seconds": 55.27628473000004,
+      "pids": [
+        47694
+      ],
+      "pss_kib": 11750,
+      "cpu_seconds": 0.3,
+      "status": {
+        "account_sync": [
+          {
+            "account": "5af6b60e2968b1613116f76be3854b6b",
+            "paused": false,
+            "status": "\u6b63\u5728\u540c\u6b65"
+          },
+          {
+            "account": "8d5fd6d4e87d4c610922cf4c2a0a8cb1",
+            "paused": false,
+            "status": "\u6b63\u5728\u540c\u6b65"
+          },
+          {
+            "account": "a4e738456112abba2779972be29d39d8",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          },
+          {
+            "account": "ca3c2424a6903d868894c2c82b97c55c",
+            "paused": false,
+            "status": "\u6b63\u5728\u540c\u6b65"
+          },
+          {
+            "account": "e09f6e99fcf8f92d96b3051bd4c8d358",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z"
+          }
+        ],
+        "pid": 47694,
+        "revision": 12,
+        "sync_paused": false,
+        "sync_status": "8d5fd6d4: \u6b63\u5728\u540c\u6b65\uff1be09f6e99: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:03:34Z\uff1ba4e73845: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z\uff1bca3c2424: \u6b63\u5728\u540c\u6b65\uff1b5af6b60e: \u6b63\u5728\u540c\u6b65",
+        "sending": false,
+        "account_saving": false,
+        "tray_status": "\u6258\u76d8\u4e0d\u53ef\u7528\uff1aorg.freedesktop.DBus.Error.ServiceUnknown: The name org.kde.StatusNotifierWatcher was not provided by any .service files\uff1b\u518d\u6b21\u542f\u52a8\u6253\u5f00\u524d\u53f0\uff0c--quit \u53ef\u505c\u6b62\u540e\u53f0"
+      },
+      "active_idle_accounts": 0,
+      "imap_commands": {
+        "LOGIN": 26,
+        "LIST": 11,
+        "LOGOUT": 26,
+        "EXAMINE": 10,
+        "UID": 10,
+        "CAPABILITY": 5
+      }
+    },
+    {
+      "elapsed_seconds": 60.339469348999046,
+      "pids": [
+        47694
+      ],
+      "pss_kib": 11758,
+      "cpu_seconds": 0.35,
+      "status": {
+        "account_sync": [
+          {
+            "account": "5af6b60e2968b1613116f76be3854b6b",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          },
+          {
+            "account": "8d5fd6d4e87d4c610922cf4c2a0a8cb1",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          },
+          {
+            "account": "a4e738456112abba2779972be29d39d8",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          },
+          {
+            "account": "ca3c2424a6903d868894c2c82b97c55c",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          },
+          {
+            "account": "e09f6e99fcf8f92d96b3051bd4c8d358",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          }
+        ],
+        "pid": 47694,
+        "revision": 16,
+        "sync_paused": false,
+        "sync_status": "8d5fd6d4: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z\uff1be09f6e99: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z\uff1ba4e73845: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z\uff1bca3c2424: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z\uff1b5af6b60e: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z",
+        "sending": false,
+        "account_saving": false,
+        "tray_status": "\u6258\u76d8\u4e0d\u53ef\u7528\uff1aorg.freedesktop.DBus.Error.ServiceUnknown: The name org.kde.StatusNotifierWatcher was not provided by any .service files\uff1b\u518d\u6b21\u542f\u52a8\u6253\u5f00\u524d\u53f0\uff0c--quit \u53ef\u505c\u6b62\u540e\u53f0"
+      },
+      "active_idle_accounts": 0,
+      "imap_commands": {
+        "LOGIN": 29,
+        "LIST": 14,
+        "LOGOUT": 29,
+        "EXAMINE": 10,
+        "UID": 10,
+        "CAPABILITY": 5
+      }
+    },
+    {
+      "elapsed_seconds": 65.40599814599955,
+      "pids": [
+        47694
+      ],
+      "pss_kib": 11758,
+      "cpu_seconds": 0.38,
+      "status": {
+        "account_sync": [
+          {
+            "account": "5af6b60e2968b1613116f76be3854b6b",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          },
+          {
+            "account": "8d5fd6d4e87d4c610922cf4c2a0a8cb1",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          },
+          {
+            "account": "a4e738456112abba2779972be29d39d8",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          },
+          {
+            "account": "ca3c2424a6903d868894c2c82b97c55c",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          },
+          {
+            "account": "e09f6e99fcf8f92d96b3051bd4c8d358",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          }
+        ],
+        "pid": 47694,
+        "revision": 20,
+        "sync_paused": false,
+        "sync_status": "8d5fd6d4: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z\uff1be09f6e99: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z\uff1ba4e73845: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z\uff1bca3c2424: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z\uff1b5af6b60e: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z",
+        "sending": false,
+        "account_saving": false,
+        "tray_status": "\u6258\u76d8\u4e0d\u53ef\u7528\uff1aorg.freedesktop.DBus.Error.ServiceUnknown: The name org.kde.StatusNotifierWatcher was not provided by any .service files\uff1b\u518d\u6b21\u542f\u52a8\u6253\u5f00\u524d\u53f0\uff0c--quit \u53ef\u505c\u6b62\u540e\u53f0"
+      },
+      "active_idle_accounts": 0,
+      "imap_commands": {
+        "LOGIN": 30,
+        "LIST": 15,
+        "LOGOUT": 30,
+        "EXAMINE": 10,
+        "UID": 10,
+        "CAPABILITY": 5
+      }
+    },
+    {
+      "elapsed_seconds": 70.46747924699957,
+      "pids": [
+        47694
+      ],
+      "pss_kib": 11766,
+      "cpu_seconds": 0.41,
+      "status": {
+        "account_sync": [
+          {
+            "account": "5af6b60e2968b1613116f76be3854b6b",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          },
+          {
+            "account": "8d5fd6d4e87d4c610922cf4c2a0a8cb1",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          },
+          {
+            "account": "a4e738456112abba2779972be29d39d8",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          },
+          {
+            "account": "ca3c2424a6903d868894c2c82b97c55c",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          },
+          {
+            "account": "e09f6e99fcf8f92d96b3051bd4c8d358",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          }
+        ],
+        "pid": 47694,
+        "revision": 20,
+        "sync_paused": false,
+        "sync_status": "8d5fd6d4: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z\uff1be09f6e99: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z\uff1ba4e73845: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z\uff1bca3c2424: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z\uff1b5af6b60e: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z",
+        "sending": false,
+        "account_saving": false,
+        "tray_status": "\u6258\u76d8\u4e0d\u53ef\u7528\uff1aorg.freedesktop.DBus.Error.ServiceUnknown: The name org.kde.StatusNotifierWatcher was not provided by any .service files\uff1b\u518d\u6b21\u542f\u52a8\u6253\u5f00\u524d\u53f0\uff0c--quit \u53ef\u505c\u6b62\u540e\u53f0"
+      },
+      "active_idle_accounts": 0,
+      "imap_commands": {
+        "LOGIN": 30,
+        "LIST": 15,
+        "LOGOUT": 30,
+        "EXAMINE": 10,
+        "UID": 10,
+        "CAPABILITY": 5
+      }
+    },
+    {
+      "elapsed_seconds": 75.54020966799908,
+      "pids": [
+        47694
+      ],
+      "pss_kib": 11766,
+      "cpu_seconds": 0.43,
+      "status": {
+        "account_sync": [
+          {
+            "account": "5af6b60e2968b1613116f76be3854b6b",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          },
+          {
+            "account": "8d5fd6d4e87d4c610922cf4c2a0a8cb1",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          },
+          {
+            "account": "a4e738456112abba2779972be29d39d8",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          },
+          {
+            "account": "ca3c2424a6903d868894c2c82b97c55c",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          },
+          {
+            "account": "e09f6e99fcf8f92d96b3051bd4c8d358",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          }
+        ],
+        "pid": 47694,
+        "revision": 20,
+        "sync_paused": false,
+        "sync_status": "8d5fd6d4: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z\uff1be09f6e99: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z\uff1ba4e73845: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z\uff1bca3c2424: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z\uff1b5af6b60e: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z",
+        "sending": false,
+        "account_saving": false,
+        "tray_status": "\u6258\u76d8\u4e0d\u53ef\u7528\uff1aorg.freedesktop.DBus.Error.ServiceUnknown: The name org.kde.StatusNotifierWatcher was not provided by any .service files\uff1b\u518d\u6b21\u542f\u52a8\u6253\u5f00\u524d\u53f0\uff0c--quit \u53ef\u505c\u6b62\u540e\u53f0"
+      },
+      "active_idle_accounts": 0,
+      "imap_commands": {
+        "LOGIN": 30,
+        "LIST": 15,
+        "LOGOUT": 30,
+        "EXAMINE": 10,
+        "UID": 10,
+        "CAPABILITY": 5
+      }
+    },
+    {
+      "elapsed_seconds": 80.60999511999944,
+      "pids": [
+        47694
+      ],
+      "pss_kib": 11765,
+      "cpu_seconds": 0.46,
+      "status": {
+        "account_sync": [
+          {
+            "account": "5af6b60e2968b1613116f76be3854b6b",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          },
+          {
+            "account": "8d5fd6d4e87d4c610922cf4c2a0a8cb1",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          },
+          {
+            "account": "a4e738456112abba2779972be29d39d8",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          },
+          {
+            "account": "ca3c2424a6903d868894c2c82b97c55c",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          },
+          {
+            "account": "e09f6e99fcf8f92d96b3051bd4c8d358",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          }
+        ],
+        "pid": 47694,
+        "revision": 20,
+        "sync_paused": false,
+        "sync_status": "8d5fd6d4: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z\uff1be09f6e99: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z\uff1ba4e73845: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z\uff1bca3c2424: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z\uff1b5af6b60e: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z",
+        "sending": false,
+        "account_saving": false,
+        "tray_status": "\u6258\u76d8\u4e0d\u53ef\u7528\uff1aorg.freedesktop.DBus.Error.ServiceUnknown: The name org.kde.StatusNotifierWatcher was not provided by any .service files\uff1b\u518d\u6b21\u542f\u52a8\u6253\u5f00\u524d\u53f0\uff0c--quit \u53ef\u505c\u6b62\u540e\u53f0"
+      },
+      "active_idle_accounts": 0,
+      "imap_commands": {
+        "LOGIN": 30,
+        "LIST": 15,
+        "LOGOUT": 30,
+        "EXAMINE": 10,
+        "UID": 10,
+        "CAPABILITY": 5
+      }
+    },
+    {
+      "elapsed_seconds": 85.69253905699952,
+      "pids": [
+        47694
+      ],
+      "pss_kib": 11824,
+      "cpu_seconds": 0.49,
+      "status": {
+        "account_sync": [
+          {
+            "account": "5af6b60e2968b1613116f76be3854b6b",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          },
+          {
+            "account": "8d5fd6d4e87d4c610922cf4c2a0a8cb1",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          },
+          {
+            "account": "a4e738456112abba2779972be29d39d8",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          },
+          {
+            "account": "ca3c2424a6903d868894c2c82b97c55c",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          },
+          {
+            "account": "e09f6e99fcf8f92d96b3051bd4c8d358",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          }
+        ],
+        "pid": 47694,
+        "revision": 20,
+        "sync_paused": false,
+        "sync_status": "8d5fd6d4: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z\uff1be09f6e99: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z\uff1ba4e73845: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z\uff1bca3c2424: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z\uff1b5af6b60e: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z",
+        "sending": false,
+        "account_saving": false,
+        "tray_status": "\u6258\u76d8\u4e0d\u53ef\u7528\uff1aorg.freedesktop.DBus.Error.ServiceUnknown: The name org.kde.StatusNotifierWatcher was not provided by any .service files\uff1b\u518d\u6b21\u542f\u52a8\u6253\u5f00\u524d\u53f0\uff0c--quit \u53ef\u505c\u6b62\u540e\u53f0"
+      },
+      "active_idle_accounts": 0,
+      "imap_commands": {
+        "LOGIN": 30,
+        "LIST": 15,
+        "LOGOUT": 30,
+        "EXAMINE": 10,
+        "UID": 10,
+        "CAPABILITY": 5
+      }
+    },
+    {
+      "elapsed_seconds": 90.7276838859998,
+      "pids": [
+        47694
+      ],
+      "pss_kib": 11899,
+      "cpu_seconds": 0.5,
+      "status": {
+        "account_sync": [
+          {
+            "account": "5af6b60e2968b1613116f76be3854b6b",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          },
+          {
+            "account": "8d5fd6d4e87d4c610922cf4c2a0a8cb1",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          },
+          {
+            "account": "a4e738456112abba2779972be29d39d8",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          },
+          {
+            "account": "ca3c2424a6903d868894c2c82b97c55c",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          },
+          {
+            "account": "e09f6e99fcf8f92d96b3051bd4c8d358",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          }
+        ],
+        "pid": 47694,
+        "revision": 20,
+        "sync_paused": false,
+        "sync_status": "8d5fd6d4: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z\uff1be09f6e99: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z\uff1ba4e73845: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z\uff1bca3c2424: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z\uff1b5af6b60e: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z",
+        "sending": false,
+        "account_saving": false,
+        "tray_status": "\u6258\u76d8\u4e0d\u53ef\u7528\uff1aorg.freedesktop.DBus.Error.ServiceUnknown: The name org.kde.StatusNotifierWatcher was not provided by any .service files\uff1b\u518d\u6b21\u542f\u52a8\u6253\u5f00\u524d\u53f0\uff0c--quit \u53ef\u505c\u6b62\u540e\u53f0"
+      },
+      "active_idle_accounts": 0,
+      "imap_commands": {
+        "LOGIN": 30,
+        "LIST": 15,
+        "LOGOUT": 30,
+        "EXAMINE": 10,
+        "UID": 10,
+        "CAPABILITY": 5
+      }
+    },
+    {
+      "elapsed_seconds": 95.74409786499928,
+      "pids": [
+        47694
+      ],
+      "pss_kib": 11899,
+      "cpu_seconds": 0.52,
+      "status": {
+        "account_sync": [
+          {
+            "account": "5af6b60e2968b1613116f76be3854b6b",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          },
+          {
+            "account": "8d5fd6d4e87d4c610922cf4c2a0a8cb1",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          },
+          {
+            "account": "a4e738456112abba2779972be29d39d8",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          },
+          {
+            "account": "ca3c2424a6903d868894c2c82b97c55c",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          },
+          {
+            "account": "e09f6e99fcf8f92d96b3051bd4c8d358",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          }
+        ],
+        "pid": 47694,
+        "revision": 20,
+        "sync_paused": false,
+        "sync_status": "8d5fd6d4: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z\uff1be09f6e99: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z\uff1ba4e73845: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z\uff1bca3c2424: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z\uff1b5af6b60e: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z",
+        "sending": false,
+        "account_saving": false,
+        "tray_status": "\u6258\u76d8\u4e0d\u53ef\u7528\uff1aorg.freedesktop.DBus.Error.ServiceUnknown: The name org.kde.StatusNotifierWatcher was not provided by any .service files\uff1b\u518d\u6b21\u542f\u52a8\u6253\u5f00\u524d\u53f0\uff0c--quit \u53ef\u505c\u6b62\u540e\u53f0"
+      },
+      "active_idle_accounts": 0,
+      "imap_commands": {
+        "LOGIN": 30,
+        "LIST": 15,
+        "LOGOUT": 30,
+        "EXAMINE": 10,
+        "UID": 10,
+        "CAPABILITY": 5
+      }
+    },
+    {
+      "elapsed_seconds": 100.75269553699945,
+      "pids": [
+        47694
+      ],
+      "pss_kib": 11899,
+      "cpu_seconds": 0.52,
+      "status": {
+        "account_sync": [
+          {
+            "account": "5af6b60e2968b1613116f76be3854b6b",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          },
+          {
+            "account": "8d5fd6d4e87d4c610922cf4c2a0a8cb1",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          },
+          {
+            "account": "a4e738456112abba2779972be29d39d8",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          },
+          {
+            "account": "ca3c2424a6903d868894c2c82b97c55c",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          },
+          {
+            "account": "e09f6e99fcf8f92d96b3051bd4c8d358",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          }
+        ],
+        "pid": 47694,
+        "revision": 20,
+        "sync_paused": false,
+        "sync_status": "8d5fd6d4: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z\uff1be09f6e99: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z\uff1ba4e73845: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z\uff1bca3c2424: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z\uff1b5af6b60e: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z",
+        "sending": false,
+        "account_saving": false,
+        "tray_status": "\u6258\u76d8\u4e0d\u53ef\u7528\uff1aorg.freedesktop.DBus.Error.ServiceUnknown: The name org.kde.StatusNotifierWatcher was not provided by any .service files\uff1b\u518d\u6b21\u542f\u52a8\u6253\u5f00\u524d\u53f0\uff0c--quit \u53ef\u505c\u6b62\u540e\u53f0"
+      },
+      "active_idle_accounts": 0,
+      "imap_commands": {
+        "LOGIN": 30,
+        "LIST": 15,
+        "LOGOUT": 30,
+        "EXAMINE": 10,
+        "UID": 10,
+        "CAPABILITY": 5
+      }
+    },
+    {
+      "elapsed_seconds": 105.76071682200018,
+      "pids": [
+        47694
+      ],
+      "pss_kib": 11899,
+      "cpu_seconds": 0.54,
+      "status": {
+        "account_sync": [
+          {
+            "account": "5af6b60e2968b1613116f76be3854b6b",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          },
+          {
+            "account": "8d5fd6d4e87d4c610922cf4c2a0a8cb1",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          },
+          {
+            "account": "a4e738456112abba2779972be29d39d8",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          },
+          {
+            "account": "ca3c2424a6903d868894c2c82b97c55c",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          },
+          {
+            "account": "e09f6e99fcf8f92d96b3051bd4c8d358",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          }
+        ],
+        "pid": 47694,
+        "revision": 20,
+        "sync_paused": false,
+        "sync_status": "8d5fd6d4: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z\uff1be09f6e99: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z\uff1ba4e73845: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z\uff1bca3c2424: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z\uff1b5af6b60e: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z",
+        "sending": false,
+        "account_saving": false,
+        "tray_status": "\u6258\u76d8\u4e0d\u53ef\u7528\uff1aorg.freedesktop.DBus.Error.ServiceUnknown: The name org.kde.StatusNotifierWatcher was not provided by any .service files\uff1b\u518d\u6b21\u542f\u52a8\u6253\u5f00\u524d\u53f0\uff0c--quit \u53ef\u505c\u6b62\u540e\u53f0"
+      },
+      "active_idle_accounts": 0,
+      "imap_commands": {
+        "LOGIN": 30,
+        "LIST": 15,
+        "LOGOUT": 30,
+        "EXAMINE": 10,
+        "UID": 10,
+        "CAPABILITY": 5
+      }
+    },
+    {
+      "elapsed_seconds": 110.77437362300043,
+      "pids": [
+        47694
+      ],
+      "pss_kib": 11899,
+      "cpu_seconds": 0.55,
+      "status": {
+        "account_sync": [
+          {
+            "account": "5af6b60e2968b1613116f76be3854b6b",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          },
+          {
+            "account": "8d5fd6d4e87d4c610922cf4c2a0a8cb1",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          },
+          {
+            "account": "a4e738456112abba2779972be29d39d8",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          },
+          {
+            "account": "ca3c2424a6903d868894c2c82b97c55c",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          },
+          {
+            "account": "e09f6e99fcf8f92d96b3051bd4c8d358",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z"
+          }
+        ],
+        "pid": 47694,
+        "revision": 20,
+        "sync_paused": false,
+        "sync_status": "8d5fd6d4: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z\uff1be09f6e99: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z\uff1ba4e73845: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z\uff1bca3c2424: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z\uff1b5af6b60e: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:04:34Z",
+        "sending": false,
+        "account_saving": false,
+        "tray_status": "\u6258\u76d8\u4e0d\u53ef\u7528\uff1aorg.freedesktop.DBus.Error.ServiceUnknown: The name org.kde.StatusNotifierWatcher was not provided by any .service files\uff1b\u518d\u6b21\u542f\u52a8\u6253\u5f00\u524d\u53f0\uff0c--quit \u53ef\u505c\u6b62\u540e\u53f0"
+      },
+      "active_idle_accounts": 0,
+      "imap_commands": {
+        "LOGIN": 30,
+        "LIST": 15,
+        "LOGOUT": 30,
+        "EXAMINE": 10,
+        "UID": 10,
+        "CAPABILITY": 5
+      }
+    },
+    {
+      "elapsed_seconds": 115.78397393500018,
+      "pids": [
+        47694
+      ],
+      "pss_kib": 11923,
+      "cpu_seconds": 0.59,
+      "status": {
+        "account_sync": [
+          {
+            "account": "5af6b60e2968b1613116f76be3854b6b",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:05:34Z"
+          },
+          {
+            "account": "8d5fd6d4e87d4c610922cf4c2a0a8cb1",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:05:34Z"
+          },
+          {
+            "account": "a4e738456112abba2779972be29d39d8",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:05:34Z"
+          },
+          {
+            "account": "ca3c2424a6903d868894c2c82b97c55c",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:05:34Z"
+          },
+          {
+            "account": "e09f6e99fcf8f92d96b3051bd4c8d358",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:05:34Z"
+          }
+        ],
+        "pid": 47694,
+        "revision": 25,
+        "sync_paused": false,
+        "sync_status": "8d5fd6d4: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:05:34Z\uff1be09f6e99: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:05:34Z\uff1ba4e73845: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:05:34Z\uff1bca3c2424: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:05:34Z\uff1b5af6b60e: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:05:34Z",
+        "sending": false,
+        "account_saving": false,
+        "tray_status": "\u6258\u76d8\u4e0d\u53ef\u7528\uff1aorg.freedesktop.DBus.Error.ServiceUnknown: The name org.kde.StatusNotifierWatcher was not provided by any .service files\uff1b\u518d\u6b21\u542f\u52a8\u6253\u5f00\u524d\u53f0\uff0c--quit \u53ef\u505c\u6b62\u540e\u53f0"
+      },
+      "active_idle_accounts": 0,
+      "imap_commands": {
+        "LOGIN": 36,
+        "LIST": 16,
+        "LOGOUT": 36,
+        "EXAMINE": 15,
+        "UID": 15,
+        "CAPABILITY": 5
+      }
+    },
+    {
+      "elapsed_seconds": 120.0099215350001,
+      "pids": [
+        47694
+      ],
+      "pss_kib": 11931,
+      "cpu_seconds": 0.61,
+      "status": {
+        "account_sync": [
+          {
+            "account": "5af6b60e2968b1613116f76be3854b6b",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:05:34Z"
+          },
+          {
+            "account": "8d5fd6d4e87d4c610922cf4c2a0a8cb1",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:05:34Z"
+          },
+          {
+            "account": "a4e738456112abba2779972be29d39d8",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:05:34Z"
+          },
+          {
+            "account": "ca3c2424a6903d868894c2c82b97c55c",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:05:34Z"
+          },
+          {
+            "account": "e09f6e99fcf8f92d96b3051bd4c8d358",
+            "paused": false,
+            "status": "\u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:05:34Z"
+          }
+        ],
+        "pid": 47694,
+        "revision": 29,
+        "sync_paused": false,
+        "sync_status": "8d5fd6d4: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:05:34Z\uff1be09f6e99: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:05:34Z\uff1ba4e73845: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:05:34Z\uff1bca3c2424: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:05:34Z\uff1b5af6b60e: \u5df2\u66f4\u65b0 1 \u4e2a\u6587\u4ef6\u5939 \u00b7 2026-11-18T08:05:34Z",
+        "sending": false,
+        "account_saving": false,
+        "tray_status": "\u6258\u76d8\u4e0d\u53ef\u7528\uff1aorg.freedesktop.DBus.Error.ServiceUnknown: The name org.kde.StatusNotifierWatcher was not provided by any .service files\uff1b\u518d\u6b21\u542f\u52a8\u6253\u5f00\u524d\u53f0\uff0c--quit \u53ef\u505c\u6b62\u540e\u53f0"
+      },
+      "active_idle_accounts": 0,
+      "imap_commands": {
+        "LOGIN": 38,
+        "LIST": 18,
+        "LOGOUT": 38,
+        "EXAMINE": 15,
+        "UID": 15,
+        "CAPABILITY": 5
+      }
+    }
+  ],
+  "environment": {
+    "kernel": "7.3.4-arch1-2",
+    "logical_cpus": 32,
+    "daemon": "/home/lingchen/Projects/QingMail/target/release/mail-daemon",
+    "display_session": true,
+    "private_dbus": true,
+    "private_keyring": true
+  },
+  "ready_at_utc": "2026-11-18T08:03:34Z",
+  "elapsed_seconds": 120.00992104299985,
+  "cpu_single_core_percent": 0.43329751030640434,
+  "max_pss_mib": 11.6513671875,
+  "duration_qualifies": false,
+  "budget_passed": false
+}
