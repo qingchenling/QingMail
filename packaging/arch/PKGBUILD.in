@@ -1,6 +1,6 @@
 # Local P4 preview. tools/build_arch_package.py supplies a checked source snapshot.
 pkgname=qingmail
-pkgver=0.1.0.p4
+pkgver=0.1.1
 pkgrel=1
 pkgdesc='Native IMAP/SMTP email client for Linux (P4 local preview)'
 arch=('x86_64')
