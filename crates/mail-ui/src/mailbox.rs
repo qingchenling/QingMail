@@ -107,6 +107,7 @@ struct InlineReading {
 }
 pub(super) struct Mailbox {
     notification_target: Option<mail_protocol::OpenMailTarget>,
+    observed_status: String,
     store: StorageClient,
     account: Option<(AccountId, AccountSettings)>,
     accounts: Vec<(AccountId, AccountSettings)>,
@@ -158,8 +159,10 @@ pub(super) struct Mailbox {
 }
 impl Mailbox {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        crate::perf_probe::mailbox_idle(window, cx);
         let mut this = Self {
             notification_target: None,
+            observed_status: String::new(),
             store: crate::lifecycle::storage(cx),
             account: None,
             accounts: vec![],
@@ -210,6 +213,73 @@ impl Mailbox {
             focus: cx.focus_handle(),
         };
         this.reload(cx);
+        if std::env::var("QINGMAIL_WINDOW_PERF").as_deref() == Ok("interaction")
+            && std::env::var_os("QINGMAIL_IPC_ROOT").is_some()
+        {
+            cx.spawn_in(window, async move |entity, cx| {
+                // Isolated synthetic data only. Exercise the real widgets and async
+                // mailbox pipeline; timings end at state completion, not presentation.
+                for step in 0..6 {
+                    let started = std::time::Instant::now();
+                    loop {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(25))
+                            .await;
+                        let ready = entity
+                            .update(cx, |this, _| !this.busy && !this.read_running)
+                            .expect("performance mailbox alive");
+                        assert!(started.elapsed().as_secs() < 20, "mailbox action timeout");
+                        if ready {
+                            break;
+                        }
+                    }
+                    entity.update_in(cx, |this, window, cx| {
+                        if step > 0 {
+                            eprintln!("MAILBOX_ACTION step={} completed_ms={:.2}", step - 1, started.elapsed().as_secs_f64() * 1000.);
+                        }
+                        match step {
+                            0 => {
+                                assert_eq!(this.accounts.len(), 5);
+                                assert_eq!(this.messages().len(), 100);
+                                for index in 0..30 { this.select_message(index, cx); }
+                            }
+                            1 => {
+                                assert_eq!(this.inline.as_ref().unwrap().location, *this.selected_location().unwrap());
+                                this.account = this.accounts.first().cloned();
+                                this.search_scope = 2;
+                                this.search_text.update(cx, |input, cx| input.set_value("中文性能样本", window, cx));
+                                this.run_search(cx);
+                            }
+                            2 => {
+                                assert!(!this.search_results.as_ref().unwrap().is_empty());
+                                this.search_results = None;
+                                this.search_previous = None;
+                                this.account = this.accounts.first().cloned();
+                                this.select_folder("INBOX".into(), cx);
+                            }
+                            3 => {
+                                assert_eq!(this.messages().len(), 200);
+                                this.before = Some(9801);
+                                this.load_cache(cx);
+                            }
+                            4 => {
+                                assert_eq!(this.messages().len(), 200);
+                                assert!(this.messages().iter().all(|m| m.location.uid < 9801));
+                                this.narrow_detail = true;
+                                window.resize(size(px(900.), px(760.)));
+                                this.before = None;
+                                this.load_cache(cx);
+                            }
+                            _ => {
+                                assert_eq!(this.messages()[0].location.uid, 10_000);
+                                eprintln!("MAILBOX_ACTION PASS rapid_selection=30 search=Chinese paging=200 narrow_requested=900x760 scale={} viewport={:?}",window.scale_factor(), window.viewport_size());
+                                crate::lifecycle::close_frontend(cx);
+                            }
+                        }
+                    }).expect("performance mailbox action");
+                }
+            }).detach();
+        }
         cx.spawn(async move |entity, cx| {
             loop {
                 cx.background_executor()
@@ -223,7 +293,15 @@ impl Mailbox {
                         if !this.busy && this.sync_revision != crate::lifecycle::sync_revision(cx) {
                             this.refresh_local(cx);
                         }
-                        cx.notify();
+                        let status = format!(
+                            "{}|{}",
+                            crate::lifecycle::sync_status(cx),
+                            crate::lifecycle::operation_summary(cx)
+                        );
+                        if this.observed_status != status {
+                            this.observed_status = status;
+                            cx.notify();
+                        }
                     })
                     .is_err()
                 {

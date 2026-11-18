@@ -33,7 +33,6 @@ struct Editor {
     entity: WeakEntity<Composer>,
 }
 pub(super) struct Lifecycle {
-    main: Option<AnyWindowHandle>,
     reader: Option<AnyWindowHandle>,
     mailbox: Option<(AnyWindowHandle, WeakEntity<crate::mailbox::Mailbox>)>,
     send_tasks: Option<AnyWindowHandle>,
@@ -139,7 +138,6 @@ pub(super) fn start(
         })
         && std::env::var_os("QINGMAIL_P0_RUNTIME_ROOT").is_none();
     cx.set_global(Lifecycle {
-        main: None,
         reader: None,
         mailbox: None,
         send_tasks: None,
@@ -282,10 +280,7 @@ pub(super) fn register_mailbox(
     if cx.global::<Lifecycle>().remote.is_some() {
         let _ = window.update(cx, |_, window, cx| {
             window.on_window_should_close(cx, |_, cx| {
-                let state = cx.global_mut::<Lifecycle>();
-                state.quitting = true;
-                state.shutdown = false;
-                state.error = None;
+                close_frontend(cx);
                 false
             })
         });
@@ -407,6 +402,12 @@ pub(super) fn toggle_sync(cx: &App) {
 }
 pub(super) fn sending(cx: &App) -> mail_daemon::sending::SendCoordinator {
     cx.global::<Lifecycle>().sending.clone()
+}
+pub(super) fn close_frontend(cx: &mut App) {
+    let state = cx.global_mut::<Lifecycle>();
+    state.quitting = true;
+    state.shutdown = false;
+    state.error = None;
 }
 pub(super) fn quit(cx: &mut App) {
     let queue = &cx.global::<Lifecycle>().queue;
@@ -629,11 +630,6 @@ fn tick(cx: &mut App) {
             state.probe_step
         );
         *state.status.lock().unwrap_or_else(|e| e.into_inner()) = status;
-        if let Some(window) = state.main.filter(|window| live(*window, cx)) {
-            let _ = window.update(cx, |_, window, _| {
-                window.refresh();
-            });
-        }
     });
 }
 
