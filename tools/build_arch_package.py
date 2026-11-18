@@ -11,7 +11,7 @@ import tarfile
 from datetime import datetime, timezone
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = '0.1.0.p4'
+VERSION = '0.1.1'
 
 
 def sha256(path):

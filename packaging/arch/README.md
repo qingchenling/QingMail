@@ -1,12 +1,12 @@
 # QingMail Arch 本地预览包
 
-P4 日常使用预览，版本 0.1.0.p4，数据库 schema19、IPC v2。尚非 P5 公开发行包；项目尚未选定许可证，NOTICE 和 LicenseRef-Unspecified 不构成再分发授权。不要发布本地构建产物。
+P4 日常使用预览，版本 0.1.1，数据库 schema19、IPC v2。尚非 P5 公开发行包；项目尚未选定许可证，NOTICE 和 LicenseRef-Unspecified 不构成再分发授权。不要发布本地构建产物。
 
 ## 构建与安装
 
 在仓库根目录执行 `python3 tools/build_arch_package.py --output dist/arch-preview`。输出目录必须不存在。工具创建带逐文件摘要、提交号及脏工作区标记的源码快照、PKGBUILD、.SRCINFO、源码包、安装包及 SHA256SUMS；然后运行 makepkg，不自动安装依赖或软件。构建需 Arch base-devel、Rust >=1.100.0、clang、cmake、pkgconf、desktop-file-utils，以及 PKGBUILD 中的运行依赖。首次 Cargo 构建需要访问锁文件对应的依赖源。
 
-安装前先在 QingMail 选择“保存并退出”，确保前后台均已退出；保存失败时应先解决，不强行终止。用户自行执行 `sudo pacman -U /绝对路径/qingmail-0.1.0.p4-1-x86_64.pkg.tar.zst`。前台和后台必须一起更新，不能混用旧 P3 包。运行 `mail-ui` 或桌面菜单 QingMail 启动。
+安装前先在 QingMail 选择“保存并退出”，确保前后台均已退出；保存失败时应先解决，不强行终止。用户自行执行 `sudo pacman -U /绝对路径/qingmail-0.1.1-1-x86_64.pkg.tar.zst`。前台和后台必须一起更新，不能混用旧 P3 包。运行 `mail-ui` 或桌面菜单 QingMail 启动。
 
 包安装 `/usr/bin/mail-ui` 和 `/usr/bin/mail-daemon`，复用程序现有同目录查找机制。桌面入口及图标同名 `org.qingmail.QingMail`，所有 GPUI 窗口使用此 Wayland app_id。没有 mailto 协议处理声明，不新增系统服务、强制 GPU 配置或默认自启动。
 
