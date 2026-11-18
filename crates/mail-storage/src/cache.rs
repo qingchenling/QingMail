@@ -214,7 +214,7 @@ mod tests {
     #[test]
     fn cache_schema16_upgrade_preserves_objects_and_creates_backup() {
         let (root, store, a, _) = setup();
-        store.connection.execute_batch("DROP VIEW protected_objects; DROP TRIGGER cache_body_insert; DROP TRIGGER cache_part_insert; DROP TABLE cache_access; DROP TABLE cache_settings; PRAGMA user_version=16;").unwrap();
+        store.connection.execute_batch("DROP TABLE notification_candidates; DROP TABLE notification_pending; DROP TABLE notification_baselines; DROP TABLE desktop_settings; DROP VIEW protected_objects; DROP TRIGGER cache_body_insert; DROP TRIGGER cache_part_insert; DROP TABLE cache_access; DROP TABLE cache_settings; PRAGMA user_version=16;").unwrap();
         drop(store);
         let store = Store::open(&root.path().join("data")).unwrap();
         assert_eq!(store.cache_status().unwrap().budget_bytes, 1073741824);

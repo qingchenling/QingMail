@@ -35,7 +35,7 @@ struct Editor {
 pub(super) struct Lifecycle {
     main: Option<AnyWindowHandle>,
     reader: Option<AnyWindowHandle>,
-    mailbox: Option<AnyWindowHandle>,
+    mailbox: Option<(AnyWindowHandle, WeakEntity<crate::mailbox::Mailbox>)>,
     send_tasks: Option<AnyWindowHandle>,
     settings: Option<AnyWindowHandle>,
     accounts: Option<(AnyWindowHandle, WeakEntity<crate::accounts::Accounts>)>,
@@ -267,10 +267,18 @@ pub(super) fn register_accounts(
 }
 
 pub(super) fn reuse_mailbox(cx: &mut App) -> bool {
-    let window = cx.global::<Lifecycle>().mailbox;
+    let window = cx
+        .global::<Lifecycle>()
+        .mailbox
+        .as_ref()
+        .map(|(window, _)| *window);
     window.is_some_and(|window| activate(window, cx))
 }
-pub(super) fn register_mailbox(window: AnyWindowHandle, cx: &mut App) {
+pub(super) fn register_mailbox(
+    window: AnyWindowHandle,
+    entity: WeakEntity<crate::mailbox::Mailbox>,
+    cx: &mut App,
+) {
     if cx.global::<Lifecycle>().remote.is_some() {
         let _ = window.update(cx, |_, window, cx| {
             window.on_window_should_close(cx, |_, cx| {
@@ -282,7 +290,7 @@ pub(super) fn register_mailbox(window: AnyWindowHandle, cx: &mut App) {
             })
         });
     }
-    cx.global_mut::<Lifecycle>().mailbox = Some(window);
+    cx.global_mut::<Lifecycle>().mailbox = Some((window, entity));
 }
 
 pub(super) fn reuse_settings(cx: &mut App) -> bool {
@@ -454,6 +462,18 @@ fn tick(cx: &mut App) {
                     .store(activation.sequence, std::sync::atomic::Ordering::Release);
                 cx.defer(move |cx| match activation.target {
                     mail_protocol::WindowTarget::Mailbox => open_main(cx),
+                    mail_protocol::WindowTarget::Mail { target } => {
+                        crate::mailbox::open(cx);
+                        let entity = cx
+                            .global::<Lifecycle>()
+                            .mailbox
+                            .as_ref()
+                            .map(|(_, e)| e.clone());
+                        if let Some(entity) = entity {
+                            let _ =
+                                entity.update(cx, |this, cx| this.locate_notification(target, cx));
+                        }
+                    }
                     mail_protocol::WindowTarget::Composer => composer::open(cx),
                     mail_protocol::WindowTarget::Reader => reader::open(cx),
                     mail_protocol::WindowTarget::Accounts => crate::accounts::open(cx),

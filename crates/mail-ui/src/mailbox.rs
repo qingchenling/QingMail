@@ -96,7 +96,7 @@ pub(super) fn open(cx: &mut App) {
     match gpui_kit::open_window(options, cx, |window, cx| {
         cx.new(|cx| Mailbox::new(window, cx))
     }) {
-        Ok((window, _)) => crate::lifecycle::register_mailbox(window, cx),
+        Ok((window, entity)) => crate::lifecycle::register_mailbox(window, entity.downgrade(), cx),
         Err(_) => eprintln!("无法打开邮件窗口"),
     }
 }
@@ -105,7 +105,8 @@ struct InlineReading {
     content: mail_content::MailContent,
     view: Entity<crate::reader::Reader>,
 }
-struct Mailbox {
+pub(super) struct Mailbox {
+    notification_target: Option<mail_protocol::OpenMailTarget>,
     store: StorageClient,
     account: Option<(AccountId, AccountSettings)>,
     accounts: Vec<(AccountId, AccountSettings)>,
@@ -158,6 +159,7 @@ struct Mailbox {
 impl Mailbox {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut this = Self {
+            notification_target: None,
             store: crate::lifecycle::storage(cx),
             account: None,
             accounts: vec![],
@@ -215,6 +217,9 @@ impl Mailbox {
                     .await;
                 if entity
                     .update(cx, |this, cx| {
+                        if !this.busy && this.notification_target.is_some() {
+                            this.apply_notification(cx);
+                        }
                         if !this.busy && this.sync_revision != crate::lifecycle::sync_revision(cx) {
                             this.refresh_local(cx);
                         }
@@ -317,6 +322,98 @@ impl Mailbox {
             .detach();
         }
         this
+    }
+    pub(super) fn locate_notification(
+        &mut self,
+        target: mail_protocol::OpenMailTarget,
+        cx: &mut Context<Self>,
+    ) {
+        self.notification_target = Some(target);
+        if !self.busy {
+            self.apply_notification(cx);
+        }
+    }
+    fn apply_notification(&mut self, cx: &mut Context<Self>) {
+        let Some(target) = self.notification_target.take() else {
+            return;
+        };
+        self.busy = true;
+        self.invalidate_read();
+        let store = self.store.clone();
+        let task = cx.background_executor().spawn(async move {
+            let account = receive(store.accounts())?
+                .into_iter()
+                .find(|(id, _)| id == &target.account)
+                .ok_or("通知所属账号已移除")?;
+            let folders = receive(store.folders(target.account.clone()))?;
+            let folder = folders
+                .into_iter()
+                .find(|f| match &target.message {
+                    Some(m) => f.id.0 == m.folder_id && f.uidvalidity == m.uidvalidity,
+                    None => f.remote_name.eq_ignore_ascii_case("INBOX"),
+                })
+                .ok_or("通知邮件已失效或收件箱尚未缓存")?;
+            let before = target.message.as_ref().and_then(|m| m.uid.checked_add(1));
+            let cache = receive(store.folder_cache(
+                target.account.clone(),
+                folder.remote_name.clone(),
+                before,
+            ))?;
+            let selected = target.message.as_ref().and_then(|m| {
+                cache
+                    .as_ref()
+                    .and_then(|c| c.messages.iter().position(|v| v.location == *m))
+            });
+            if target.message.is_some() && selected.is_none() {
+                return Err("通知邮件已删除或不在当前缓存中，请返回收件箱".to_string());
+            }
+            Ok::<_, String>((account, folder, cache, before, selected))
+        });
+        cx.spawn(async move |entity, cx| {
+            let result = task.await;
+            let _ = entity.update(cx, |this, cx| {
+                this.busy = false;
+                match result {
+                    Ok((account, folder, cache, before, selected)) => {
+                        let (catalog, at) =
+                            this.catalogs.get(&account.0.0).cloned().unwrap_or_default();
+                        this.account = Some(account);
+                        this.folders = catalog;
+                        this.catalog_at = at;
+                        this.unified = false;
+                        this.inbox = None;
+                        this.inbox_before = None;
+                        this.selected_folder = Some(folder.remote_name);
+                        this.before = before;
+                        this.search_results = None;
+                        this.search_previous = None;
+                        this.search_selected = None;
+                        this.checked.clear();
+                        this.undo_flags = None;
+                        this.confirm_delete = false;
+                        this.cache = cache;
+                        this.selected = selected;
+                        this.restore_uid = None;
+                        this.restore_selected = None;
+                        this.scroll = UniformListScrollHandle::new();
+                        this.narrow_detail = selected.is_some();
+                        this.status = "已定位通知邮件".into();
+                        if selected.is_some() {
+                            this.read_message(cx);
+                        }
+                    }
+                    Err(e) => {
+                        this.status = e;
+                    }
+                }
+                if this.notification_target.is_some() {
+                    this.apply_notification(cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
     }
     fn position_key(&self, folder: &str) -> String {
         format!(
@@ -703,6 +800,9 @@ impl Mailbox {
                         this.status = e;
                     }
                 };
+                if this.notification_target.is_some() {
+                    this.apply_notification(cx);
+                }
                 cx.notify();
             });
         })

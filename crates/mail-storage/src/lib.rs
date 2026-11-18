@@ -2,6 +2,8 @@
 //! 不保存密码/令牌；草稿与发送快照使用不可变对象和事务关联。
 mod account_credentials;
 mod cache;
+mod desktop;
+pub use desktop::NotificationBatch;
 mod client_requests;
 pub use client_requests::{ClientRequests, PendingAccountRequest};
 mod draft_reconcile;
@@ -39,7 +41,7 @@ use private_dir::PrivateDir;
 use rusqlite::{Connection, MAIN_DB, OpenFlags, OptionalExtension, params};
 use std::{fmt, fs::File, io, path::Path, time::Duration};
 
-const SCHEMA_VERSION: u32 = 17;
+const SCHEMA_VERSION: u32 = 18;
 const APPLICATION_ID: u32 = 0x514d4149;
 const SCHEMA: &str = include_str!("schema.sql");
 const SCHEMA_V2: &str = include_str!("schema-v2.sql");
@@ -690,6 +692,9 @@ fn migrate(
     }
     if version < 17 {
         tx.execute_batch(include_str!("schema-v17.sql"))?;
+    }
+    if version < 18 {
+        tx.execute_batch(include_str!("schema-v18.sql"))?;
     }
     tx.pragma_update(None, "application_id", APPLICATION_ID)?;
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
