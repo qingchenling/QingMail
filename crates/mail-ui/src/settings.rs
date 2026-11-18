@@ -12,6 +12,7 @@ pub(crate) struct Preferences {
     pub reader_font: f32,
     pub compact: bool,
     pub reduce_motion: bool,
+    pub show_log: bool,
 }
 impl Default for Preferences {
     fn default() -> Self {
@@ -20,6 +21,7 @@ impl Default for Preferences {
             reader_font: 16.0,
             compact: false,
             reduce_motion: false,
+            show_log: false,
         }
     }
 }
@@ -53,6 +55,7 @@ impl Preferences {
                 }
                 ("compact", value) => preferences.compact = value == "1",
                 ("reduce_motion", value) => preferences.reduce_motion = value == "1",
+                ("show_log", value) => preferences.show_log = value == "1",
                 _ => {}
             }
         }
@@ -68,11 +71,12 @@ impl Preferences {
         let _ = fs::create_dir_all(parent);
         let temp = parent.join("settings.txt.tmp");
         let content = format!(
-            "theme={}\nreader_font={}\ncompact={}\nreduce_motion={}\n",
+            "theme={}\nreader_font={}\ncompact={}\nreduce_motion={}\nshow_log={}\n",
             if self.dark { "dark" } else { "light" },
             self.reader_font,
             u8::from(self.compact),
-            u8::from(self.reduce_motion)
+            u8::from(self.reduce_motion),
+            u8::from(self.show_log)
         );
         let result = fs::OpenOptions::new()
             .write(true)
@@ -404,6 +408,28 @@ impl Render for Settings {
             );
         column = column.child(
             div()
+                .flex()
+                .gap_2()
+                .items_center()
+                .child("主窗口诊断日志")
+                .child(
+                    MaterialButton::new("settings-log")
+                        .variant(ButtonVariant::Tonal)
+                        .child(if preferences.show_log {
+                            "关闭"
+                        } else {
+                            "开启"
+                        })
+                        .on_click(cx.listener(|_, _, _, cx| {
+                            let mut preferences = prefs(cx);
+                            preferences.show_log = !preferences.show_log;
+                            set(cx, preferences);
+                            cx.notify();
+                        })),
+                ),
+        );
+        column = column.child(
+            div()
                 .text_size(px(12.))
                 .child("减少动态用于关闭主题过渡；产品窗口本身没有持续动画。"),
         );
@@ -544,6 +570,9 @@ mod tests {
         assert!(preferences.reduce_motion);
         let defaults = Preferences::parse("theme=light\nreader_font=abc\n");
         assert!(!defaults.dark);
+        assert!(!defaults.show_log);
+        assert!(Preferences::parse("show_log=1\n").show_log);
+        assert!(!Preferences::parse("show_log=0\n").show_log);
         assert_eq!(defaults.reader_font, 16.0);
     }
 }

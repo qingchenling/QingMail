@@ -206,13 +206,13 @@ impl Mailbox {
                     ),
             )
             .child(
-                div().px_4().pb_4().child(
+                div().px_5().pb_4().child(
                     MaterialButton::new("mailbox-compose")
                         .variant(ButtonVariant::Filled)
-                        .shape(ButtonShape::Square)
-                        .rounded_none()
+                        .shape(ButtonShape::Round)
+                        .rounded(px(16.))
                         .w_full()
-                        .h(px(48.))
+                        .h(px(42.))
                         .icon(icon("edit"))
                         .child("写邮件")
                         .disabled(self.account.is_none())
@@ -276,14 +276,16 @@ impl Mailbox {
                             .on_click(|_, _, cx| crate::settings::open(cx)),
                     ),
             )
-            .child(
-                div()
-                    .px_4()
-                    .pb_4()
-                    .text_size(px(11.))
-                    .text_color(theme::color(ColorRole::ON_SURFACE_VARIANT))
-                    .child(crate::lifecycle::sync_status(cx)),
-            )
+            .when(crate::settings::prefs(cx).show_log, |sidebar| {
+                sidebar.child(
+                    div()
+                        .px_4()
+                        .pb_4()
+                        .text_size(px(11.))
+                        .text_color(theme::color(ColorRole::ON_SURFACE_VARIANT))
+                        .child(crate::lifecycle::sync_status(cx)),
+                )
+            })
     }
     fn topbar(&self, title: &str, wide: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
@@ -737,7 +739,7 @@ impl Render for Mailbox {
                             .flex_1()
                             .text_size(px(12.))
                             .text_color(theme::color(ColorRole::ON_SURFACE_VARIANT))
-                            .child(format!("{count} 封 · 本页")),
+                            .child(format!("{count} 封")),
                     )
                     .when(self.search_results.is_some(), |row| {
                         row.child(
@@ -781,6 +783,14 @@ impl Render for Mailbox {
                     "message-index",
                     count,
                     cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
+                        if range.end >= this.messages().len().saturating_sub(5)
+                            && this.can_load_more()
+                        {
+                            let entity = cx.weak_entity();
+                            cx.defer(move |cx| {
+                                let _ = entity.update(cx, |this, cx| this.load_more(cx));
+                            });
+                        }
                         range
                             .map(|index| {
                                 if let Some(results) = &this.search_results {
@@ -815,45 +825,29 @@ impl Render for Mailbox {
                         .text_color(theme::color(ColorRole::ON_SURFACE_VARIANT))
                         .child(if self.busy {
                             "正在更新…"
+                        } else if self.search_results.is_some() {
+                            "本地搜索结果"
+                        } else if self.list_load_failed {
+                            "加载失败，已保留列表"
+                        } else if self.list_exhausted {
+                            "已显示全部本地邮件"
                         } else {
-                            "邮件内容按需加载"
+                            "向下滚动加载更多"
                         }),
                 )
-                .when(self.search_results.is_none(), |row| {
-                    row.child(
-                        tool("first-cache-page", "chevron_left", "返回最新缓存")
-                            .disabled(
-                                self.busy
-                                    || if self.unified {
-                                        self.inbox_before.is_none()
-                                    } else {
-                                        self.before.is_none()
-                                    },
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.before = None;
-                                this.inbox_before = None;
-                                this.load_cache(cx);
-                            })),
-                    )
-                    .child(
-                        tool("older-cache-page", "chevron_right", "下一页缓存")
-                            .disabled(
-                                self.busy
-                                    || if self.unified {
-                                        self.inbox.as_ref().is_none_or(|p| p.next.is_none())
-                                    } else {
-                                        self.messages().is_empty()
-                                    },
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.before = this.messages().last().map(|m| m.location.uid);
-                                this.inbox_before =
-                                    this.inbox.as_ref().and_then(|p| p.next.clone());
-                                this.load_cache(cx);
-                            })),
-                    )
-                }),
+                .when(
+                    self.list_load_failed && self.search_results.is_none(),
+                    |row| {
+                        row.child(
+                            quiet("retry-list-load", "重试加载")
+                                .disabled(self.busy)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.list_load_failed = false;
+                                    this.load_more(cx);
+                                })),
+                        )
+                    },
+                ),
         );
         let wide = window.bounds().size.width >= px(1050.);
         let inline = self

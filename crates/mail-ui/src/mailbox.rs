@@ -1,6 +1,8 @@
 //! 邮箱业务状态：复用存储线程、协议服务与安全 Reader；M3E 布局见 view。
 #[path = "mailbox_compose_probe.rs"]
 mod compose_probe;
+#[path = "mailbox_loading.rs"]
+mod loading;
 #[path = "mailbox_view.rs"]
 mod view;
 use gpui_kit::{
@@ -148,8 +150,9 @@ pub(super) struct Mailbox {
     search_selected: Option<usize>,
     search_previous: Option<(Option<usize>, Option<u32>)>,
     narrow_detail: bool,
-    positions: BTreeMap<String, (Option<u32>, Option<u32>)>,
+    positions: BTreeMap<String, (Option<u32>, Option<u32>, usize)>,
     restore_uid: Option<u32>,
+    restore_count: usize,
     inline: Option<InlineReading>,
     reading: Option<mail_core::MailUid>,
     read_running: bool,
@@ -164,6 +167,8 @@ pub(super) struct Mailbox {
     resize_start: Option<(f32, f32)>,
     before: Option<u32>,
     busy: bool,
+    list_exhausted: bool,
+    list_load_failed: bool,
     status: String,
     scroll: UniformListScrollHandle,
     focus: FocusHandle,
@@ -209,6 +214,7 @@ impl Mailbox {
             narrow_detail: false,
             positions: BTreeMap::new(),
             restore_uid: None,
+            restore_count: 200,
             inline: None,
             reading: None,
             read_running: false,
@@ -223,6 +229,8 @@ impl Mailbox {
             resize_start: None,
             before: None,
             busy: false,
+            list_exhausted: false,
+            list_load_failed: false,
             status: "正在读取本地账号与缓存…".into(),
             scroll: UniformListScrollHandle::new(),
             focus: cx.focus_handle(),
@@ -551,6 +559,9 @@ impl Mailbox {
                         this.checked.clear();
                         this.undo_flags = None;
                         this.confirm_delete = false;
+                        this.list_exhausted = cache.as_ref().is_none_or(|c| c.messages.len() < 200);
+                        this.list_load_failed = false;
+                        this.restore_count = 200;
                         this.cache = cache;
                         this.selected = selected;
                         this.restore_uid = None;
@@ -591,8 +602,10 @@ impl Mailbox {
         if self.account.as_ref().map(|(a, _)| a) != Some(&id) || self.unified {
             if let Some(current) = self.selected_folder.as_ref() {
                 let uid = self.selected_location().map(|loc| loc.uid);
-                self.positions
-                    .insert(self.position_key(current), (uid, self.before));
+                self.positions.insert(
+                    self.position_key(current),
+                    (uid, self.before, self.messages().len()),
+                );
             }
             self.selected_folder = None;
             self.account = self.accounts.iter().find(|(a, _)| a == &id).cloned();
@@ -635,6 +648,11 @@ impl Mailbox {
         self.busy = true;
         let store = self.store.clone();
         let before = self.inbox_before.clone();
+        let target = if self.quiet_reload {
+            self.messages().len().max(100)
+        } else {
+            100
+        };
         let revision = crate::lifecycle::sync_revision(cx);
         let keep_status = std::mem::take(&mut self.quiet_reload);
         let saved_status = self.status.clone();
@@ -648,11 +666,7 @@ impl Mailbox {
                 Reply::AccountOptions { default, .. } => default,
                 _ => None,
             };
-            let page =
-                match store.control(mail_protocol::Command::UnifiedInbox { before, limit: 100 })? {
-                    Reply::Inbox(page) => page,
-                    _ => return Err("统一收件箱响应无效".to_string()),
-                };
+            let page = loading::inbox_window(&store, before, target)?;
             Ok::<_, String>((page, accounts, catalogs, default))
         });
         cx.spawn(async move |entity, cx| {
@@ -664,6 +678,11 @@ impl Mailbox {
                 match result {
                     Ok((page, accounts, catalogs, default)) => {
                         let location = this.selected_location().cloned();
+                        if !keep_status {
+                            this.scroll = UniformListScrollHandle::new();
+                        }
+                        this.list_exhausted = page.next.is_none();
+                        this.list_load_failed = false;
                         this.inbox = Some(page);
                         let visible: HashSet<_> =
                             this.messages().iter().map(|m| m.location.clone()).collect();
@@ -682,7 +701,7 @@ impl Mailbox {
                             saved_status
                         } else {
                             format!(
-                                "统一收件箱 · 本页 {} 封 · {} 个账号",
+                                "统一收件箱 · {} 封 · {} 个账号",
                                 this.messages().len(),
                                 this.accounts.len()
                             )
@@ -768,6 +787,7 @@ impl Mailbox {
     }
     fn refresh_local(&mut self, cx: &mut Context<Self>) {
         if self.unified {
+            self.quiet_reload = true;
             self.load_unified(cx);
             return;
         }
@@ -863,14 +883,16 @@ impl Mailbox {
                 .selected
                 .and_then(|index| self.messages().get(index))
                 .map(|message| message.location.uid);
-            self.positions
-                .insert(self.position_key(&current), (uid, self.before));
+            self.positions.insert(
+                self.position_key(&current),
+                (uid, self.before, self.messages().len()),
+            );
         }
-        let (restore_uid, restore_before) = self
+        let (restore_uid, restore_before, restore_count) = self
             .positions
             .get(&self.position_key(&name))
             .copied()
-            .unwrap_or((None, None));
+            .unwrap_or((None, None, 200));
         self.invalidate_read();
         self.restore_uid = restore_uid;
         self.narrow_detail = false;
@@ -878,6 +900,7 @@ impl Mailbox {
         self.search_scope = 0;
         self.selected_folder = Some(name);
         self.before = restore_before;
+        self.restore_count = restore_count;
         self.search_results = None;
         self.search_previous = None;
         self.search_selected = None;
@@ -905,25 +928,33 @@ impl Mailbox {
             self.invalidate_read();
             self.cache = None;
         }
-        let request = self
-            .store
-            .folder_cache(account.clone(), name.clone(), self.before);
+        let store = self.store.clone();
+        let before = self.before;
+        let target = if quiet {
+            self.messages().len().max(200)
+        } else {
+            self.restore_count.max(200)
+        };
         let task = cx
             .background_executor()
-            .spawn(async move { receive(request) });
+            .spawn(async move { loading::folder_window(&store, account, name, before, target) });
         cx.spawn(async move |entity, cx| {
             let result = task.await;
             let _ = entity.update(cx, |this, cx| {
                 this.busy = false;
                 match result {
-                    Ok(cache) => {
+                    Ok((cache, exhausted)) => {
+                        this.list_exhausted = exhausted;
+                        this.list_load_failed = false;
                         // 静默刷新期间用户仍可选信，保留完成时的选择而非请求发起时的旧选择。
                         let selected_uid = this.selected_location().map(|location| location.uid);
                         this.cache = cache;
                         let visible: HashSet<_> =
                             this.messages().iter().map(|m| m.location.clone()).collect();
                         this.checked.retain(|loc| visible.contains(loc));
-                        this.scroll = UniformListScrollHandle::new();
+                        if !quiet {
+                            this.scroll = UniformListScrollHandle::new();
+                        }
                         let quiet = std::mem::take(&mut this.quiet_reload);
                         if let Some(index) = std::mem::take(&mut this.restore_selected) {
                             if index < this.messages().len() {
@@ -949,7 +980,7 @@ impl Mailbox {
                             this.status = match &this.cache {
                                 None => "这个文件夹尚无本地邮件；同步完成后会自动更新".into(),
                                 Some(cache) => format!(
-                                    "本页 {} 封 · 上次更新 {}",
+                                    "{} 封 · 上次更新 {}",
                                     cache.messages.len(),
                                     sync::display_time(cache.synced_at)
                                 ),
@@ -1115,7 +1146,10 @@ impl Mailbox {
                     this.busy = false;
                     match result {
                         Ok(_) => {
-                            this.before = before;
+                            if !older {
+                                this.before = None;
+                            }
+                            this.quiet_reload = true;
                             this.load_cache(cx);
                         }
                         Err(e) => {
@@ -1166,7 +1200,10 @@ impl Mailbox {
                             this.busy = false;
                             match result {
                                 Ok(()) => {
-                                    this.before = before;
+                                    if !older {
+                                        this.before = None;
+                                    }
+                                    this.quiet_reload = true;
                                     this.load_cache(cx);
                                 }
                                 Err(e) => {
@@ -2003,15 +2040,14 @@ impl Mailbox {
                 eprintln!("QINGMAIL_UI_CAPTURE: narrow");
             }
             10 => {
-                self.before = Some(41);
-                self.load_cache(cx);
+                self.load_more(cx);
             }
             _ => {
-                assert!(self.inline.is_none());
-                assert!(self.reading.is_none());
-                assert_eq!(self.messages().len(), 40);
+                assert_eq!(self.inline.as_ref().unwrap().location.uid, 240);
+                assert_eq!(self.messages().len(), 240);
+                assert_eq!(self.messages().last().unwrap().location.uid, 1);
                 eprintln!(
-                    "QINGMAIL_MAILBOX_UI_PROBE: PASS · auto inbox / direct reading / latest selection wins / folder switch discards stale result / search / restore / pagination / light dark narrow"
+                    "QINGMAIL_MAILBOX_UI_PROBE: PASS · auto inbox / direct reading / latest selection wins / folder switch discards stale result / search / restore / append loading / light dark narrow"
                 );
                 if std::env::var_os("QINGMAIL_IPC_TEST_MAILBOX").is_none() {
                     cx.quit();
@@ -2041,18 +2077,18 @@ impl Mailbox {
             }
             2 => {
                 assert_eq!(self.selected, Some(1));
-                self.before = Some(41);
-                self.load_cache(cx);
+                self.load_more(cx);
             }
             3 => {
                 assert!(!self.busy);
-                assert_eq!(self.messages().len(), 40);
-                assert_eq!(self.messages()[0].location.uid, 40);
-                self.before = None;
+                assert_eq!(self.messages().len(), 240);
+                assert_eq!(self.messages()[0].location.uid, 240);
+                assert_eq!(self.messages().last().unwrap().location.uid, 1);
+                self.quiet_reload = true;
                 self.load_cache(cx);
             }
             _ => {
-                assert_eq!(self.messages().len(), 200);
+                assert_eq!(self.messages().len(), 240);
                 self.selected = Some(1);
                 assert_eq!(self.selected, Some(1));
                 assert_eq!(self.messages()[1].location.uid, 239);
