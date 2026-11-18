@@ -20,7 +20,7 @@ pub(super) fn open(cx: &mut App) {
             title: Some("QingMail — 服务器草稿".into()),
             ..Default::default()
         }),
-        ..Default::default()
+        ..crate::ui::window_options()
     };
     if let Err(e) = gpui_kit::open_window(options, cx, |_, cx| cx.new(ServerDrafts::new)) {
         eprintln!("无法打开服务器草稿：{e}");

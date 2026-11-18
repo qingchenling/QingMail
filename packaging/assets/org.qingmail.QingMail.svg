@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>QingMail</title>
+  <rect x="8" y="8" width="240" height="240" rx="64" fill="#D8EFE9"/>
+  <rect x="42" y="66" width="172" height="124" rx="26" fill="#176B5B"/>
+  <path d="m57 85 59 48a19 19 0 0 0 24 0l59-48" fill="none" stroke="#F0FFF7" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="m64 170 32-27m96 27-32-27" fill="none" stroke="#A4D5C7" stroke-width="10" stroke-linecap="round"/>
+</svg>

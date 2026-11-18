@@ -139,7 +139,7 @@ pub(crate) fn open(cx: &mut App) {
             title: Some("QingMail — 设置".into()),
             ..Default::default()
         }),
-        ..Default::default()
+        ..crate::ui::window_options()
     };
     match gpui_kit::open_window(options, cx, |_, cx| cx.new(Settings::new)) {
         Ok((window, _)) => crate::lifecycle::register_settings(window, cx),

@@ -71,7 +71,7 @@ pub(super) fn open(cx: &mut App) {
             title: Some("QingMail — 添加邮箱".into()),
             ..Default::default()
         }),
-        ..Default::default()
+        ..crate::ui::window_options()
     };
     match gpui_kit::open_window(options, cx, |window, cx| {
         cx.new(|cx| Accounts::new(window, cx))

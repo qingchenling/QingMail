@@ -91,7 +91,7 @@ pub(super) fn open(cx: &mut App) {
             title: Some("QingMail — 邮件".into()),
             ..Default::default()
         }),
-        ..Default::default()
+        ..crate::ui::window_options()
     };
     match gpui_kit::open_window(options, cx, |window, cx| {
         cx.new(|cx| Mailbox::new(window, cx))

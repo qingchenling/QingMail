@@ -16,6 +16,7 @@ def main():
     parser.add_argument('--evidence',type=Path,required=True)
     parser.add_argument('--mode',choices=('idle','interaction'),default='idle')
     parser.add_argument('--seconds',type=int,default=12)
+    parser.add_argument('--verify-app-id',action='store_true',help='Verify the live Wayland identity through Hyprland')
     args=parser.parse_args();args.evidence.parent.mkdir(parents=True,exist_ok=True)
     assert 5 <= args.seconds <= 120
     binary=args.binary.resolve()
@@ -28,7 +29,7 @@ def main():
         env.setdefault('WAYLAND_DISPLAY','wayland-1')
         env.setdefault('VK_DRIVER_FILES','/usr/share/vulkan/icd.d/intel_icd.json')
         process=subprocess.Popen([str(binary)],env=env,stdout=log,stderr=log)
-        samples=[];backend=None
+        samples=[];backend=None;window_identity=None
         try:
             deadline=time.monotonic()+args.seconds+60
             while process.poll() is None:
@@ -40,11 +41,20 @@ def main():
                     try: process.wait(timeout=.5)
                     except subprocess.TimeoutExpired: raise RuntimeError('live process tree changed during measurement')
                     break
+                if args.verify_app_id and window_identity is None:
+                    clients=json.loads(subprocess.check_output(['hyprctl','-j','clients'],text=True,timeout=5))
+                    matches=[c for c in clients if c.get('pid')==process.pid]
+                    if matches:
+                        client=matches[0]
+                        assert client.get('class')=='org.qingmail.QingMail',client
+                        assert client.get('xwayland') is False,client
+                        window_identity={key:client.get(key) for key in ('class','initialClass','xwayland')}
                 try:backend=rpc(root,'status')['data']['pid']
                 except OSError:pass
                 time.sleep(.25)
             assert process.returncode==0,'UI exited unsuccessfully; inspect log'
             assert backend is not None
+            if args.verify_app_id:assert window_identity is not None,'No live mailbox window was observed'
             # UI detached through normal lifecycle, so the independent daemon must remain.
             assert rpc(root,'status')['data']['pid']==backend
             assert not Path(f'/proc/{process.pid}').exists()
@@ -58,6 +68,7 @@ def main():
         lines=[line for line in text.splitlines() if line.startswith(('MAILBOX_PERF','MAILBOX_ACTION'))]
         assert (len(lines)==2 if args.mode=='idle' else any('MAILBOX_ACTION PASS' in line for line in lines)),text[-2000:]
         report=dict(passed=True,synthetic_only=True,accounts=5,messages_per_account=10000,window_samples=samples,frame_observation=lines,ui_exited_backend_retained=True,display=dict(wayland=env.get('WAYLAND_DISPLAY'),driver=env.get('VK_DRIVER_FILES')))
+        report['window_identity']=window_identity
         report['diagnostics']=[line for line in text.splitlines() if line.startswith(('MAILBOX_ENV','MAILBOX_TRACE','PERF mailbox_'))]
         args.evidence.write_text(json.dumps(report,indent=2)+'\n')
         print('\n'.join(lines))
