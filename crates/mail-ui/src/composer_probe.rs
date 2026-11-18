@@ -266,3 +266,155 @@ impl Composer {
         self.probe_step += 1;
     }
 }
+
+/// 主窗口嵌入式流程的原生实体探针；只由隔离测试入口调用，不确认 SMTP。
+impl Composer {
+    pub(crate) fn inline_probe_step(
+        &mut self,
+        step: u8,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.loading || self.saving || self.checking_send || self.pending_draft.is_some() {
+            return false;
+        }
+        // Like a real user, wait until the rendered native controls accept input.
+        // Storage completion can precede the next frame that clears a TextField's disabled state.
+        if [0, 4, 14].contains(&step) && !self.header_inputs[3].read(cx).is_editable() {
+            return false;
+        }
+        if [0, 6, 8, 11, 12].contains(&step) && !self.input.read(cx).is_editable() {
+            return false;
+        }
+        match step {
+            0 => {
+                self.header_inputs[0].update(cx, |i, cx| {
+                    i.set_selected_range(0..i.value().len(), cx);
+                    i.replace_text_in_range(None, "to@example.invalid", window, cx);
+                });
+                self.header_inputs[3].update(cx, |i, cx| {
+                    i.set_selected_range(0..i.value().len(), cx);
+                    i.replace_text_in_range(None, "内嵌草稿一", window, cx);
+                });
+                self.input.update(cx, |i, cx| {
+                    i.set_selected_range(0..i.value().len(), cx);
+                    i.replace_text_in_range(None, "内嵌写信 Chinese 🙂", window, cx);
+                });
+            }
+            12 => {
+                // IME veto must retain this entity and its host window.
+                self.input.update(cx, |i, cx| {
+                    let n = i.value().len();
+                    i.set_selected_range(n..n, cx);
+                    i.replace_and_mark_text_in_range(None, "候选", None, window, cx);
+                });
+                assert!(self.prepare_close(window, cx).is_err());
+                self.input
+                    .update(cx, |i, cx| i.replace_text_in_range(None, "", window, cx));
+            }
+            14 => {
+                self.header_inputs[3].update(cx, |i, cx| {
+                    i.set_selected_range(0..i.value().len(), cx);
+                    i.replace_text_in_range(None, "内嵌草稿一 · 最新", window, cx);
+                });
+            }
+            13 => {
+                assert_eq!(self.session.borrow().draft.text(), "内嵌写信 Chinese 🙂");
+                let len = self.session.borrow().draft.text().len();
+                self.input
+                    .update(cx, |i, cx| i.set_selected_range(0..len, cx));
+                self.format("bold", window, cx);
+                self.format("italic", window, cx);
+                self.history(false, window, cx);
+                self.history(true, window, cx);
+                assert!(self.session.borrow().draft.attributes()[0].bold);
+                assert!(self.session.borrow().draft.attributes()[0].italic);
+                self.save(cx);
+            }
+            1 => {
+                if self.saved != Some(self.session.borrow().revision) {
+                    return false;
+                }
+                self.check_send(window, cx);
+            }
+            3 => self.switch_draft(None, window, cx),
+            4 => {
+                assert!(self.session.borrow().draft.text().is_empty());
+                self.input.update(cx, |i, cx| {
+                    i.set_selected_range(0..i.value().len(), cx);
+                    i.replace_text_in_range(None, "第二份草稿", window, cx);
+                });
+                self.header_inputs[3].update(cx, |i, cx| {
+                    i.set_selected_range(0..i.value().len(), cx);
+                    i.replace_text_in_range(None, "内嵌草稿二", window, cx);
+                });
+                self.save(cx);
+            }
+            5 => {
+                if self.saved != Some(self.session.borrow().revision) {
+                    return false;
+                }
+                let Some(index) = self
+                    .drafts
+                    .iter()
+                    .position(|d| d.document.headers.subject == "内嵌草稿一 · 最新")
+                else {
+                    return false;
+                };
+                self.switch_draft(Some(index), window, cx);
+            }
+            6 => {
+                assert_eq!(self.header_values[3], "内嵌草稿一 · 最新");
+                assert_eq!(self.session.borrow().draft.text(), "内嵌写信 Chinese 🙂");
+                assert!(self.session.borrow().draft.attributes()[0].bold);
+                assert!(self.session.borrow().draft.attributes()[0].italic);
+                self.input.update(cx, |i, cx| {
+                    let n = i.value().len();
+                    i.set_selected_range(n..n, cx);
+                    i.replace_text_in_range(None, "即时关闭", window, cx);
+                });
+            }
+            7 => {
+                assert_eq!(
+                    self.session.borrow().draft.text(),
+                    "内嵌写信 Chinese 🙂即时关闭"
+                );
+                assert!(self.session.borrow().draft.attributes()[0].bold);
+            }
+            8 => {
+                self.input.update(cx, |i, cx| {
+                    let n = i.value().len();
+                    i.set_selected_range(n..n, cx);
+                    i.replace_text_in_range(None, "失败保留", window, cx);
+                });
+                self.request_close(cx);
+            }
+            9 => {
+                if !self.auto_save_blocked {
+                    return false;
+                }
+                assert!(!self.closed && !self.closing);
+                assert!(self.session.borrow().draft.text().ends_with("失败保留"));
+            }
+            10 => self.save(cx),
+            11 => {
+                if self.saved != Some(self.session.borrow().revision) {
+                    return false;
+                }
+                self.input.update(cx, |i, cx| {
+                    let n = i.value().len();
+                    i.set_selected_range(n..n, cx);
+                    i.replace_text_in_range(None, "退出保存", window, cx);
+                });
+            }
+            _ => unreachable!(),
+        }
+        true
+    }
+    pub(crate) fn inline_probe_review_ready(&self) -> bool {
+        self.send_review.is_some()
+    }
+    pub(crate) fn inline_probe_cancel_review(&mut self, cx: &mut Context<Self>) {
+        self.cancel_review(cx);
+    }
+}

@@ -1,6 +1,6 @@
 //! 写信字段与附件；和正文共享版本及关闭保存流程，不创建发送任务。
 use super::*;
-use gpui_kit::{PathPromptOptions, base::input::InputEvent};
+use gpui_kit::{Focusable, PathPromptOptions, base::input::InputEvent};
 
 pub(super) fn headers(values: &[String; 4]) -> mail_core::DraftHeaders {
     let addresses = |value: &str| {
@@ -26,6 +26,9 @@ impl Composer {
             .enumerate()
             .map(|(index, input)| {
                 cx.subscribe(input, move |this, input, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Focus | InputEvent::Blur) {
+                        cx.notify();
+                    }
                     if matches!(event, InputEvent::Change) {
                         let value = input.read(cx).value().to_string();
                         if this.header_values[index] != value {
@@ -88,7 +91,7 @@ impl Composer {
         })
         .detach();
     }
-    fn add_attachment(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn add_attachment(&mut self, cx: &mut Context<Self>) {
         if self.loading || self.closing || self.importing || self.send_locked() {
             return;
         }
@@ -200,8 +203,9 @@ impl Composer {
             row = row.child(
                 MaterialButton::new(format!("chip-{index}-{address}"))
                     .variant(ButtonVariant::Tonal)
+                    .button_size(ButtonSize::ExtraSmall)
                     .child(format!("{address} ×"))
-                    .disabled(self.loading || self.send_locked())
+                    .disabled(self.loading || self.closing || self.send_locked())
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.remove_recipient(index, &removed, window, cx);
                     })),
@@ -229,54 +233,116 @@ impl Composer {
         });
         cx.notify();
     }
-    pub(super) fn fields_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn fields_toolbar(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let disabled = self.loading || self.closing || self.store.is_none() || self.send_locked();
-        let mut fields = div().flex().flex_col().gap_1();
+        let mut fields = div()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .max_h(px(240.))
+            .id("compose-headers")
+            .overflow_y_scroll();
         for (index, label) in ["收件人", "抄送", "密送", "主题"].into_iter().enumerate() {
             if (index == 1 || index == 2) && !self.show_cc_bcc {
                 continue;
             }
-            fields = fields.child(
-                TextField::new(("draft-header", index), &self.header_inputs[index])
-                    .label(label)
-                    .disabled(disabled),
-            );
-            if let Some(error) = &self.field_errors[index] {
-                fields = fields.child(
+            let editing = index == 3
+                || self.header_values[index].is_empty()
+                || self.header_inputs[index]
+                    .focus_handle(cx)
+                    .is_focused(window);
+            fields =
+                fields.child(
                     div()
-                        .text_size(px(12.))
-                        .text_color(theme::color(ColorRole::ERROR))
-                        .child(error.clone()),
+                        .px_4()
+                        .py_1()
+                        .border_b_1()
+                        .border_color(theme::color(ColorRole::OUTLINE_VARIANT))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(div().w(px(54.)).flex_none().text_sm().child(label))
+                                .when(editing, |row| {
+                                    row.child(
+                                        TextField::new(
+                                            ("draft-header", index),
+                                            &self.header_inputs[index],
+                                        )
+                                        .density(TextFieldDensity::Compact)
+                                        .placeholder(if index == 3 {
+                                            "填写主题"
+                                        } else {
+                                            "输入邮箱地址，以逗号分隔"
+                                        })
+                                        .disabled(disabled)
+                                        .flex_1()
+                                        .min_w_0(),
+                                    )
+                                })
+                                .when(!editing, |row| {
+                                    row.child(
+                                        div()
+                                            .min_h(px(48.))
+                                            .flex_1()
+                                            .min_w_0()
+                                            .flex()
+                                            .items_center()
+                                            .gap_1()
+                                            .child(self.recipient_chips(index, cx))
+                                            .child(
+                                                crate::ui::tool(
+                                                    ("edit-recipients", index),
+                                                    "edit",
+                                                    "编辑收件地址",
+                                                )
+                                                .button_size(ButtonSize::ExtraSmall)
+                                                .disabled(disabled)
+                                                .on_click(cx.listener(move |this, _, w, cx| {
+                                                    this.header_inputs[index]
+                                                        .update(cx, |i, cx| i.focus(w, cx))
+                                                })),
+                                            ),
+                                    )
+                                })
+                                .when(index == 0, |row| {
+                                    row.child(
+                                        MaterialButton::new("toggle-cc-bcc")
+                                            .variant(ButtonVariant::Text)
+                                            .button_size(ButtonSize::ExtraSmall)
+                                            .child(if self.show_cc_bcc {
+                                                "收起"
+                                            } else {
+                                                "抄送 / 密送"
+                                            })
+                                            .disabled(disabled)
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.show_cc_bcc = !this.show_cc_bcc;
+                                                cx.notify();
+                                            })),
+                                    )
+                                }),
+                        )
+                        .when_some(self.field_errors[index].clone(), |row, error| {
+                            row.child(
+                                div()
+                                    .text_sm()
+                                    .text_color(theme::color(ColorRole::ERROR))
+                                    .child(error),
+                            )
+                        }),
                 );
-            }
-            if index < 3 {
-                fields = fields.child(self.recipient_chips(index, cx));
-            }
         }
-        fields = fields.child(
-            MaterialButton::new("toggle-cc-bcc")
-                .variant(ButtonVariant::Text)
-                .child(if self.show_cc_bcc {
-                    "隐藏抄送/密送"
-                } else {
-                    "显示抄送/密送"
-                })
-                .disabled(disabled)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.show_cc_bcc = !this.show_cc_bcc;
-                    cx.notify();
-                })),
-        );
-        let mut row = div().flex().flex_wrap().gap_2().child(
-            MaterialButton::new("add-draft-attachment")
-                .child(if self.importing {
-                    "正在添加…"
-                } else {
-                    "添加附件"
-                })
-                .disabled(disabled || self.importing)
-                .on_click(cx.listener(|this, _, _, cx| this.add_attachment(cx))),
-        );
+        fields
+    }
+    pub(super) fn attachment_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let disabled = self.loading || self.closing || self.store.is_none() || self.send_locked();
+        let mut row = div().flex().flex_wrap().gap_2();
         for (index, id) in self.attachment_ids.iter().enumerate() {
             let label = self
                 .attachment_infos
@@ -298,7 +364,7 @@ impl Composer {
                     })),
             );
         }
-        fields.child(row)
+        row
     }
 }
 

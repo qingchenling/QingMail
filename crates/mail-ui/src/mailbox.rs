@@ -1,4 +1,6 @@
 //! 邮箱业务状态：复用存储线程、协议服务与安全 Reader；M3E 布局见 view。
+#[path = "mailbox_compose_probe.rs"]
+mod compose_probe;
 #[path = "mailbox_view.rs"]
 mod view;
 use gpui_kit::{
@@ -105,7 +107,16 @@ struct InlineReading {
     content: mail_content::MailContent,
     view: Entity<crate::reader::Reader>,
 }
+type ComposeRequest = (
+    Option<(AccountId, String)>,
+    Option<mail_storage::DraftDocument>,
+    bool,
+);
 pub(super) struct Mailbox {
+    composer: Option<Entity<crate::composer::Composer>>,
+    composer_subscription: Option<gpui_kit::Subscription>,
+    pending_compose: Option<ComposeRequest>,
+    pane_generation: u64,
     notification_target: Option<mail_protocol::OpenMailTarget>,
     observed_status: String,
     store: StorageClient,
@@ -161,6 +172,10 @@ impl Mailbox {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         crate::perf_probe::mailbox_idle(window, cx);
         let mut this = Self {
+            composer: None,
+            composer_subscription: None,
+            pending_compose: None,
+            pane_generation: 0,
             notification_target: None,
             observed_status: String::new(),
             store: crate::lifecycle::storage(cx),
@@ -213,6 +228,7 @@ impl Mailbox {
             focus: cx.focus_handle(),
         };
         this.reload(cx);
+        Self::start_compose_probe(window, cx);
         if std::env::var("QINGMAIL_WINDOW_PERF").as_deref() == Ok("interaction")
             && std::env::var_os("QINGMAIL_IPC_ROOT").is_some()
         {
@@ -400,6 +416,72 @@ impl Mailbox {
             .detach();
         }
         this
+    }
+    pub(super) fn compose(
+        &mut self,
+        account: Option<(AccountId, String)>,
+        document: Option<mail_storage::DraftDocument>,
+        force: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.pane_generation += 1;
+        if let Some(editor) = &self.composer {
+            if !force
+                && document.is_none()
+                && !editor.read(cx).leaving()
+                && editor.read(cx).account_id() == account.as_ref().map(|(id, _)| id)
+            {
+                self.narrow_detail = true;
+                cx.notify();
+                return;
+            }
+            self.pending_compose = Some((account, document, force));
+            editor.update(cx, |editor, cx| editor.request_close(cx));
+            return;
+        }
+        let editor = cx.new(|cx| crate::composer::Composer::new(account, document, window, cx));
+        self.composer_subscription = Some(cx.subscribe_in(
+            &editor,
+            window,
+            |this, _, event: &crate::composer::ComposerEvent, window, cx| {
+                if matches!(event, crate::composer::ComposerEvent::CloseCancelled) {
+                    this.pending_compose = None;
+                    cx.notify();
+                    return;
+                }
+                this.composer = None;
+                this.composer_subscription = None;
+                if let Some((account, document, force)) = this.pending_compose.take()
+                    && !crate::lifecycle::is_closing(cx)
+                {
+                    // Defer replacement until the old close event and lifecycle participant are released.
+                    let host = cx.weak_entity();
+                    let generation = this.pane_generation;
+                    window.on_next_frame(move |window, cx| {
+                        let _ = host.update(cx, |this, cx| {
+                            if this.pane_generation == generation
+                                && !crate::lifecycle::is_closing(cx)
+                            {
+                                this.compose(account, document, force, window, cx);
+                            }
+                        });
+                    });
+                }
+                cx.notify();
+            },
+        ));
+        crate::lifecycle::register_editor(window.window_handle(), editor.downgrade(), cx);
+        self.composer = Some(editor);
+        self.narrow_detail = true;
+        cx.notify();
+    }
+    fn leave_composer(&mut self, cx: &mut Context<Self>) {
+        self.pane_generation += 1;
+        self.pending_compose = None;
+        if let Some(editor) = &self.composer {
+            editor.update(cx, |editor, cx| editor.request_close(cx));
+        }
     }
     pub(super) fn locate_notification(
         &mut self,
@@ -766,6 +848,7 @@ impl Mailbox {
         }
     }
     fn select_message(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.leave_composer(cx);
         self.selected = Some(index);
         self.confirm_delete = false;
         self.read_message(cx);
@@ -1131,6 +1214,7 @@ impl Mailbox {
         self.read_location(message.location, name, cx);
     }
     fn open_hit(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.leave_composer(cx);
         let Some(hit) = self
             .search_results
             .as_ref()

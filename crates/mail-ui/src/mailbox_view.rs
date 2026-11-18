@@ -1002,6 +1002,16 @@ impl Render for Mailbox {
         };
         let available = window.bounds().size.width.as_f32() - 216.;
         self.list_width = self.list_width.clamp(300., (available - 420.).max(300.));
+        if let Some(editor) = &self.composer {
+            let width = if wide {
+                available - self.list_width - 5.
+            } else {
+                available
+            };
+            // Only update the child layout hint; the child renders after this host.
+            editor.update(cx, |editor, _| editor.pane_width = width);
+            detail = div().size_full().min_w_0().min_h_0().child(editor.clone());
+        }
         let body = if wide {
             div()
                 .flex()
@@ -1033,7 +1043,7 @@ impl Render for Mailbox {
                         .overflow_hidden()
                         .child(detail.w_full()),
                 )
-        } else if self.narrow_detail {
+        } else if self.narrow_detail || self.composer.is_some() {
             div().flex_1().min_h_0().child(detail)
         } else {
             div().flex_1().min_h_0().child(list)

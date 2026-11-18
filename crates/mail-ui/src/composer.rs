@@ -1,10 +1,9 @@
 //! 原生写信与明确发送确认；后台持久任务禁止自动重发。
 use gpui_kit::{
-    App, Bounds, Context, Entity, EntityInputHandler, FontStyle, FontWeight, HighlightStyle, Hsla,
-    KeyDownEvent, Render, SharedString, Subscription, TitlebarOptions, UnderlineStyle, Window,
-    WindowBounds, WindowOptions,
+    App, Context, Entity, EntityInputHandler, EventEmitter, FontStyle, FontWeight, HighlightStyle,
+    Hsla, KeyDownEvent, Render, SharedString, Subscription, UnderlineStyle, Window,
     base::{
-        TextSelectionLayer, TextView, TextViewState,
+        TextSelectionLayer,
         input::{
             Editor, EditorState, FoldRange, HighlightStyleResolver, InputEdit, InputEditsEvent,
             InputHighlighter, InputState, Redo, Undo,
@@ -12,7 +11,7 @@ use gpui_kit::{
     },
     div,
     prelude::*,
-    px, size,
+    px,
 };
 use gpui_kit_material::{prelude::*, theme};
 use mail_content::draft::{Attributes, Block, Draft};
@@ -33,6 +32,8 @@ mod fields;
 mod probe;
 #[path = "composer_send.rs"]
 mod send;
+#[path = "composer_view.rs"]
+mod view;
 
 const SAMPLE: &str = "你好，QingMail！\n选中这段中文，测试粗体、斜体和链接。🙂\n第一项\n这是一段引用。\n凌晨 · QingMail";
 
@@ -235,7 +236,7 @@ pub(super) fn open(cx: &mut App) {
 pub(super) fn open_account(account: mail_core::AccountId, address: String, cx: &mut App) {
     open_scoped(Some((account, address)), None, false, cx);
 }
-/// 回复/转发总是新建草稿窗口，不覆盖用户正在编辑的草稿。
+/// 回复/转发先保存当前编辑，再在主窗口中创建新草稿。
 pub(super) fn open_document(
     account: mail_core::AccountId,
     address: String,
@@ -253,30 +254,15 @@ fn open_scoped(
     force: bool,
     cx: &mut App,
 ) {
-    if !force
-        && document.is_none()
-        && crate::lifecycle::reuse_editor(account.as_ref().map(|(id, _)| id), cx)
-    {
-        return;
-    }
-    let bounds = Bounds::centered(None, size(px(1180.), px(820.)), cx);
-    let result = gpui_kit::open_window(
-        WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            titlebar: Some(TitlebarOptions {
-                title: Some("QingMail — 写信草稿".into()),
-                ..Default::default()
-            }),
-            ..crate::ui::window_options()
-        },
-        cx,
-        |window, cx| cx.new(|cx| Composer::new(account, document, window, cx)),
-    );
-    match result {
-        Ok((window, entity)) => crate::lifecycle::register_editor(window, entity.downgrade(), cx),
-        Err(e) => eprintln!("无法打开编辑验证窗口：{e}"),
-    }
+    crate::mailbox::open(cx);
+    crate::lifecycle::compose_in_mailbox(account, document, force, cx);
 }
+
+pub(super) enum ComposerEvent {
+    Closed,
+    CloseCancelled,
+}
+impl EventEmitter<ComposerEvent> for Composer {}
 
 pub(super) struct Composer {
     checking_send: bool,
@@ -292,11 +278,19 @@ pub(super) struct Composer {
     attachment_infos: Vec<mail_storage::AttachmentInfo>,
     importing: bool,
     closing: bool,
+    closed: bool,
+    close_requested: bool,
+    show_link: bool,
+    pub(super) pane_width: f32,
+    more_open: bool,
+    drafts_open: bool,
+    sender_open: bool,
+    pending_draft: Option<Option<usize>>,
+    _selection_subscription: Subscription,
     close_error: Option<String>,
     font_family: SharedString,
     input: Entity<EditorState>,
     link: Entity<InputState>,
-    preview: Entity<TextViewState>,
     session: Rc<RefCell<Session>>,
     store: Option<StorageClient>,
     stored: Option<StoredDraft>,
@@ -320,17 +314,22 @@ impl Composer {
     pub(super) fn account_id(&self) -> Option<&mail_core::AccountId> {
         self.account_scope.as_ref().map(|(id, _)| id)
     }
-    pub(super) fn explain_scope(
-        &mut self,
-        requested: Option<&mail_core::AccountId>,
-        cx: &mut Context<Self>,
-    ) {
-        if self.account_scope.as_ref().map(|(id, _)| id) != requested {
-            self.status = "已有另一个草稿空间的窗口；请保存并关闭此窗口，再从目标账号打开写信。当前发件账号未改变".into();
-            cx.notify();
-        }
+    pub(super) fn closed(&self) -> bool {
+        self.closed
     }
-    fn new(
+    pub(super) fn leaving(&self) -> bool {
+        self.closing || self.close_requested || self.closed
+    }
+    pub(super) fn request_close(&mut self, cx: &mut Context<Self>) {
+        self.close_requested = true;
+        cx.notify();
+    }
+    fn finish_close(&mut self, cx: &mut Context<Self>) {
+        self.closed = true;
+        cx.emit(ComposerEvent::Closed);
+        cx.notify();
+    }
+    pub(super) fn new(
         account_scope: Option<(mail_core::AccountId, String)>,
         initial_document: Option<mail_storage::DraftDocument>,
         window: &mut Window,
@@ -374,7 +373,6 @@ impl Composer {
         });
         let link =
             cx.new(|cx| InputState::new(window, cx).default_value("https://example.org/qingmail"));
-        let preview = cx.new(|cx| TextViewState::html(&draft.html(), cx));
         let subscription = cx.subscribe_in(
             &input,
             window,
@@ -388,7 +386,6 @@ impl Composer {
                     this.sync_input(window, cx);
                 } else {
                     this.last_edit = Instant::now();
-                    this.refresh_preview(cx);
                 }
                 cx.notify();
             },
@@ -410,11 +407,19 @@ impl Composer {
             attachment_infos: vec![],
             importing: false,
             closing: false,
+            closed: false,
+            close_requested: false,
+            show_link: false,
+            pane_width: 600.,
+            more_open: false,
+            drafts_open: false,
+            sender_open: false,
+            pending_draft: None,
+            _selection_subscription: cx.observe(&input, |_, _, cx| cx.notify()),
             close_error: None,
             font_family,
-            input,
+            input: input.clone(),
             link,
-            preview,
             session,
             store: None,
             stored: None,
@@ -427,7 +432,7 @@ impl Composer {
             auto_save_blocked: false,
             loading: true,
             last_edit: Instant::now(),
-            status: "正在检查本地验证草稿…".into(),
+            status: "正在恢复草稿…".into(),
             _subscription: subscription,
             probe_step: 0,
             show_cc_bcc: false,
@@ -437,13 +442,6 @@ impl Composer {
         this.input
             .update(cx, |input, cx| input.set_readonly(true, cx));
         this.load_store(window, cx);
-        let entity = cx.weak_entity();
-        window.on_window_should_close(cx, move |window, cx| {
-            let _ = entity.update(cx, |this, cx| {
-                let _ = this.prepare_close(window, cx);
-            });
-            false
-        });
         cx.spawn_in(window, async move |entity, cx| {
             loop {
                 cx.background_executor()
@@ -547,7 +545,8 @@ impl Composer {
             return;
         }
         if self.saved != Some(self.session.borrow().revision) {
-            self.status = "请先保存当前修改，再切换草稿".into();
+            self.pending_draft = Some(index);
+            self.status = "正在保存当前修改，完成后切换草稿".into();
             self.save(cx);
             return;
         }
@@ -597,64 +596,6 @@ impl Composer {
         .detach();
     }
 
-    fn draft_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut row = div()
-            .flex()
-            .flex_wrap()
-            .gap_2()
-            .child(
-                MaterialButton::new("new-local-draft")
-                    .child("新建草稿")
-                    .disabled(
-                        self.loading
-                            || self.saving
-                            || self.closing
-                            || self.importing
-                            || self.send_locked(),
-                    )
-                    .on_click(cx.listener(|this, _, w, cx| this.switch_draft(None, w, cx))),
-            )
-            .child(
-                MaterialButton::new("retry-local-save")
-                    .child("重试 / 立即保存")
-                    .disabled(self.loading || self.saving)
-                    .on_click(cx.listener(|this, _, w, cx| {
-                        if this.store.is_none() {
-                            this.loading = true;
-                            this.load_store(w, cx);
-                        } else {
-                            this.save(cx);
-                        }
-                    })),
-            );
-        for (index, draft) in self.drafts.iter().enumerate() {
-            let label = format!(
-                "{}草稿 {}",
-                if self.stored.as_ref().is_some_and(|d| d.id == draft.id) {
-                    "● "
-                } else {
-                    ""
-                },
-                &draft.id.0[..8]
-            );
-            row = row.child(
-                MaterialButton::new(("local-draft", index))
-                    .child(label)
-                    .disabled(
-                        self.loading
-                            || self.saving
-                            || self.closing
-                            || self.importing
-                            || self.send_locked(),
-                    )
-                    .on_click(
-                        cx.listener(move |this, _, w, cx| this.switch_draft(Some(index), w, cx)),
-                    ),
-            );
-        }
-        row
-    }
-
     fn composing(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         self.input.update(cx, |input, cx| {
             input.marked_text_range(window, cx).is_some()
@@ -664,18 +605,12 @@ impl Composer {
             })
         })
     }
-    fn refresh_preview(&mut self, cx: &mut Context<Self>) {
-        let html = self.session.borrow().draft.html();
-        self.preview
-            .update(cx, |preview, cx| preview.set_text(&html, cx));
-    }
     fn sync_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.session.borrow().draft.text().to_owned();
         self.input.update(cx, |input, cx| {
             input.set_value(text, window, cx);
             input.refresh(cx);
         });
-        self.refresh_preview(cx);
     }
     pub(super) fn lifecycle_probe(
         &mut self,
@@ -747,35 +682,44 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
+        if self.closed {
+            return Ok(());
+        }
         if let Some(error) = self.close_error.take() {
+            cx.emit(ComposerEvent::CloseCancelled);
             return Err(error);
         }
         if self.importing {
             self.status = "请先完成或取消附件选择，等待附件导入结束后再关闭".into();
             cx.notify();
+            cx.emit(ComposerEvent::CloseCancelled);
             return Err(self.status.clone());
         }
         if self.loading {
+            self.close_requested = true;
             self.status = "正在恢复草稿，请稍后关闭".into();
             return Ok(());
         }
         if self.composing(window, cx) {
             self.status = "请先完成或取消中文候选词，再关闭窗口".into();
             cx.notify();
+            cx.emit(ComposerEvent::CloseCancelled);
             return Err(self.status.clone());
         }
         if self.store.is_none() && self.session.borrow().revision == 0 {
             // 初始加载失败时输入保持只读；未产生用户改动，可以关闭。
-            window.remove_window();
+            self.finish_close(cx);
             return Ok(());
         }
         if self.store.is_none() && self.saved != Some(self.session.borrow().revision) {
             self.status = "关闭已取消：草稿存储不可用，请复制保留内容并排除问题".into();
             cx.notify();
+            cx.emit(ComposerEvent::CloseCancelled);
             return Err(self.status.clone());
         }
         // 关闭不会撤回已确认发送；预览尚未确认时只丢弃预览。
         self.send_review = None;
+        self.pending_draft = None;
         self.closing = true;
         self.input
             .update(cx, |input, cx| input.set_readonly(true, cx));
@@ -784,6 +728,16 @@ impl Composer {
         Ok(())
     }
     fn tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.closed {
+            return;
+        }
+        if self.close_requested {
+            self.close_requested = false;
+            let _ = self.prepare_close(window, cx);
+            if self.closed {
+                return;
+            }
+        }
         if self.loading {
             return;
         }
@@ -810,7 +764,15 @@ impl Composer {
                     })
                     .detach();
             }
-            window.remove_window();
+            self.finish_close(cx);
+            return;
+        }
+        if !self.closing
+            && !self.saving
+            && self.saved == Some(self.session.borrow().revision)
+            && let Some(index) = self.pending_draft.take()
+        {
+            self.switch_draft(index, window, cx);
             return;
         }
         self.session.borrow_mut().finish_composition();
@@ -867,10 +829,18 @@ impl Composer {
                         );
                     }
                     Err(e) => {
+                        this.pending_draft = None;
                         this.auto_save_blocked = true;
                         this.closing = false;
+                        let locked = this.send_locked();
+                        this.input
+                            .update(cx, |input, cx| input.set_readonly(locked, cx));
+                        for input in &this.header_inputs {
+                            input.update(cx, |input, cx| input.set_readonly(locked, cx));
+                        }
                         this.status = format!("保存失败，关闭已取消，保留上次确认版本：{e}");
                         this.close_error = Some(this.status.clone());
+                        cx.emit(ComposerEvent::CloseCancelled);
                     }
                 }
                 cx.notify();
@@ -943,7 +913,7 @@ impl Composer {
             input.refresh(cx);
             input.focus(window, cx);
         });
-        self.refresh_preview(cx);
+
         cx.notify();
     }
     fn history(&mut self, redo: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -984,32 +954,6 @@ impl Composer {
             });
             self.last_edit = Instant::now();
             cx.notify();
-        }
-    }
-    fn current_block(&self, cx: &Context<Self>) -> Block {
-        let session = self.session.borrow();
-        let text = session.draft.text();
-        let mut byte = self.input.read(cx).selected_range().start.min(text.len());
-        while byte > 0 && !text.is_char_boundary(byte) {
-            byte -= 1;
-        }
-        let scalar = text[..byte].chars().count();
-        let index = scalar
-            .saturating_sub(1)
-            .min(session.draft.attributes().len().saturating_sub(2));
-        session
-            .draft
-            .attributes()
-            .get(index)
-            .map(|attributes| attributes.block)
-            .unwrap_or_default()
-    }
-    fn block_label(&self, cx: &Context<Self>) -> &'static str {
-        match self.current_block(cx) {
-            Block::Paragraph => "段落",
-            Block::Bullet => "列表",
-            Block::Quote => "引用",
-            Block::Signature => "签名",
         }
     }
     /// 列表/引用中回车续项；空条目回车结束区块，交回编辑器正常换行。
@@ -1245,134 +1189,6 @@ impl Composer {
         }
         cx.stop_propagation();
         window.prevent_default();
-    }
-}
-
-impl Render for Composer {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut toolbar = div().flex().flex_wrap().gap_2();
-        for (id, label) in [
-            ("bold", "粗体"),
-            ("italic", "斜体"),
-            ("paragraph", "段落"),
-            ("bullet", "列表"),
-            ("quote", "引用"),
-            ("signature", "签名"),
-            ("link", "加链接"),
-            ("unlink", "去链接"),
-        ] {
-            toolbar = toolbar.child(
-                MaterialButton::new(id)
-                    .variant(ButtonVariant::Tonal)
-                    .child(label)
-                    .disabled(self.loading)
-                    .on_click(cx.listener(move |this, _, window, cx| this.format(id, window, cx))),
-            );
-        }
-        toolbar = toolbar
-            .child(
-                MaterialButton::new("undo")
-                    .child("撤销")
-                    .on_click(cx.listener(|this, _, w, cx| this.history(false, w, cx))),
-            )
-            .child(
-                MaterialButton::new("redo")
-                    .child("重做")
-                    .on_click(cx.listener(|this, _, w, cx| this.history(true, w, cx))),
-            )
-            .child(
-                MaterialButton::new("paste-html")
-                    .variant(ButtonVariant::Tonal)
-                    .child("粘贴 HTML")
-                    .disabled(self.loading)
-                    .on_click(cx.listener(|this, _, window, cx| this.paste_html(window, cx))),
-            )
-            .child(
-                MaterialButton::new("save-as")
-                    .child("另存草稿…")
-                    .disabled(self.loading)
-                    .on_click(cx.listener(|this, _, _, cx| this.save_as(cx))),
-            );
-        let revision = self.session.borrow().revision;
-        let state = if self.loading {
-            "正在恢复"
-        } else if self.saving {
-            "正在保存"
-        } else if self.saved == Some(revision) {
-            "已保存"
-        } else {
-            "有未保存修改"
-        };
-        div().capture_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-            if event.keystroke.key == "enter"
-                && !event.keystroke.modifiers.shift
-                && !event.keystroke.modifiers.control
-                && !event.keystroke.modifiers.alt
-                && this.continue_block(window, cx)
-            {
-                cx.stop_propagation();
-                window.prevent_default();
-                return;
-            }
-            if event.keystroke.modifiers.control && !event.keystroke.modifiers.alt && event.keystroke.key == "enter" {
-                this.check_send(window,cx);
-                cx.stop_propagation();
-                window.prevent_default();
-            }
-            if event.keystroke.modifiers.control && !event.keystroke.modifiers.alt && event.keystroke.key == "s" {
-                if !this.composing(window, cx) { this.save(cx); }
-                cx.stop_propagation();
-                window.prevent_default();
-            }
-        })).size_full().child(TextSelectionLayer).flex().flex_col().gap_3().p_4()
-            .bg(theme::color(ColorRole::SURFACE)).text_color(theme::color(ColorRole::ON_SURFACE))
-            .child(div().text_size(px(22.)).child("QingMail · 写信草稿"))
-            .child(div().text_size(px(13.)).child("选中后设置格式；Ctrl+B / I、Ctrl+Z / Shift+Z、Ctrl+S。收件人填写独立邮箱地址，以逗号或分号分隔。"))
-            .child(toolbar)
-            .when(self.load_failed && !self.loading, |root| {
-                root.child(
-                    div()
-                        .flex()
-                        .gap_2()
-                        .flex_wrap()
-                        .p_2()
-                        .child(
-                            MaterialButton::new("save-raw-draft")
-                                .child("另存原始数据…")
-                                .on_click(cx.listener(|this, _, _, cx| this.save_raw_draft(cx))),
-                        )
-                        .child(
-                            MaterialButton::new("discard-bad-draft")
-                                .child("放弃并新建草稿")
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.discard_bad_draft(window, cx);
-                                })),
-                        ),
-                )
-            })
-            .child(self.draft_toolbar(cx))
-            .child(div().text_size(px(14.)).child(self.account_scope.as_ref().map(|(_,address)| format!("发件账号：{address} · 草稿仅本地保存")).unwrap_or_else(||"未关联发件账号 · 本地草稿".into())))
-            .child(self.fields_toolbar(cx))
-            .child(self.send_toolbar(cx))
-            .child(TextField::new("link-url", &self.link))
-            .child(div().flex().gap_4().flex_1().min_h_0()
-                .child(div().flex().flex_col().gap_2().flex_1().min_w_0()
-                    .child(format!(
-                        "原生编辑（粗斜体直接显示；当前区块：{}；列表/引用中回车续项）",
-                        self.block_label(cx)
-                    ))
-                    .child(div().id("rich-editor").flex_1().min_h_0().border_1().border_color(theme::color(ColorRole::OUTLINE_VARIANT))
-                        .p_3().text_size(px(18.)).font_family(self.font_family.clone())
-                        .capture_action(cx.listener(|this, _: &Undo, window, cx| { this.history(false, window, cx); cx.stop_propagation(); }))
-                        .capture_action(cx.listener(|this, _: &Redo, window, cx| { this.history(true, window, cx); cx.stop_propagation(); }))
-                        .capture_key_down(cx.listener(Self::key))
-                        .child(Editor::new(&self.input))))
-                .child(div().flex().flex_col().gap_2().flex_1().min_w_0()
-                    .child("受控 HTML 预览（链接仅显示，不打开）")
-                    .child(div().id("draft-preview").flex_1().min_h_0().overflow_y_scroll().p_3()
-                        .child(TextView::new(&self.preview).font_family(self.font_family.clone()).on_link_click(|_, _, _, _| {})))))
-            .child(div().text_size(px(13.)).child(format!("{state} · {}", self.status)))
-            .child(div().text_size(px(12.)).child("草稿保存在本机；只有确认发送才提交，不自动重发。附件最多32个，总计25MiB。关闭重开恢复最后确认版本。粘贴仅纯文本。"))
     }
 }
 

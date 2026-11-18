@@ -59,7 +59,7 @@ with tempfile.TemporaryDirectory(prefix='qingmail-p3-split-') as directory, evid
         processes.append(proc)
         return proc
 
-    def rpc(kind, params=None, version=1):
+    def rpc(kind, params=None, version=2):
         request = dict(version=version, id=secrets.token_hex(16), command=dict(type=kind))
         if params is not None:
             request['command']['args'] = params
@@ -103,9 +103,9 @@ with tempfile.TemporaryDirectory(prefix='qingmail-p3-split-') as directory, evid
         return next(d for d in documents if d['text'] == '生命周期验证🙂\n关闭前最新草稿')
 
     try:
-        first = launch(QINGMAIL_IPC_TEST_MAILBOX='1', QINGMAIL_IPC_TEST_EDITOR='1')
+        first = launch(QINGMAIL_IPC_TEST_EDITOR='1')
         backend = until(daemon_ready)['pid']
-        clients = until(lambda: windows(first) if len(windows(first)) >= 2 else None)
+        clients = until(lambda: windows(first) if len(windows(first)) == 1 else None)
         assert all(not c['xwayland'] for c in clients)
         assert backend != first.pid
         (root/'edit-trigger').touch()
@@ -113,11 +113,15 @@ with tempfile.TemporaryDirectory(prefix='qingmail-p3-split-') as directory, evid
         draft = saved()
         assert all(a['bold'] for a in draft['attributes'][:-1])
         record('production IPC editor immediate close, IME veto, formatted draft saved', backend_pid=backend, frontend_pid=first.pid)
-        until(lambda: 'QINGMAIL_MAILBOX_UI_PROBE: PASS' in evidence.with_suffix('.log').read_text())
-        record('production IPC cached reading, selection races, folder/search/pages and native M3E rendering', xwayland=False)
         close_front(first)
         assert status()['pid'] == backend
         record('main window close exits GPUI; daemon survives')
+        # Compose and reader now share one pane. Run their scripted interactions
+        # sequentially so the list probe cannot close a draft during IME testing.
+        reading = launch(QINGMAIL_IPC_TEST_MAILBOX='1')
+        until(lambda: 'QINGMAIL_MAILBOX_UI_PROBE: PASS' in evidence.with_suffix('.log').read_text())
+        record('production IPC cached reading, selection races, folder/search/pages and native M3E rendering', xwayland=False)
+        close_front(reading)
         cache = reply('cache_status')['data']
         assert cache['budget_bytes'] == 1073741824
         assert cache['evictable_bytes'] > 0
@@ -178,18 +182,18 @@ with tempfile.TemporaryDirectory(prefix='qingmail-p3-split-') as directory, evid
         # Backend loss during editor close must veto both editor and frontend exit.
         (root/'edit-trigger').unlink()
         failure = launch(QINGMAIL_IPC_TEST_EDITOR='1')
-        until(lambda: len(windows(failure)) >= 2)
+        until(lambda: len(windows(failure)) == 1)
         time.sleep(2)  # Restore the editor before interrupting storage.
         os.kill(restarted, signal.SIGKILL)
         (root/'edit-trigger').touch()
         time.sleep(8)
-        assert failure.poll() is None and len(windows(failure)) >= 2
+        assert failure.poll() is None and len(windows(failure)) == 1
         main = next(c for c in windows(failure) if c['title'] == 'QingMail — 邮件')
         close_window(main)
         time.sleep(1)
-        assert failure.poll() is None and len(windows(failure)) >= 2
+        assert failure.poll() is None and len(windows(failure)) == 1
         assert all(a['bold'] for a in saved()['attributes'][:-1])
-        record('save failure retains editor and vetoes main close; last confirmed draft unchanged')
+        record('save failure retains embedded composer and vetoes main close; last confirmed draft unchanged')
         daemon.wait(timeout=10)
         daemon = subprocess.Popen([str(binary.with_name('mail-daemon')), '--isolated-root', str(root)], env=env, stdout=log, stderr=subprocess.STDOUT)
         processes.append(daemon)

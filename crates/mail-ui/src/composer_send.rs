@@ -123,7 +123,7 @@ impl Composer {
             }
         };
         self.sending = true;
-        self.status = "正在提交；关闭写信窗口不会取消，结果将可靠保存在发送记录".into();
+        self.status = "正在提交；离开写信工作区不会取消，结果将可靠保存在发送记录".into();
         let task = cx.background_executor().spawn(async move {
             reply
                 .recv()
@@ -185,44 +185,19 @@ impl Composer {
         .detach();
         cx.notify();
     }
-    fn cancel_review(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn cancel_review(&mut self, cx: &mut Context<Self>) {
         self.send_review = None;
+        let locked = self.loading || self.closing || self.store.is_none() || self.send_locked();
+        self.input
+            .update(cx, |input, cx| input.set_readonly(locked, cx));
+        for input in &self.header_inputs {
+            input.update(cx, |input, cx| input.set_readonly(locked, cx));
+        }
         self.status = "已取消发送确认，草稿保留".into();
         cx.notify();
     }
     pub(super) fn send_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut area = div().flex().flex_col().gap_1();
-        let mut actions = div().flex().gap_2().flex_wrap().child(
-            MaterialButton::new("check-send")
-                .child("检查并发送…")
-                .disabled(
-                    self.loading
-                        || self.closing
-                        || self.importing
-                        || self.send_locked()
-                        || self.account_scope.is_none()
-                        || self
-                            .send_tasks
-                            .iter()
-                            .any(|task| task.state != SendState::Failed),
-                )
-                .on_click(cx.listener(|this, _, window, cx| this.check_send(window, cx))),
-        );
-        actions = actions
-            .child(
-                MaterialButton::new("refresh-send-tasks")
-                    .child("刷新发送记录")
-                    .disabled(self.loading)
-                    .on_click(cx.listener(|this, _, _, cx| this.refresh_send_tasks(cx))),
-            )
-            .child(
-                MaterialButton::new("open-send-tasks")
-                    .child("发送任务…")
-                    .on_click(cx.listener(|_, _, _, cx| {
-                        cx.defer(crate::send_tasks::open);
-                    })),
-            );
-        area = area.child(actions);
         if let Some((review, _)) = &self.send_review {
             let empty = review.headers.subject.trim().is_empty();
             let summary = format!(

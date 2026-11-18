@@ -85,8 +85,8 @@ def run(binary, evidence):
             assert status()['pid'] == str(proc.pid)
             record('eight concurrent relaunches reuse one process and one editor', pid=proc.pid)
             control()
-            until(lambda: status().get('windows') == '2')
-            record('relaunch recreates main window alongside restored editor')
+            until(lambda: status().get('windows') == '1')
+            record('relaunch reuses main window with embedded composer')
 
             # 非法及超长命令不能阻塞 UI/后台或执行动作。
             for payload in [b'QMP1 OPEN\n', b'QMP0 EXEC /bin/sh\n', b'x'*32]:

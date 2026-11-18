@@ -38,7 +38,7 @@ pub(super) struct Lifecycle {
     send_tasks: Option<AnyWindowHandle>,
     settings: Option<AnyWindowHandle>,
     accounts: Option<(AnyWindowHandle, WeakEntity<crate::accounts::Accounts>)>,
-    editors: Vec<Editor>,
+    editor: Option<Editor>,
     worker: Option<Background>,
     account_backend: Arc<AccountBackend>,
     pending_account_save: Option<crate::accounts::PendingSave>,
@@ -143,7 +143,7 @@ pub(super) fn start(
         send_tasks: None,
         settings: None,
         accounts: None,
-        editors: vec![],
+        editor: None,
         worker,
         account_backend,
         pending_account_save,
@@ -216,28 +216,25 @@ fn activate(window: AnyWindowHandle, cx: &mut App) -> bool {
 pub(super) fn open_main(cx: &mut App) {
     crate::mailbox::open(cx);
 }
-pub(super) fn reuse_editor(account: Option<&mail_core::AccountId>, cx: &mut App) -> bool {
-    let existing = cx
-        .global::<Lifecycle>()
-        .editors
-        .iter()
-        .find(|e| {
-            live(e.window, cx)
-                && e.entity
-                    .upgrade()
-                    .is_some_and(|entity| entity.read(cx).account_id() == account)
-        })
-        .map(|e| (e.window, e.entity.clone()));
-    if let Some((window, entity)) = existing {
-        let _ = entity.update(cx, |this, cx| this.explain_scope(account, cx));
-        return activate(window, cx);
+/// 写信入口只激活主窗口，编辑器始终由邮箱右侧持有。
+pub(super) fn compose_in_mailbox(
+    account: Option<(mail_core::AccountId, String)>,
+    document: Option<mail_storage::DraftDocument>,
+    force: bool,
+    cx: &mut App,
+) {
+    let host = cx.global::<Lifecycle>().mailbox.clone();
+    if let Some((handle, entity)) = host {
+        let _ = handle.update(cx, |_, window, cx| {
+            let _ = entity.update(cx, |this, cx| {
+                this.compose(account, document, force, window, cx)
+            });
+        });
     }
-    false
 }
 pub(super) fn register_editor(window: AnyWindowHandle, entity: WeakEntity<Composer>, cx: &mut App) {
-    cx.global_mut::<Lifecycle>()
-        .editors
-        .push(Editor { window, entity });
+    // 唯一的嵌入式编辑器；window 是宿主主窗口，不是额外的写信窗口。
+    cx.global_mut::<Lifecycle>().editor = Some(Editor { window, entity });
 }
 pub(super) fn reuse_reader(cx: &mut App) -> bool {
     cx.global::<Lifecycle>()
@@ -277,14 +274,12 @@ pub(super) fn register_mailbox(
     entity: WeakEntity<crate::mailbox::Mailbox>,
     cx: &mut App,
 ) {
-    if cx.global::<Lifecycle>().remote.is_some() {
-        let _ = window.update(cx, |_, window, cx| {
-            window.on_window_should_close(cx, |_, cx| {
-                close_frontend(cx);
-                false
-            })
-        });
-    }
+    let _ = window.update(cx, |_, window, cx| {
+        window.on_window_should_close(cx, |_, cx| {
+            close_frontend(cx);
+            false
+        })
+    });
     cx.global_mut::<Lifecycle>().mailbox = Some((window, entity));
 }
 
@@ -314,6 +309,20 @@ pub(super) fn default_sender(cx: &App) -> Option<(mail_core::AccountId, String)>
         .into_iter()
         .find(|(id, _)| Some(id) == view.snapshot.default_account.as_ref())
         .map(|(id, s)| (id, s.address))
+}
+pub(super) fn own_senders(cx: &App) -> Vec<(mail_core::AccountId, String)> {
+    cx.global::<Lifecycle>()
+        .remote
+        .as_ref()
+        .map(|r| {
+            r.snapshot()
+                .snapshot
+                .accounts
+                .into_iter()
+                .map(|(id, s)| (id, s.address))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 pub(super) fn own_addresses(cx: &App) -> Vec<String> {
     cx.global::<Lifecycle>()
@@ -402,6 +411,9 @@ pub(super) fn toggle_sync(cx: &App) {
 }
 pub(super) fn sending(cx: &App) -> mail_daemon::sending::SendCoordinator {
     cx.global::<Lifecycle>().sending.clone()
+}
+pub(super) fn is_closing(cx: &App) -> bool {
+    cx.global::<Lifecycle>().quitting
 }
 pub(super) fn close_frontend(cx: &mut App) {
     let state = cx.global_mut::<Lifecycle>();
@@ -502,7 +514,11 @@ fn tick(cx: &mut App) {
                 }
             }
         }
-        state.editors.retain(|editor| live(editor.window, cx));
+        if state.editor.as_ref().is_some_and(|editor| {
+            !live(editor.window, cx) || editor.entity.upgrade().is_none_or(|e| e.read(cx).closed())
+        }) {
+            state.editor = None;
+        }
         let commands: Vec<_> = state.receiver.try_iter().collect();
         for command in commands {
             match command {
@@ -536,7 +552,7 @@ fn tick(cx: &mut App) {
             && state.probe_step < 4
         {
             if state.probe_step < 3 {
-                if let Some(editor) = state.editors.first()
+                if let Some(editor) = state.editor.as_ref()
                     && let Ok(Ok(true)) = editor.window.update(cx, |_, window, cx| {
                         editor.entity.update(cx, |editor, cx| {
                             editor.lifecycle_probe(state.probe_step, window, cx)
@@ -545,7 +561,7 @@ fn tick(cx: &mut App) {
                 {
                     state.probe_step += 1;
                 }
-            } else if state.editors.is_empty() {
+            } else if state.editor.is_none() {
                 eprintln!("QINGMAIL_IPC_EDITOR: saved and closed through daemon");
                 state.probe_step = 4;
             }
@@ -558,7 +574,7 @@ fn tick(cx: &mut App) {
                 )
             })
         {
-            if let Some(editor) = state.editors.first() {
+            if let Some(editor) = state.editor.as_ref() {
                 if let Ok(Ok(ready)) = editor.window.update(cx, |_, window, cx| {
                     editor.entity.update(cx, |editor, cx| {
                         editor.lifecycle_probe(state.probe_step, window, cx)
@@ -575,14 +591,14 @@ fn tick(cx: &mut App) {
             }
         }
         if state.quitting {
-            for editor in &state.editors {
+            if let Some(editor) = &state.editor {
                 let result = editor.window.update(cx, |_, window, cx| {
                     editor
                         .entity
                         .update(cx, |editor, cx| editor.prepare_close(window, cx))
                 });
                 if let Ok(Ok(Err(error))) = result {
-                    state.error = Some(format!("退出已取消：{error}。请处理编辑窗口后重试。"));
+                    state.error = Some(format!("退出已取消：{error}。请处理写信工作区后重试。"));
                     state.quitting = false;
                     if let Some(remote) = &state.remote
                         && state.shutdown
@@ -590,7 +606,6 @@ fn tick(cx: &mut App) {
                         remote.finish(false);
                     }
                     cx.defer(open_main);
-                    break;
                 }
             }
             let account_saving = state.accounts.as_ref().is_some_and(|(_, entity)| {
@@ -599,7 +614,7 @@ fn tick(cx: &mut App) {
                     .is_some_and(|entity| entity.read(cx).saving)
             });
             if state.quitting
-                && state.editors.is_empty()
+                && state.editor.is_none()
                 && !account_saving
                 && !state.account_backend.saving()
                 && !state.sending.active()
@@ -625,7 +640,7 @@ fn tick(cx: &mut App) {
             state.worker.as_ref().map_or(0, |w| w.ticks()),
             state.worker.as_ref().map_or(0, |w| w.elapsed().as_millis()),
             cx.windows().len(),
-            state.editors.len(),
+            usize::from(state.editor.is_some()),
             state.quitting,
             state.probe_step
         );

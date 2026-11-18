@@ -540,7 +540,7 @@ impl Reader {
         let own = crate::lifecycle::own_addresses(cx);
         crate::reply::exclude_own(&mut document.headers, &own);
         self.status = match mode {
-            ReplyMode::Forward => "已创建转发草稿，请在写信窗口确认收件人".into(),
+            ReplyMode::Forward => "已创建转发草稿，请在写信工作区确认收件人".into(),
             ReplyMode::Reply => "已创建回复草稿".into(),
             ReplyMode::ReplyAll => "已创建全部回复草稿".into(),
         };
