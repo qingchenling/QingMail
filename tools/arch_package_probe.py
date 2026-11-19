@@ -20,13 +20,13 @@ def main():
     packages = [p.resolve() for p in (args.package, args.upgrade)]
     assert all(p.is_file() for p in packages)
     versions = [subprocess.check_output(['pacman', '-Qp', str(p)], text=True).strip() for p in packages]
-    assert versions[0] != versions[1], 'upgrade requires different package revisions'
+    assert versions[0] != versions[1], 'upgrade requires different package versions'
     assert all(v.startswith('qingmail ') for v in versions)
     assert subprocess.check_output(['vercmp', versions[1].split()[1], versions[0].split()[1]], text=True).strip() == '1'
     evidence = dict(passed=False, packages=[dict(path=str(p), sha256=hashlib.sha256(p.read_bytes()).hexdigest(), version=v)
                                           for p, v in zip(packages, versions)],
                     host_install=False, dependency_resolution_tested=False,
-                    note='Isolated pacman root; dependencies and hooks skipped; upgrade uses package revision only.')
+                    note='Isolated pacman root; dependencies and hooks skipped; package replacement does not verify database migration.')
     with tempfile.TemporaryDirectory(prefix='qingmail-arch-transaction-') as tmp:
         root = Path(tmp)
         for name in ('var/lib/pacman', 'var/cache/pacman/pkg', 'empty-hooks', 'home/test'):
@@ -74,7 +74,7 @@ def main():
                         linked_libraries_resolved_on_build_host=True)
     args.evidence.parent.mkdir(parents=True, exist_ok=True)
     args.evidence.write_text(json.dumps(evidence, indent=2) + '\n')
-    print('PASS: isolated install, package-revision upgrade, uninstall, user fixtures retained')
+    print('PASS: isolated install, package upgrade, uninstall, user fixtures retained')
 
 
 if __name__ == '__main__':

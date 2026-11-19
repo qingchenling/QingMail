@@ -299,13 +299,27 @@ impl Store {
         id: &DraftId,
         expected_revision: u32,
     ) -> Result<()> {
-        let n = self.connection.execute(
+        let tx = self.connection.savepoint()?;
+        // Keep uncertain upload evidence and conflict links until explicitly resolved.
+        let protected: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM draft_uploads WHERE account_id=?1 AND draft_id=?2 AND state IN ('prepared','in_flight','uncertain')) OR EXISTS(SELECT 1 FROM draft_conflicts WHERE account_id=?1 AND draft_id=?2 AND state='open')",
+            params![account.0, id.0], |r| r.get(0),
+        )?;
+        if protected {
+            return Err(Error::Invalid(
+                "请等待草稿上传完成，或先在更多中处理同步冲突，再删除本地草稿",
+            ));
+        }
+        let n = tx.execute(
             "DELETE FROM drafts WHERE id=?1 AND account_id=?2 AND revision=?3",
             params![id.0, account.0, expected_revision],
         )?;
         if n != 1 {
             return Err(Error::Conflict);
         }
+        // Retain source.converted as a tombstone: ordinary scans must not resurrect
+        // this local copy. Explicit conversion may restore it from the original.
+        tx.commit()?;
         Ok(())
     }
 

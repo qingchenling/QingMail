@@ -1,13 +1,9 @@
 //! 通用账号接入；前台仅暂存密码并传引用，检查/保存复用后台命令；保存由用户明确触发。
 use gpui_kit::{
-    App, Bounds, Context, Entity, EntityInputHandler, Render, TitlebarOptions, Window,
-    WindowBounds, WindowOptions,
+    App, Context, Entity, EntityInputHandler, Window,
     base::input::{InputEvent, InputState},
-    div,
     prelude::*,
-    px, size,
 };
-use gpui_kit_material::{prelude::*, theme};
 use mail_core::{AccountId, AccountSettings, ConnectionSecurity, ServerSettings};
 use mail_daemon::storage::receive;
 use mail_service::{
@@ -18,6 +14,8 @@ use mail_service::{
 use mail_protocol::{Command, Request, transport::request_id};
 
 mod flow;
+#[path = "accounts_view.rs"]
+mod view;
 
 pub(super) type PendingSave = mail_storage::PendingAccountRequest;
 
@@ -53,35 +51,16 @@ pub(super) struct Accounts {
     saved: Vec<(AccountId, AccountSettings)>,
     default_account: Option<AccountId>,
     paused_accounts: Vec<AccountId>,
-    expanded: Option<AccountId>,
+    loaded: bool,
+    form_initialized: bool,
     editing: Option<AccountId>,
     impact: Option<(AccountId, mail_storage::AccountImpact)>,
 }
 pub(super) fn open(cx: &mut App) {
-    if crate::lifecycle::reuse_accounts(cx) {
-        return;
-    }
-    let options = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
-            None,
-            size(px(1120.), px(850.)),
-            cx,
-        ))),
-        titlebar: Some(TitlebarOptions {
-            title: Some("QingMail — 添加邮箱".into()),
-            ..Default::default()
-        }),
-        ..crate::ui::window_options()
-    };
-    match gpui_kit::open_window(options, cx, |window, cx| {
-        cx.new(|cx| Accounts::new(window, cx))
-    }) {
-        Ok((window, entity)) => crate::lifecycle::register_accounts(window, entity.downgrade(), cx),
-        Err(_) => eprintln!("无法打开账号窗口"),
-    }
+    crate::lifecycle::open_page(crate::mailbox::Page::Accounts, cx);
 }
 impl Accounts {
-    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub(super) fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let inputs = (0..10)
             .map(|i| {
                 cx.new(|cx| {
@@ -111,7 +90,8 @@ impl Accounts {
             saved: vec![],
             default_account: None,
             paused_accounts: vec![],
-            expanded: None,
+            loaded: false,
+            form_initialized: false,
             editing: None,
             impact: None,
         };
@@ -150,20 +130,6 @@ impl Accounts {
             .detach();
         }
 
-        let entity = cx.weak_entity();
-        window.on_window_should_close(cx, move |_, cx| {
-            entity
-                .update(cx, |this, cx| {
-                    if this.saving {
-                        this.status = "正在保存，请等待结果后关闭".into();
-                        cx.notify();
-                        false
-                    } else {
-                        true
-                    }
-                })
-                .unwrap_or(true)
-        });
         this
     }
     /// 仅合成输入与状态绑定探针，不进行协议检查或密钥写入。
@@ -258,6 +224,7 @@ impl Accounts {
             return;
         }
         self.busy = true;
+        self.saving = true;
         let store = crate::lifecycle::storage(cx);
         let task = cx
             .background_executor()
@@ -266,6 +233,7 @@ impl Accounts {
             let result = task.await;
             let _ = entity.update(cx, |this, cx| {
                 this.busy = false;
+                this.saving = false;
                 this.status = match result {
                     Ok(_) => "账号设置已保存".into(),
                     Err(e) => e,
@@ -303,12 +271,15 @@ impl Accounts {
                             this.paused_accounts = paused;
                         }
                         this.saved = saved;
-                        if this.saved.is_empty() {
+                        this.loaded = true;
+                        if this
+                            .editing
+                            .as_ref()
+                            .is_some_and(|id| !this.saved.iter().any(|(saved, _)| saved == id))
+                        {
                             this.editing = None;
                             this.impact = None;
-                            this.expanded = None;
-                        } else if this.expanded.is_none() && this.saved.len() == 1 {
-                            this.expanded = Some(this.saved[0].0.clone());
+                            this.form_initialized = false;
                         }
                     }
                     Err(_) => this.status = "账号列表读取失败，请重试".into(),
@@ -324,6 +295,7 @@ impl Accounts {
         }
         self.busy = true;
         self.vault = "检查中…".into();
+        self.status = "正在检查系统密钥库…".into();
         let task = cx
             .background_executor()
             .spawn(async { SystemVault.status() });
@@ -334,6 +306,7 @@ impl Accounts {
                 this.vault = result
                     .map(|()| "可用，保存时将再次检查".into())
                     .unwrap_or_else(|e| e.to_string());
+                this.status = format!("系统密钥库：{}", this.vault);
                 cx.notify();
             });
         })
@@ -400,8 +373,7 @@ impl Accounts {
                         }
                         if let Some(token) = result.check {
                             this.checked = Some(Checked { settings, token });
-                            this.status =
-                                "检查通过。确认配置后点击“保存账号”；修改配置需重新检查".into();
+                            this.status = "检查通过，可以保存；修改配置后需重新检查".into();
                         } else {
                             this.status = "未保存账号。请修正配置并重新输入密码后检查".into();
                         }
@@ -487,8 +459,14 @@ impl Accounts {
                         let updated = this.pending.take().is_some_and(|p| p.updated);
                         crate::lifecycle::set_pending_account_save(None, cx);
                         this.status = match result {
-                            Ok(_) if updated => "账号配置与凭据已更新；本地缓存未改动".into(),
-                            Ok(_) => "账号已保存；可在主界面同步邮件".into(),
+                            Ok(ref id) if updated => {
+                                this.editing = Some(id.clone());
+                                "账号配置与凭据已更新；本地缓存未改动".into()
+                            }
+                            Ok(id) => {
+                                this.editing = Some(id);
+                                "账号已保存；可在主界面同步邮件".into()
+                            }
                             Err(e) => format!("账号未保存：{}；请重新检查连接", e.message),
                         };
                     }
@@ -546,9 +524,10 @@ impl Accounts {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.pending.is_some() {
+        if self.busy || self.pending.is_some() {
             return;
         }
+        self.form_initialized = true;
         self.editing = Some(account.clone());
         self.impact = None;
         self.checked = None;
@@ -634,6 +613,8 @@ impl Accounts {
                 match result {
                     Ok(impact) => {
                         this.editing = None;
+                        this.loaded = false;
+                        this.form_initialized = false;
                         this.checked = None;
                         this.folders.clear();
                         this.status = format!(
@@ -649,309 +630,5 @@ impl Accounts {
         })
         .detach();
         cx.notify();
-    }
-}
-
-impl Render for Accounts {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut tree = div()
-            .w(px(245.))
-            .h_full()
-            .p_4()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .bg(theme::color(ColorRole::SURFACE_CONTAINER))
-            .child("邮箱账号");
-        for (index, (id, settings)) in self.saved.iter().enumerate() {
-            let expanded = self.expanded.as_ref() == Some(id);
-            let row_id = id.clone();
-            let expand_id = row_id.clone();
-            tree = tree.child(
-                MaterialButton::new(("account", index))
-                    .child(format!(
-                        "{} {}",
-                        if expanded { "▾" } else { "▸" },
-                        settings.display_name
-                    ))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.expanded = if this.expanded.as_ref() == Some(&expand_id) {
-                            None
-                        } else {
-                            Some(expand_id.clone())
-                        };
-                        cx.notify();
-                    })),
-            );
-            if expanded {
-                let default_id = row_id.clone();
-                let pause_id = row_id.clone();
-                let is_default = self.default_account.as_ref() == Some(id);
-                let paused = self.paused_accounts.contains(id);
-                let edit_id = row_id.clone();
-                let remove_id = row_id.clone();
-                let edit_settings = settings.clone();
-                tree = tree
-                    .child(div().text_sm().child(settings.address.clone()))
-                    .child(
-                        MaterialButton::new(("default-account", index))
-                            .child(if is_default {
-                                "默认发件账号"
-                            } else {
-                                "设为默认发件账号"
-                            })
-                            .disabled(self.busy || is_default)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.change_option(
-                                    Command::SetDefaultAccount {
-                                        account: default_id.clone(),
-                                    },
-                                    cx,
-                                )
-                            })),
-                    )
-                    .child(
-                        MaterialButton::new(("pause-account", index))
-                            .child(if paused {
-                                "恢复此账号同步"
-                            } else {
-                                "暂停此账号同步"
-                            })
-                            .disabled(self.busy)
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.change_option(
-                                    Command::PauseSync {
-                                        account: Some(pause_id.clone()),
-                                        paused: !paused,
-                                    },
-                                    cx,
-                                )
-                            })),
-                    )
-                    .child(div().text_sm().child("文件夹与缓存状态请在邮件窗口查看"))
-                    .child(
-                        MaterialButton::new(("open-mailbox", index))
-                            .child("打开邮件")
-                            .on_click(|_, _, cx| crate::mailbox::open(cx)),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .child(
-                                MaterialButton::new(("edit-account", index))
-                                    .variant(ButtonVariant::Tonal)
-                                    .child("编辑配置")
-                                    .disabled(self.busy || self.pending.is_some())
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.begin_edit(
-                                            edit_id.clone(),
-                                            &edit_settings,
-                                            window,
-                                            cx,
-                                        );
-                                    })),
-                            )
-                            .child(
-                                MaterialButton::new(("remove-account", index))
-                                    .child("移除账号")
-                                    .disabled(self.busy || self.pending.is_some())
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.request_remove(remove_id.clone(), cx);
-                                    })),
-                            ),
-                    );
-            }
-        }
-        if self.saved.is_empty() {
-            tree = tree.child("尚未添加邮箱");
-        }
-        tree = tree.child(
-            MaterialButton::new("refresh-accounts")
-                .child("刷新账号列表")
-                .disabled(self.busy)
-                .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
-        );
-        let mut form = div()
-            .id("account-form")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .p_5()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .child(div().text_size(px(24.)).child(if self.editing.is_some() {
-                "编辑邮箱账号"
-            } else {
-                "添加通用邮箱"
-            }))
-            .child("使用服务商的密码或应用专用密码。暂不支持 OAuth 登录。")
-            .child("检查仅验证连接与认证，不发送邮件。密码保存在系统密钥库。");
-        for (i, label) in LABELS.iter().enumerate() {
-            if i == 2 || i == 6 {
-                let index = usize::from(i == 6);
-                let security = self.security[index];
-                form = form.child(
-                    div()
-                        .flex()
-                        .gap_2()
-                        .child(if i == 2 { "IMAP 收信" } else { "SMTP 发信" })
-                        .child(
-                            MaterialButton::new(("tls", index))
-                                .disabled(self.busy || self.pending.is_some())
-                                .variant(if security == ConnectionSecurity::Tls {
-                                    ButtonVariant::Filled
-                                } else {
-                                    ButtonVariant::Text
-                                })
-                                .child("TLS")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.security[index] = ConnectionSecurity::Tls;
-                                    this.checked = None;
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            MaterialButton::new(("starttls", index))
-                                .disabled(self.busy || self.pending.is_some())
-                                .variant(if security == ConnectionSecurity::StartTls {
-                                    ButtonVariant::Filled
-                                } else {
-                                    ButtonVariant::Text
-                                })
-                                .child("STARTTLS")
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.security[index] = ConnectionSecurity::StartTls;
-                                    this.checked = None;
-                                    cx.notify();
-                                })),
-                        ),
-                );
-            }
-            let field = TextField::new(("account-input", i), &self.inputs[i])
-                .label(*label)
-                .disabled(self.busy || self.pending.is_some());
-            form = form.child(if i == 5 || i == 9 {
-                field.input_type(TextFieldInputType::Password)
-            } else {
-                field
-            });
-        }
-        form = form
-            .child(
-                div()
-                    .flex()
-                    .gap_2()
-                    .child(
-                        MaterialButton::new("check-account")
-                            .disabled(self.busy || self.pending.is_some())
-                            .child("检查连接")
-                            .on_click(cx.listener(|this, _, window, cx| this.check(window, cx))),
-                    )
-                    .child(
-                        MaterialButton::new("check-vault")
-                            .disabled(self.busy || self.pending.is_some())
-                            .child("检查密钥库")
-                            .on_click(cx.listener(|this, _, _, cx| this.vault_status(cx))),
-                    )
-                    .child(
-                        MaterialButton::new("save-account")
-                            .disabled(!self.can_save(cx))
-                            .child(if self.editing.is_some() {
-                                "更新账号"
-                            } else {
-                                "保存账号"
-                            })
-                            .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
-                    ),
-            )
-            .when(self.pending.is_some(), |form| form.child(
-                div().flex().flex_col().gap_2()
-                .child("请先刷新并核对账号状态；结束查询不会取消或重新执行原请求。")
-                .child(MaterialButton::new("query-account-save")
-                    .child("查询保存结果")
-                    .disabled(self.busy)
-                    .on_click(cx.listener(|this, _, _, cx| this.save_result(None, cx))))
-                .child(MaterialButton::new("finish-account-query")
-                    .child("已核对账号，结束查询")
-                    .disabled(self.busy || crate::lifecycle::account_backend(cx).saving())
-                    .on_click(cx.listener(|this, _, _, cx| this.finish_query(cx))))
-            ))
-            .child(format!("IMAP：{}", self.imap))
-            .child(format!("SMTP：{}", self.smtp))
-            .child(format!("系统密钥库：{}", self.vault))
-            .when(self.impact.is_some(), |form| {
-                let (_, impact) = self.impact.as_ref().expect("impact");
-                form.child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap_2()
-                        .p_2()
-                        .child(format!(
-                            "本地移除影响：缓存 {} 封 · 草稿 {} 份 · 发送任务 {} 条（待处理 {}）· 本地对象 {} 字节",
-                            impact.cached_messages,
-                            impact.drafts,
-                            impact.tasks,
-                            impact.pending_tasks,
-                            impact.object_bytes
-                        ))
-                        .child("只删除本地账号与上述数据；不删除远端邮件。密钥库条目会一并尝试删除。")
-                        .when(impact.pending_tasks > 0, |panel| {
-                            panel.child(
-                                div()
-                                    .text_color(theme::color(ColorRole::ERROR))
-                                    .child(format!(
-                                        "有 {} 条待处理发送任务；移除会删除其记录，请先确认已无在途发送",
-                                        impact.pending_tasks
-                                    )),
-                            )
-                        })
-                        .child(
-                            div()
-                                .flex()
-                                .gap_2()
-                                .child(
-                                    MaterialButton::new("confirm-remove-account")
-                                        .child("确认移除")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.confirm_remove(cx);
-                                        })),
-                                )
-                                .child(
-                                    MaterialButton::new("cancel-remove-account")
-                                        .child("取消")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.impact = None;
-                                            this.status = "已取消移除".into();
-                                            cx.notify();
-                                        })),
-                                ),
-                        ),
-                )
-            })
-            .child(self.status.clone());
-        if !self.folders.is_empty() {
-            form = form.child("本次检查发现的文件夹（只读列表，尚未同步）");
-            for folder in &self.folders {
-                form = form.child(format!(
-                    "{}{}",
-                    folder.display_name,
-                    if folder.selectable {
-                        ""
-                    } else {
-                        "（不可选）"
-                    }
-                ));
-            }
-        }
-        div()
-            .size_full()
-            .flex()
-            .bg(theme::color(ColorRole::SURFACE))
-            .text_color(theme::color(ColorRole::ON_SURFACE))
-            .child(tree)
-            .child(form)
     }
 }

@@ -1,0 +1,23 @@
+合成目录与240封头部索引已写入隔离目录；未创建系统凭据或访问网络
+INLINE_COMPOSE step=0 done
+INLINE_COMPOSE step=1 done
+INLINE_COMPOSE step=2 done
+INLINE_COMPOSE step=3 done
+INLINE_COMPOSE step=4 done
+INLINE_COMPOSE step=5 done
+INLINE_COMPOSE step=6 done
+INLINE_COMPOSE step=7 done
+INLINE_COMPOSE step=8 done
+INLINE_COMPOSE step=9 done
+INLINE_COMPOSE step=10 done
+INLINE_COMPOSE step=11 done
+INLINE_COMPOSE step=12 done
+INLINE_COMPOSE step=13 done
+INLINE_COMPOSE step=14 done
+INLINE_COMPOSE READY_FAILURE
+INLINE_COMPOSE step=15 done
+INLINE_COMPOSE step=16 done
+INLINE_COMPOSE FAILURE_RETAINED
+INLINE_COMPOSE step=17 done
+INLINE_COMPOSE step=18 done
+INLINE_COMPOSE PASS one_window format_history IME send_review_cancel multi_draft selection_close reopen narrow failure_retained exit_flush

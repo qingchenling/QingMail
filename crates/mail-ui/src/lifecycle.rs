@@ -35,9 +35,6 @@ struct Editor {
 pub(super) struct Lifecycle {
     reader: Option<AnyWindowHandle>,
     mailbox: Option<(AnyWindowHandle, WeakEntity<crate::mailbox::Mailbox>)>,
-    send_tasks: Option<AnyWindowHandle>,
-    settings: Option<AnyWindowHandle>,
-    accounts: Option<(AnyWindowHandle, WeakEntity<crate::accounts::Accounts>)>,
     editor: Option<Editor>,
     worker: Option<Background>,
     account_backend: Arc<AccountBackend>,
@@ -140,9 +137,6 @@ pub(super) fn start(
     cx.set_global(Lifecycle {
         reader: None,
         mailbox: None,
-        send_tasks: None,
-        settings: None,
-        accounts: None,
         editor: None,
         worker,
         account_backend,
@@ -249,16 +243,16 @@ pub(super) fn register_reader(window: AnyWindowHandle, cx: &mut App) {
     cx.global_mut::<Lifecycle>().reader = Some(window);
 }
 
-pub(super) fn reuse_accounts(cx: &mut App) -> bool {
-    let window = cx.global::<Lifecycle>().accounts.as_ref().map(|(w, _)| *w);
-    window.is_some_and(|w| activate(w, cx))
-}
-pub(super) fn register_accounts(
-    window: AnyWindowHandle,
-    entity: WeakEntity<crate::accounts::Accounts>,
-    cx: &mut App,
-) {
-    cx.global_mut::<Lifecycle>().accounts = Some((window, entity));
+pub(super) fn open_page(page: crate::mailbox::Page, cx: &mut App) {
+    open_main(cx);
+    let host = cx.global::<Lifecycle>().mailbox.clone();
+    cx.defer(move |cx| {
+        if let Some((handle, entity)) = host {
+            let _ = handle.update(cx, |_, window, cx| {
+                let _ = entity.update(cx, |this, cx| this.show_page(page, window, cx));
+            });
+        }
+    });
 }
 
 pub(super) fn reuse_mailbox(cx: &mut App) -> bool {
@@ -283,19 +277,16 @@ pub(super) fn register_mailbox(
     cx.global_mut::<Lifecycle>().mailbox = Some((window, entity));
 }
 
-pub(super) fn reuse_settings(cx: &mut App) -> bool {
-    let window = cx.global::<Lifecycle>().settings;
-    window.is_some_and(|window| activate(window, cx))
-}
-pub(super) fn register_settings(window: AnyWindowHandle, cx: &mut App) {
-    cx.global_mut::<Lifecycle>().settings = Some(window);
-}
-pub(super) fn reuse_send_tasks(cx: &mut App) -> bool {
-    let window = cx.global::<Lifecycle>().send_tasks;
-    window.is_some_and(|window| activate(window, cx))
-}
-pub(super) fn register_send_tasks(window: AnyWindowHandle, cx: &mut App) {
-    cx.global_mut::<Lifecycle>().send_tasks = Some(window);
+pub(super) fn open_sync_status(cx: &mut App) {
+    crate::mailbox::open(cx);
+    let host = cx.global::<Lifecycle>().mailbox.clone();
+    cx.defer(move |cx| {
+        if let Some((handle, entity)) = host {
+            let _ = handle.update(cx, |_, _, cx| {
+                let _ = entity.update(cx, |this, cx| this.open_sync_status(cx));
+            });
+        }
+    });
 }
 
 pub(super) fn storage(cx: &App) -> mail_daemon::storage::StorageClient {
@@ -490,7 +481,7 @@ fn tick(cx: &mut App) {
                     mail_protocol::WindowTarget::Composer => composer::open(cx),
                     mail_protocol::WindowTarget::Reader => reader::open(cx),
                     mail_protocol::WindowTarget::Accounts => crate::accounts::open(cx),
-                    mail_protocol::WindowTarget::SendTasks => crate::send_tasks::open(cx),
+                    mail_protocol::WindowTarget::SendTasks => open_sync_status(cx),
                 });
             }
             if view.shutdown {
@@ -539,7 +530,7 @@ fn tick(cx: &mut App) {
                         Command::Reader => reader::open(cx),
                         Command::Accounts => crate::accounts::open(cx),
                         Command::Mailbox => crate::mailbox::open(cx),
-                        Command::SendTasks => crate::send_tasks::open(cx),
+                        Command::SendTasks => open_sync_status(cx),
                         _ => {
                             let _ = queue;
                         }
@@ -608,10 +599,10 @@ fn tick(cx: &mut App) {
                     cx.defer(open_main);
                 }
             }
-            let account_saving = state.accounts.as_ref().is_some_and(|(_, entity)| {
+            let account_saving = state.mailbox.as_ref().is_some_and(|(_, entity)| {
                 entity
                     .upgrade()
-                    .is_some_and(|entity| entity.read(cx).saving)
+                    .is_some_and(|entity| entity.read(cx).pages_saving(cx))
             });
             if state.quitting
                 && state.editor.is_none()
@@ -681,9 +672,5 @@ pub(super) fn operation_summary(cx: &App) -> String {
             )
         })
         .count();
-    if active == 0 {
-        "待同步操作".into()
-    } else {
-        format!("待同步操作 {active} · 待处理 {issues}")
-    }
+    format!("{active}:{issues}")
 }

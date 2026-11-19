@@ -5,6 +5,9 @@ use gpui_kit_material::{
     prelude::*,
 };
 
+#[path = "ui_motion.rs"]
+pub(super) mod motion;
+
 pub(super) fn icon(name: &str) -> Icon {
     Icon::from(Symbol::named(name).expect("pinned Material Symbols catalog")).size(px(20.))
 }
@@ -37,4 +40,20 @@ pub(super) fn window_options() -> gpui_kit::WindowOptions {
         app_id: Some(APP_ID.into()),
         ..Default::default()
     }
+}
+
+/// Shared full-width M3E section for embedded account and preference pages.
+pub(super) fn page_card(title: &str) -> gpui_kit::Div {
+    use gpui_kit::{Styled, div};
+    use gpui_kit_material::theme;
+    div()
+        .w_full()
+        .min_w_0()
+        .p_5()
+        .flex()
+        .flex_col()
+        .gap_4()
+        .rounded(px(24.))
+        .bg(theme::color(ColorRole::SURFACE_CONTAINER_LOW))
+        .child(div().text_size(px(18.)).child(title.to_owned()))
 }

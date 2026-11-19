@@ -1,4 +1,4 @@
-//! 发送状态与固定诊断代码的统一文案；写信窗口与发送任务窗口共用。
+//! 发送状态与固定诊断代码的统一文案；写信与邮件阅读状态共用。
 use mail_core::SendState;
 use mail_storage::SendTask;
 

@@ -26,6 +26,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[path = "composer_drafts.rs"]
+pub(super) mod drafts_view;
 #[path = "composer_fields.rs"]
 mod fields;
 #[path = "composer_probe.rs"]
@@ -285,7 +287,22 @@ pub(super) struct Composer {
     more_open: bool,
     drafts_open: bool,
     sender_open: bool,
-    pending_draft: Option<Option<usize>>,
+    pending_draft: Option<Option<mail_core::DraftId>>,
+    workspace_folder: Option<String>,
+    draft_search: Entity<InputState>,
+    _draft_search_subscription: Subscription,
+    sync_items: Vec<mail_protocol::DraftSyncInfo>,
+    list_refreshing: bool,
+    draft_list_generation: u64,
+    deselect_requested: bool,
+    last_list_refresh: Instant,
+    server_details: Option<Entity<crate::server_drafts::ServerDrafts>>,
+    show_server_details: bool,
+    confirm_delete: bool,
+    deleting: bool,
+    list_width: f32,
+    resize_start: Option<(f32, f32)>,
+    list_visible: bool,
     _selection_subscription: Subscription,
     close_error: Option<String>,
     font_family: SharedString,
@@ -311,6 +328,9 @@ pub(super) struct Composer {
 }
 
 impl Composer {
+    pub(super) fn workspace_folder(&self) -> Option<&str> {
+        self.workspace_folder.as_deref()
+    }
     pub(super) fn account_id(&self) -> Option<&mail_core::AccountId> {
         self.account_scope.as_ref().map(|(id, _)| id)
     }
@@ -332,6 +352,23 @@ impl Composer {
     pub(super) fn new(
         account_scope: Option<(mail_core::AccountId, String)>,
         initial_document: Option<mail_storage::DraftDocument>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_inner(account_scope, initial_document, None, window, cx)
+    }
+    pub(super) fn new_workspace(
+        account: (mail_core::AccountId, String),
+        folder: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_inner(Some(account), None, Some(folder), window, cx)
+    }
+    fn new_inner(
+        account_scope: Option<(mail_core::AccountId, String)>,
+        initial_document: Option<mail_storage::DraftDocument>,
+        workspace_folder: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -393,6 +430,7 @@ impl Composer {
         let header_inputs = (0..4)
             .map(|_| cx.new(|cx| InputState::new(window, cx)))
             .collect();
+        let draft_search = cx.new(|cx| InputState::new(window, cx));
         let mut this = Self {
             checking_send: false,
             sending: false,
@@ -415,6 +453,21 @@ impl Composer {
             drafts_open: false,
             sender_open: false,
             pending_draft: None,
+            workspace_folder,
+            draft_search: draft_search.clone(),
+            _draft_search_subscription: cx.observe(&draft_search, |_, _, cx| cx.notify()),
+            sync_items: vec![],
+            list_refreshing: false,
+            draft_list_generation: 0,
+            deselect_requested: false,
+            last_list_refresh: Instant::now() - Duration::from_secs(3),
+            server_details: None,
+            show_server_details: false,
+            confirm_delete: false,
+            deleting: false,
+            list_width: 360.,
+            resize_start: None,
+            list_visible: true,
             _selection_subscription: cx.observe(&input, |_, _, cx| cx.notify()),
             close_error: None,
             font_family,
@@ -464,6 +517,44 @@ impl Composer {
         let account_scope = self.account_scope.clone();
         let initial_document = self.initial_document.take();
         let force_new = std::mem::take(&mut self.force_new);
+        if self.workspace_folder.is_some() && !force_new && initial_document.is_none() {
+            let account = account_scope.as_ref().expect("workspace account").0.clone();
+            let task = cx.background_executor().spawn(async move {
+                let drafts = receive(store.account_drafts(account.clone()))?;
+                let draft = if drafts.is_empty() {
+                    None
+                } else {
+                    Some(receive(store.open_account_editor(account))?)
+                };
+                Ok::<_, String>((store, draft, drafts))
+            });
+            cx.spawn_in(window, async move |entity, cx| {
+                let result = task.await;
+                let _ = entity.update_in(cx, |this, window, cx| {
+                    this.loading = false;
+                    match result {
+                        Ok((store, draft, drafts)) => {
+                            this.store = Some(store);
+                            this.drafts = drafts;
+                            if let Some(draft) = draft {
+                                this.restore_draft(draft, window, cx);
+                            } else {
+                                this.saved = Some(0);
+                                this.status = "暂无草稿，点击左侧写邮件开始".into();
+                            }
+                            this.refresh_workspace(cx);
+                        }
+                        Err(e) => {
+                            this.load_failed = true;
+                            this.status = format!("草稿加载失败，原内容保留：{e}");
+                        }
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+            return;
+        }
         let request = if let Some((account, _)) = &account_scope {
             if force_new {
                 store.new_account_draft(account.clone())
@@ -512,6 +603,7 @@ impl Composer {
     }
 
     fn refresh_drafts(&mut self, cx: &mut Context<Self>) {
+        let generation = self.draft_list_generation;
         let store = crate::lifecycle::storage(cx);
         let request = if let Some((account, _)) = &self.account_scope {
             store.account_drafts(account.clone())
@@ -525,7 +617,8 @@ impl Composer {
             let result = task.await;
             let _ = entity.update(cx, |this, cx| {
                 match result {
-                    Ok(drafts) => this.drafts = drafts,
+                    Ok(drafts) if this.draft_list_generation == generation => this.drafts = drafts,
+                    Ok(_) => (),
                     Err(e) => this.status = e,
                 };
                 cx.notify();
@@ -535,7 +628,23 @@ impl Composer {
     }
 
     fn switch_draft(&mut self, index: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
-        if self.loading
+        let id = index.and_then(|i| self.drafts.get(i).map(|d| d.id.clone()));
+        if index.is_some() && id.is_none() {
+            return;
+        }
+        self.switch_draft_id(id, window, cx);
+    }
+    pub(super) fn new_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.switch_draft_id(None, window, cx);
+    }
+    fn switch_draft_id(
+        &mut self,
+        id: Option<mail_core::DraftId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.deleting
+            || self.loading
             || self.saving
             || self.closing
             || self.importing
@@ -545,17 +654,17 @@ impl Composer {
             return;
         }
         if self.saved != Some(self.session.borrow().revision) {
-            self.pending_draft = Some(index);
+            self.pending_draft = Some(id);
             self.status = "正在保存当前修改，完成后切换草稿".into();
             self.save(cx);
             return;
         }
         let client = crate::lifecycle::storage(cx);
-        let request = if let Some(index) = index {
+        let request = if let Some(id) = id {
             if let Some((account, _)) = &self.account_scope {
-                client.select_account_draft(account.clone(), self.drafts[index].id.clone())
+                client.select_account_draft(account.clone(), id)
             } else {
-                client.select(self.drafts[index].id.clone())
+                client.select(id)
             }
         } else {
             if let Some((account, _)) = &self.account_scope {
@@ -564,6 +673,9 @@ impl Composer {
                 client.new_draft(Draft::plain("").expect("empty draft"))
             }
         };
+        self.confirm_delete = false;
+        self.deselect_requested = false;
+        self.draft_list_generation += 1;
         self.loading = true;
         self.input
             .update(cx, |input, cx| input.set_readonly(true, cx));
@@ -576,15 +688,10 @@ impl Composer {
                 this.loading = false;
                 match result {
                     Ok(draft) => {
-                        *this.session.borrow_mut() = Session::new(draft.document.body.clone());
-                        this.stored = Some(draft);
-                        this.restore_fields(window, cx);
-                        this.saved = Some(0);
-                        this.close_error = None;
-                        this.sync_input(window, cx);
-                        this.status = "已打开本地草稿".into();
+                        this.restore_draft(draft, window, cx);
+                        this.show_server_details = false;
+                        this.list_visible = false;
                         this.refresh_drafts(cx);
-                        this.refresh_send_tasks(cx);
                     }
                     Err(e) => this.status = format!("切换失败，当前内容保留：{e}"),
                 }
@@ -689,6 +796,10 @@ impl Composer {
             cx.emit(ComposerEvent::CloseCancelled);
             return Err(error);
         }
+        if self.deleting {
+            self.close_requested = true;
+            return Ok(());
+        }
         if self.importing {
             self.status = "请先完成或取消附件选择，等待附件导入结束后再关闭".into();
             cx.notify();
@@ -731,6 +842,14 @@ impl Composer {
         if self.closed {
             return;
         }
+        if self.workspace_folder.is_some()
+            && self.last_list_refresh.elapsed() >= Duration::from_secs(3)
+        {
+            self.refresh_workspace(cx);
+        }
+        if self.deleting {
+            return;
+        }
         if self.close_requested {
             self.close_requested = false;
             let _ = self.prepare_close(window, cx);
@@ -742,7 +861,7 @@ impl Composer {
             return;
         }
         if !self.closing && self.store.is_some() {
-            let locked = self.send_locked();
+            let locked = self.send_locked() || self.stored.is_none();
             self.input
                 .update(cx, |input, cx| input.set_readonly(locked, cx));
         }
@@ -772,11 +891,21 @@ impl Composer {
             && self.saved == Some(self.session.borrow().revision)
             && let Some(index) = self.pending_draft.take()
         {
-            self.switch_draft(index, window, cx);
+            self.switch_draft_id(index, window, cx);
+            return;
+        }
+        if self.deselect_requested
+            && !self.saving
+            && self.saved == Some(self.session.borrow().revision)
+        {
+            self.deselect_requested = false;
+            self.clear_selection(window, cx);
+            cx.notify();
             return;
         }
         self.session.borrow_mut().finish_composition();
         if !self.saving
+            && self.stored.is_some()
             && !self.auto_save_blocked
             && self.last_edit.elapsed() >= Duration::from_millis(750)
         {
@@ -820,6 +949,8 @@ impl Composer {
                 this.saving = false;
                 match result {
                     Ok(stored) => {
+                        this.draft_list_generation += 1;
+                        this.upsert_draft(stored.clone());
                         this.stored = Some(stored);
                         this.saved = Some(revision);
                         this.close_error = None;
@@ -830,6 +961,7 @@ impl Composer {
                     }
                     Err(e) => {
                         this.pending_draft = None;
+                        this.deselect_requested = false;
                         this.auto_save_blocked = true;
                         this.closing = false;
                         let locked = this.send_locked();

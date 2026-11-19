@@ -1,6 +1,141 @@
 //! 隔离的主窗口写信集成探针，不使用真实账号、密钥库或 SMTP。
 use super::*;
 impl Mailbox {
+    pub(super) fn start_motion_probe(window: &mut Window, cx: &mut Context<Self>) {
+        if std::env::var_os("QINGMAIL_MOTION_PROBE").is_none() {
+            return;
+        }
+        assert!(
+            std::env::var_os("QINGMAIL_IPC_ROOT").is_some(),
+            "isolated root required"
+        );
+        cx.spawn_in(window, async move |entity, cx| {
+            for step in 0..14 {
+                cx.background_executor().timer(std::time::Duration::from_millis(700)).await;
+                entity.update_in(cx, |this, window, cx| {
+                    assert!(!this.accounts.is_empty(), "fixture must load");
+                    let account = this.accounts[0].0.0.clone();
+                    match step {
+                        0 => { this.closed_accounts.insert(account); }
+                        1 => { this.closed_accounts.clear(); }
+                        2 => {
+                            this.filters_open = true;
+                            this.select_message(0, cx);
+                        }
+                        3 => { this.filters_open = false; this.select_message(1, cx); }
+                        4 => { this.show_page(Page::Settings, window, cx); }
+                        5 | 6 => {
+                            let mut p = crate::settings::prefs(cx);
+                            p.dark = !p.dark;
+                            crate::settings::set(cx, p);
+                        }
+                        7 => {
+                            assert!(!crate::settings::theme_running(cx), "theme must settle");
+                            this.show_page(Page::Accounts, window, cx);
+                        }
+                        8 => {
+                            let mut p = crate::settings::prefs(cx);
+                            p.reduce_motion = true;
+                            crate::settings::set(cx, p);
+                            this.show_page(Page::Mail, window, cx);
+                            this.closed_accounts.insert(account);
+                        }
+                        9 => { this.closed_accounts.clear(); }
+                        10 => {
+                            let mut p = crate::settings::prefs(cx);
+                            p.dark = true;
+                            crate::settings::set(cx, p);
+                            assert!(!crate::settings::theme_running(cx));
+                            assert!(gpui_kit_material::theme::is_dark());
+                        }
+                        11 => {
+                            let mut p = crate::settings::prefs(cx);
+                            p.reduce_motion = false;
+                            crate::settings::set(cx, p);
+                        }
+                        12 => { this.closed_accounts.insert(account); }
+                        _ => {
+                            this.closed_accounts.clear();
+                            eprintln!("MOTION_UI PASS disclosure selection navigation theme reduced_motion resumed");
+                            crate::lifecycle::close_frontend(cx);
+                        }
+                    }
+                    cx.notify();
+                }).expect("motion host");
+                if step == 1 || step == 5 {
+                    // Interrupt before the spring settles, then redirect again.
+                    for reverse in [true, false] {
+                        cx.background_executor().timer(std::time::Duration::from_millis(70)).await;
+                        entity.update_in(cx, |this, _, cx| {
+                            if step == 1 {
+                                if reverse { this.closed_accounts.insert(this.accounts[0].0.0.clone()); }
+                                else { this.closed_accounts.clear(); }
+                            } else {
+                                let mut p = crate::settings::prefs(cx);
+                                p.dark = !p.dark;
+                                crate::settings::set(cx, p);
+                            }
+                            cx.notify();
+                        }).expect("motion reversal host");
+                    }
+                }
+            }
+        }).detach();
+    }
+    pub(super) fn start_drafts_probe(window: &mut Window, cx: &mut Context<Self>) {
+        if std::env::var_os("QINGMAIL_DRAFT_WORKSPACE_PROBE").is_none() {
+            return;
+        }
+        assert!(
+            std::env::var_os("QINGMAIL_IPC_ROOT").is_some(),
+            "isolated root required"
+        );
+        cx.spawn_in(window, async move |entity, cx| {
+            let started = std::time::Instant::now();
+            let mut step = 0;
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(150)).await;
+                let done = entity.update_in(cx, |this, window, cx| {
+                    assert!(started.elapsed().as_secs() < 45, "draft workspace timeout step={step}");
+                    assert_eq!(cx.windows().len(), 1);
+                    if this.busy { return false; }
+                    if step == 0 {
+                        let folder = this.folders.iter().find(|f| is_drafts_folder(&f.display_name)).expect("fixture drafts").name.clone();
+                        this.select_folder(folder, cx);
+                    } else if step <= 10 {
+                        if step == 3 {
+                            // No popup opening or manual refresh: the bottom icon
+                            // must discover a newly saved draft by itself.
+                            if this.sync_state.summary().drafts == 0 { return false; }
+                            assert!(!this.sync_open);
+                        }
+                        if step == 8 && !this.sync_open { this.open_sync_status(cx); }
+                        let Some(editor) = &this.composer else { return false; };
+                        assert_eq!(this.page, Page::Drafts);
+                        if !editor.update(cx, |c, cx| c.draft_workspace_probe_step(step - 1, window, cx)) { return false; }
+                    } else if step == 11 {
+                        // The folder path must save/close the whole workspace; it must
+                        // not nest another three-column editor inside the reader.
+                        this.select_folder("INBOX".into(), cx);
+                    } else {
+                        if this.composer.is_some() || this.sync_refreshing || this.sync_state.summary().pending() != 0 { return false; }
+                        assert!(this.sync_state.loaded && this.sync_state.error.is_none());
+                        assert!(this.sync_open, "open popup must clear without reopening or manual refresh");
+                        assert_eq!(this.sync_state.indicator().0, "check_circle");
+                        assert_eq!(this.page, Page::Mail);
+                        eprintln!("SYNC_STATUS PASS closed_icon_detected_draft open_popup_cleared_automatically");
+                        eprintln!("DRAFT_WORKSPACE PASS empty new dirty_switch close_reopen delete next last dirty_delete folder_exit one_window");
+                        crate::lifecycle::close_frontend(cx);
+                        return true;
+                    }
+                    eprintln!("DRAFT_WORKSPACE step={step} done");
+                    step += 1;
+                    false
+                }).expect("draft workspace host");
+                if done { break; }
+            }
+        }).detach();
+    }
     pub(super) fn start_compose_probe(window: &mut Window, cx: &mut Context<Self>) {
         if std::env::var_os("QINGMAIL_INLINE_COMPOSE_PROBE").is_none() {
             return;

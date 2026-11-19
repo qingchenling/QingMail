@@ -1,0 +1,20 @@
+{
+  "passed": true,
+  "binary": "/home/lingchen/Projects/QingMail/dist/arch-1.0.0/verify-root/usr/bin/mail-ui",
+  "synthetic_only": true,
+  "sends": 0,
+  "checks": [
+    "one main window through compose/read/reopen",
+    "native IME veto and format/history",
+    "explicit send review cancel creates no send task",
+    "dirty draft switch persists before replacement",
+    "mail selection saves latest text before leaving compose",
+    "narrow embedded workspace",
+    "filesystem save failure retains current content",
+    "retry and main close flush latest input",
+    "daemon survives frontend exit"
+  ],
+  "limits": [
+    "Native input/entity integration; physical mouse and real IME still need user acceptance"
+  ]
+}

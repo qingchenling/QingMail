@@ -1,0 +1,32 @@
+{
+  "passed": true,
+  "packages": [
+    {
+      "path": "/home/lingchen/Projects/QingMail/dist/arch-preview-0.1.2/qingmail-0.1.2-1-x86_64.pkg.tar.zst",
+      "sha256": "b19e986551ed958f87e6095ef5e4d32b46f7749c9571c26e8766fad66b8b40cb",
+      "version": "qingmail 0.1.2-1"
+    },
+    {
+      "path": "/home/lingchen/Projects/QingMail/dist/arch-1.0.0/qingmail-1.0.0-1-x86_64.pkg.tar.zst",
+      "sha256": "592bff5c27c766eb6c45b9d743c50150547b5bffa8cd47b28cc5191e0072d9c0",
+      "version": "qingmail 1.0.0-1"
+    }
+  ],
+  "host_install": false,
+  "dependency_resolution_tested": false,
+  "note": "Isolated pacman root; dependencies and hooks skipped; package replacement does not verify database migration.",
+  "installed_version_output": "QingMail 1.0.0 (IPC v2)",
+  "transactions": [
+    "loading packages...\nlooking for conflicting packages...\n\nPackages (1) qingmail-0.1.2-1\n\nTotal Installed Size:  138.18 MiB\n\n:: Proceed with installation? [Y/n] \nchecking keyring...\nchecking package integrity...\nloading package files...\nchecking for file conflicts...\n:: Processing package changes...\ninstalling qingmail...\nOptional dependencies for qingmail\n    vulkan-driver: Vulkan implementation matching your GPU\n    org.freedesktop.secrets: unlocked Secret Service provider for account credentials\n    noto-fonts-cjk: Chinese glyphs\n    noto-fonts: text glyphs\n    xdg-desktop-portal: desktop integration where supported\n",
+    "loading packages...\nlooking for conflicting packages...\n\nPackages (1) qingmail-1.0.0-1\n\nTotal Installed Size:  138.64 MiB\nNet Upgrade Size:        0.45 MiB\n\n:: Proceed with installation? [Y/n] \nchecking keyring...\nchecking package integrity...\nloading package files...\nchecking for file conflicts...\n:: Processing package changes...\nupgrading qingmail...\n",
+    "\nPackages (1) qingmail-1.0.0-1\n\nTotal Removed Size:  138.64 MiB\n\n:: Do you want to remove these packages? [Y/n] \n:: Processing package changes...\nremoving qingmail...\n"
+  ],
+  "user_fixtures_retained": [
+    "home/test/.local/share/qingmail/mail.db",
+    "home/test/.config/qingmail/settings.txt",
+    "home/test/.cache/qingmail/resource",
+    "home/test/.config/autostart/org.qingmail.QingMail.desktop",
+    "home/test/.local/share/keyrings/test.keyring"
+  ],
+  "linked_libraries_resolved_on_build_host": true
+}

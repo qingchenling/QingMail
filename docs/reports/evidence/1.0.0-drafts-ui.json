@@ -1,0 +1,21 @@
+{
+  "passed": true,
+  "synthetic_only": true,
+  "sends": 0,
+  "checks": [
+    "empty Drafts creates no phantom draft",
+    "new draft uses inline editor",
+    "dirty switch saves before opening other draft",
+    "close selection and reopen",
+    "delete selects remaining draft",
+    "delete with unsaved edits",
+    "delete final draft stays empty",
+    "return to INBOX closes workspace",
+    "one window",
+    "closed sync icon discovers drafts automatically",
+    "open sync popup clears automatically"
+  ],
+  "limits": [
+    "Native widget integration; physical mouse and visual acceptance remain manual"
+  ]
+}

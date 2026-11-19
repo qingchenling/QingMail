@@ -118,6 +118,7 @@ pub(super) struct Reader {
     external: bool,
     embedded: bool,
     account: Option<(AccountId, String)>,
+    delivery_status: Option<String>,
     selected: usize,
     content: MailContent,
     text: Entity<TextViewState>,
@@ -150,6 +151,7 @@ impl Reader {
             external,
             embedded: false,
             account,
+            delivery_status: None,
             selected: 0,
             content,
             text,
@@ -188,10 +190,12 @@ impl Reader {
     pub(super) fn embedded(
         content: MailContent,
         account: Option<(AccountId, String)>,
+        delivery_status: Option<String>,
         cx: &mut Context<Self>,
     ) -> Self {
         let mut reader = Self::from_content(content, true, account, cx);
         reader.embedded = true;
+        reader.delivery_status = delivery_status;
         reader
     }
 
@@ -721,7 +725,26 @@ impl Render for Reader {
                                     div()
                                         .text_size(px(12.))
                                         .text_color(theme::color(ColorRole::ON_SURFACE_VARIANT))
-                                        .child(format!("收件人：{}", self.content.to.join("、"))),
+                                        .flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .child(format!("收件人：{}", self.content.to.join("、")))
+                                        .when(self.delivery_status.is_some(), |line| {
+                                            line.child(
+                                                div()
+                                                    .px_2()
+                                                    .py_1()
+                                                    .rounded(px(6.))
+                                                    .bg(theme::color(ColorRole::SURFACE_CONTAINER))
+                                                    .text_color(theme::color(ColorRole::ON_SURFACE))
+                                                    .text_size(px(11.))
+                                                    .child(
+                                                        self.delivery_status
+                                                            .clone()
+                                                            .unwrap_or_default(),
+                                                    ),
+                                            )
+                                        }),
                                 ),
                         )
                         .when(!self.content.date_text.is_empty(), |header| {

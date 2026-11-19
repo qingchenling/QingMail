@@ -1,13 +1,14 @@
 //! 三栏邮箱：侧栏保持直角，列表和正文各有固定工具栏；业务操作复用 Mailbox。
 use super::*;
-use crate::ui::{folder_label, icon, quiet, tool};
+use crate::ui::{folder_label, icon, motion, quiet, tool};
 use gpui_kit::{
     ClickEvent, MouseButton, MouseDownEvent, MouseMoveEvent, Render, div, uniform_list,
 };
 use gpui_kit_material::{prelude::*, theme};
+use motion::MotionToken;
 
 impl Mailbox {
-    fn sidebar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn sidebar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mut folders = div()
             .id("folder-tree")
             .flex_1()
@@ -30,6 +31,17 @@ impl Mailbox {
                 .get(&account_id.0)
                 .map(|(folders, _)| folders.as_slice())
                 .unwrap_or(&[]);
+            let angle = motion::value(
+                format!("account-chevron-{:?}", account_id),
+                if expanded {
+                    std::f32::consts::FRAC_PI_2
+                } else {
+                    0.
+                },
+                MotionToken::FastSpatial,
+                window,
+                cx,
+            );
             folders = folders.child(
                 MaterialButton::new(("account-tree-root", account_index))
                     .variant(ButtonVariant::Text)
@@ -65,11 +77,7 @@ impl Mailbox {
                                     .child(crate::lifecycle::account_sync_status(account_id, cx)),
                             ),
                     )
-                    .child(icon(if expanded {
-                        "expand_more"
-                    } else {
-                        "chevron_right"
-                    }))
+                    .child(icon("chevron_right").rotate(angle))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if !this.closed_accounts.remove(&account_key) {
                             this.closed_accounts.insert(account_key.clone());
@@ -77,18 +85,51 @@ impl Mailbox {
                         cx.notify();
                     })),
             );
-            if expanded {
+            {
                 let prefix = format!("{}:", account_id.0);
                 let collapsed = self
                     .collapsed
                     .iter()
                     .filter_map(|key| key.strip_prefix(&prefix).map(str::to_owned))
                     .collect();
-                for (folder_index, row) in tree_rows(account_folders, &collapsed)
-                    .into_iter()
-                    .enumerate()
-                {
-                    let index = account_index * 8192 + folder_index;
+                let visible_rows = tree_rows(account_folders, &collapsed);
+                let visible: BTreeSet<_> =
+                    visible_rows.iter().map(|row| row.name.clone()).collect();
+                let all_rows = tree_rows(account_folders, &BTreeSet::new());
+                // Bound disclosure channels for unusually large server catalogs.
+                // Keep ordinary trees mounted through their closing animation.
+                let rows = if all_rows.len() <= 128 {
+                    all_rows
+                } else if expanded {
+                    visible_rows
+                } else {
+                    Vec::new()
+                };
+                for row in rows {
+                    let shown = expanded && visible.contains(&row.name);
+                    let key = format!("folder-{:?}-{:?}", account_id, row.name);
+                    let height = motion::value(
+                        format!("{key}-height"),
+                        if shown { 44. } else { 0. },
+                        MotionToken::DefaultSpatial,
+                        window,
+                        cx,
+                    )
+                    .clamp(0., 44.);
+                    if height < 0.1 {
+                        continue;
+                    }
+                    let angle = motion::value(
+                        format!("{key}-chevron"),
+                        if !collapsed.contains(&row.name) {
+                            std::f32::consts::FRAC_PI_2
+                        } else {
+                            0.
+                        },
+                        MotionToken::FastSpatial,
+                        window,
+                        cx,
+                    );
                     let target_account = account_id.clone();
                     let target = row.name.clone();
                     let toggle = format!("{}:{}", account_id.0, row.name);
@@ -106,70 +147,75 @@ impl Mailbox {
                         "trash" | "deleted" => "delete",
                         _ => "folder",
                     };
+                    let background = motion::color(
+                        format!("{key}-selection"),
+                        if selected {
+                            ColorRole::SECONDARY_CONTAINER
+                        } else {
+                            ColorRole::SURFACE_CONTAINER
+                        },
+                        window,
+                        cx,
+                    );
                     folders = folders.child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .h(px(44.))
-                            .w_full()
-                            .pl(px(8. + row.depth as f32 * 14.))
-                            .bg(theme::color(if selected {
-                                ColorRole::SECONDARY_CONTAINER
-                            } else {
-                                ColorRole::SURFACE_CONTAINER
-                            }))
-                            .child(div().w(px(28.)).flex_none().when(children, |slot| {
-                                slot.child(
-                                    tool(
-                                        ("branch", index),
-                                        if children && !collapsed.contains(&row.name) {
-                                            "expand_more"
-                                        } else {
-                                            "chevron_right"
-                                        },
-                                        "展开或折叠文件夹",
+                        div().h(px(height)).flex_none().overflow_hidden().child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .h(px(44.))
+                                .w_full()
+                                .pl(px(8. + row.depth as f32 * 14.))
+                                .bg(background)
+                                .child(div().w(px(28.)).flex_none().when(children, |slot| {
+                                    slot.child(
+                                        IconButton::new(
+                                            format!("{key}-branch"),
+                                            icon("chevron_right").rotate(angle),
+                                            "展开或折叠文件夹",
+                                        )
+                                        .variant(IconButtonVariant::Standard)
+                                        .button_size(ButtonSize::ExtraSmall)
+                                        .disabled(!shown || !children)
+                                        .on_click(
+                                            cx.listener(move |this, _, _, cx| {
+                                                if !this.collapsed.remove(&toggle) {
+                                                    this.collapsed.insert(toggle.clone());
+                                                }
+                                                cx.notify();
+                                            }),
+                                        ),
                                     )
-                                    .button_size(ButtonSize::ExtraSmall)
-                                    .disabled(!children)
-                                    .on_click(cx.listener(
-                                        move |this, _, _, cx| {
-                                            if !this.collapsed.remove(&toggle) {
-                                                this.collapsed.insert(toggle.clone());
+                                }))
+                                .child(
+                                    MaterialButton::new(format!("{key}-button"))
+                                        .variant(ButtonVariant::Text)
+                                        .tone(if selected {
+                                            ButtonTone::Accent
+                                        } else {
+                                            ButtonTone::Neutral
+                                        })
+                                        .shape(ButtonShape::Square)
+                                        .rounded_none()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .h(px(44.))
+                                        .icon(icon(symbol))
+                                        .child(div().flex_1().truncate().child(row.label))
+                                        .disabled(!shown || (!selectable && !children))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            if selectable {
+                                                this.switch_account(
+                                                    target_account.clone(),
+                                                    target.clone(),
+                                                    cx,
+                                                );
+                                            } else if !this.collapsed.remove(&branch_key) {
+                                                this.collapsed.insert(branch_key.clone());
                                             }
                                             cx.notify();
-                                        },
-                                    )),
-                                )
-                            }))
-                            .child(
-                                MaterialButton::new(("folder", index))
-                                    .variant(ButtonVariant::Text)
-                                    .tone(if selected {
-                                        ButtonTone::Accent
-                                    } else {
-                                        ButtonTone::Neutral
-                                    })
-                                    .shape(ButtonShape::Square)
-                                    .rounded_none()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .h(px(44.))
-                                    .icon(icon(symbol))
-                                    .child(div().flex_1().truncate().child(row.label))
-                                    .disabled(!selectable && !children)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        if selectable {
-                                            this.switch_account(
-                                                target_account.clone(),
-                                                target.clone(),
-                                                cx,
-                                            );
-                                        } else if !this.collapsed.remove(&branch_key) {
-                                            this.collapsed.insert(branch_key.clone());
-                                        }
-                                        cx.notify();
-                                    })),
-                            ),
+                                        })),
+                                ),
+                        ),
                     );
                 }
             }
@@ -231,50 +277,7 @@ impl Mailbox {
                     .px_3()
                     .py_3()
                     .border_t_1()
-                    .border_color(theme::color(ColorRole::OUTLINE_VARIANT))
-                    .child(
-                        quiet("mailbox-account-settings", "账号管理")
-                            .icon(icon("manage_accounts"))
-                            .w_full()
-                            .shape(ButtonShape::Square)
-                            .rounded_none()
-                            .on_click(|_, _, cx| crate::accounts::open(cx)),
-                    )
-                    .child(
-                        quiet("mailbox-send-tasks", "发送任务")
-                            .icon(icon("outbox"))
-                            .w_full()
-                            .shape(ButtonShape::Square)
-                            .rounded_none()
-                            .on_click(|_, _, cx| crate::send_tasks::open(cx)),
-                    )
-                    .child(
-                        quiet(
-                            "mailbox-operations",
-                            &crate::lifecycle::operation_summary(cx),
-                        )
-                        .icon(icon("sync"))
-                        .w_full()
-                        .shape(ButtonShape::Square)
-                        .rounded_none()
-                        .on_click(|_, _, cx| crate::operations::open(cx)),
-                    )
-                    .child(
-                        quiet("mailbox-server-drafts", "服务器草稿")
-                            .icon(icon("drafts"))
-                            .w_full()
-                            .shape(ButtonShape::Square)
-                            .rounded_none()
-                            .on_click(|_, _, cx| crate::server_drafts::open(cx)),
-                    )
-                    .child(
-                        quiet("mailbox-settings", "设置")
-                            .icon(icon("settings"))
-                            .w_full()
-                            .shape(ButtonShape::Square)
-                            .rounded_none()
-                            .on_click(|_, _, cx| crate::settings::open(cx)),
-                    ),
+                    .border_color(theme::color(ColorRole::OUTLINE_VARIANT)),
             )
             .when(crate::settings::prefs(cx).show_log, |sidebar| {
                 sidebar.child(
@@ -286,6 +289,350 @@ impl Mailbox {
                         .child(crate::lifecycle::sync_status(cx)),
                 )
             })
+    }
+    fn sync_menu(&self, cx: &mut Context<Self>) -> MaterialMenu {
+        use mail_protocol::{Command, OperationResolution, OperationState as State};
+        let entity = cx.entity();
+        let summary = self.sync_state.summary();
+        let mut items = vec![
+            MaterialMenuItem::new(if self.sync_refreshing {
+                "正在更新状态…".to_owned()
+            } else if self.sync_state.error.is_some() {
+                "无法读取最新状态；下方保留上次结果".to_owned()
+            } else if !self.sync_state.loaded {
+                "尚未读取同步状态".to_owned()
+            } else {
+                format!(
+                    "未完成 {} 项 · 需处理 {} 项",
+                    summary.pending(),
+                    summary.issues
+                )
+            })
+            .disabled(true),
+        ];
+        if let Some(error) = &self.sync_state.error {
+            items.push(
+                MaterialMenuItem::new("状态读取失败")
+                    .supporting_text(error.clone())
+                    .disabled(true),
+            );
+        }
+        items.push(
+            MaterialMenuItem::new(format!(
+                "邮件变更 {} · 草稿 {} · 发送 {}",
+                summary.operations, summary.drafts, summary.tasks
+            ))
+            .disabled(true),
+        );
+        for (account, settings) in &self.accounts {
+            let status = crate::lifecycle::account_sync_status(account, cx);
+            if !status.is_empty() {
+                items.push(
+                    MaterialMenuItem::new(format!("收信 · {}", settings.address))
+                        .supporting_text(status)
+                        .disabled(true),
+                );
+            }
+        }
+        for operation in self
+            .sync_state
+            .data
+            .operations
+            .iter()
+            .filter(|item| item.state != State::Applied)
+            .take(12)
+        {
+            let summary = match &operation.operation {
+                mail_protocol::MailOperation::Flags { seen, flagged } => {
+                    format!("标记：已读 {seen:?} · 星标 {flagged:?}")
+                }
+                mail_protocol::MailOperation::Move { .. } => "移动或删除邮件".into(),
+                mail_protocol::MailOperation::Delete => "删除邮件".into(),
+            };
+            items.push(
+                MaterialMenuItem::new(format!(
+                    "{} · {} · UID {}",
+                    crate::operations::state_label(operation.state),
+                    summary,
+                    operation.location.uid
+                ))
+                .supporting_text(
+                    operation
+                        .detail
+                        .as_ref()
+                        .map(|e| e.message.clone())
+                        .unwrap_or_default(),
+                ),
+            );
+            if operation.state == State::Failed {
+                let id = operation.id.clone();
+                let retry_entity = entity.clone();
+                items.push(
+                    MaterialMenuItem::new("重试此操作").on_click(move |_, _, cx| {
+                        let entity = retry_entity.clone();
+                        let id = id.clone();
+                        entity.update(cx, |this, cx| {
+                            this.run_sync_operation(Command::RetryOperation { operation: id }, cx)
+                        });
+                    }),
+                );
+            }
+            if matches!(
+                operation.state,
+                State::Failed | State::Conflict | State::Uncertain
+            ) {
+                let id = operation.id.clone();
+                let reconcile_entity = entity.clone();
+                items.push(
+                    MaterialMenuItem::new("核对服务器状态").on_click(move |_, _, cx| {
+                        let id = id.clone();
+                        reconcile_entity.update(cx, |this, cx| {
+                            this.run_sync_operation(
+                                Command::ResolveOperation {
+                                    operation: id,
+                                    resolution: OperationResolution::Reconcile,
+                                },
+                                cx,
+                            )
+                        });
+                    }),
+                );
+                let id = operation.id.clone();
+                let keep_entity = entity.clone();
+                let confirmed = self.keep_operation_confirm.as_ref() == Some(&id);
+                items.push(
+                    MaterialMenuItem::new(if confirmed {
+                        "确认保留服务器状态"
+                    } else {
+                        "放弃此本地变更…"
+                    })
+                    .on_click(move |_, _, cx| {
+                        keep_entity.update(cx, |this, cx| {
+                            if this.keep_operation_confirm.as_ref() == Some(&id) {
+                                this.keep_operation_confirm = None;
+                                this.run_sync_operation(
+                                    Command::ResolveOperation {
+                                        operation: id.clone(),
+                                        resolution: OperationResolution::KeepServer,
+                                    },
+                                    cx,
+                                );
+                            } else {
+                                this.keep_operation_confirm = Some(id.clone());
+                                cx.notify();
+                            }
+                        });
+                    }),
+                );
+            }
+        }
+        for task in self
+            .sync_state
+            .data
+            .tasks
+            .iter()
+            .filter(|task| {
+                matches!(
+                    task.state,
+                    mail_core::SendState::Pending
+                        | mail_core::SendState::Sending
+                        | mail_core::SendState::Failed
+                        | mail_core::SendState::Uncertain
+                        | mail_core::SendState::CopyPending
+                )
+            })
+            .take(12)
+        {
+            items.push(
+                MaterialMenuItem::new(format!(
+                    "{} · {}",
+                    task.recipients.subject,
+                    crate::send_labels::state_label(task)
+                ))
+                .supporting_text(format!("收件人：{}", task.recipients.to.join("、"))),
+            );
+            if matches!(
+                task.state,
+                mail_core::SendState::Failed | mail_core::SendState::Uncertain
+            ) {
+                let id = task.id.clone();
+                let account = task.account.clone();
+                let entity = entity.clone();
+                items.push(
+                    MaterialMenuItem::new(if task.state == mail_core::SendState::Uncertain {
+                        "确认后可能重复发送…"
+                    } else {
+                        "重试发送…"
+                    })
+                    .on_click(move |_, _, cx| {
+                        entity.update(cx, |this, cx| {
+                            this.sync_open = false;
+                            this.confirm_resend = Some((account.clone(), id.clone()));
+                            cx.notify();
+                        });
+                    }),
+                );
+            }
+        }
+        for draft in self
+            .sync_state
+            .data
+            .drafts
+            .iter()
+            .filter(|d| super::sync_status::draft_pending(&d.info))
+            .take(12)
+        {
+            let label = match draft.info.state.as_str() {
+                "failed" => "草稿同步失败",
+                "conflict" => "草稿同步冲突",
+                "uncertain" => "草稿上传结果待确认",
+                _ => "草稿尚未同步",
+            };
+            items.push(
+                MaterialMenuItem::new(format!(
+                    "{label} · {}",
+                    if draft.info.subject.is_empty() {
+                        "无主题"
+                    } else {
+                        &draft.info.subject
+                    }
+                ))
+                .supporting_text(format!(
+                    "{} · {}",
+                    draft.address,
+                    if draft.info.detail.is_empty() {
+                        "等待后台同步"
+                    } else {
+                        &draft.info.detail
+                    }
+                )),
+            );
+        }
+        let entity = entity.clone();
+        items.push(
+            MaterialMenuItem::new("刷新状态").on_click(move |_, _, cx| {
+                entity.update(cx, |this, cx| this.refresh_sync_status(cx))
+            }),
+        );
+        MaterialMenu::new("sync-status-items").items(items)
+    }
+    fn sync_status_popup(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let (icon_name, label) = self.sync_state.indicator();
+        MenuPopup::new(
+            "sync-status-popup",
+            tool("sync-status-trigger", icon_name, &label).on_click(cx.listener(
+                |this, event: &ClickEvent, _, cx| {
+                    if matches!(event, ClickEvent::Keyboard(_)) {
+                        this.open_sync_status(cx);
+                    }
+                },
+            )),
+            self.sync_menu(cx),
+        )
+        .open(self.sync_open)
+        .anchor(gpui_kit::Anchor::BottomRight)
+        .on_open_change(cx.listener(|this, open: &bool, _, cx| {
+            this.sync_open = *open;
+            if *open {
+                this.refresh_sync_status(cx);
+            }
+            cx.notify();
+        }))
+    }
+    fn resend_confirmation(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some((account, id)) = self.confirm_resend.clone() else {
+            return div();
+        };
+        let task = self
+            .sync_state
+            .data
+            .tasks
+            .iter()
+            .find(|task| task.account == account && task.id == id);
+        let uncertain = task.is_some_and(|task| task.state == mail_core::SendState::Uncertain);
+        let description = if uncertain {
+            "原邮件结果不确定，收件人可能已经收到。确认会新建发送任务并再次提交，可能重复发送。"
+        } else {
+            "将按原邮件内容创建新的发送任务。旧任务会保留；不会自动重发。"
+        };
+        div()
+            .mx_4()
+            .my_2()
+            .p_3()
+            .rounded(px(12.))
+            .bg(theme::color(ColorRole::ERROR_CONTAINER))
+            .flex()
+            .items_center()
+            .gap_3()
+            .child(div().flex_1().text_sm().child(description))
+            .child(
+                MaterialButton::new("confirm-send-retry")
+                    .child("确认重试")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.confirm_resend(account.clone(), id.clone(), cx)
+                    })),
+            )
+            .child(
+                quiet("cancel-send-retry", "取消").on_click(cx.listener(|this, _, _, cx| {
+                    this.confirm_resend = None;
+                    cx.notify();
+                })),
+            )
+    }
+    fn page_tools(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .gap_2()
+            .child(
+                tool("mailbox-accounts", "manage_accounts", "邮箱账号")
+                    .selected(self.page == Page::Accounts)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.show_page(Page::Accounts, window, cx)
+                    })),
+            )
+            .child(
+                tool("mailbox-settings", "settings", "设置")
+                    .selected(self.page == Page::Settings)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.show_page(Page::Settings, window, cx)
+                    })),
+            )
+    }
+    fn page_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .h(px(72.))
+            .flex_none()
+            .px_5()
+            .flex()
+            .items_center()
+            .gap_3()
+            .bg(theme::color(ColorRole::SURFACE_CONTAINER_LOW))
+            .child(tool("page-back", "arrow_back", "返回邮件").on_click(
+                cx.listener(|this, _, window, cx| this.show_page(Page::Mail, window, cx)),
+            ))
+            .child(match self.page {
+                Page::Accounts => "邮箱账号",
+                Page::Settings => "设置",
+                Page::Drafts => "草稿",
+                Page::Mail => "邮件",
+            })
+            .child(div().flex_1())
+            .child(self.page_tools(cx))
+            .child(
+                tool("page-sync", "sync", "同步邮件")
+                    .disabled(self.busy)
+                    .on_click(cx.listener(|this, _, _, cx| this.sync_folder(false, cx))),
+            )
+            .child(MenuPopup::new(
+                "page-menu",
+                tool("page-more", "more_vert", "更多选项"),
+                MaterialMenu::new("page-menu-items").items([
+                    MaterialMenuItem::new("返回邮件")
+                        .on_click(|_, _, cx| crate::lifecycle::open_page(Page::Mail, cx)),
+                    MaterialMenuItem::new("保存并退出")
+                        .on_click(|_, _, cx| crate::lifecycle::quit(cx)),
+                ]),
+            ))
     }
     fn topbar(&self, title: &str, wide: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
@@ -381,6 +728,7 @@ impl Mailbox {
                 )),
             )
             .child(div().flex_1())
+            .child(self.page_tools(cx))
             .child(
                 tool(
                     "sync-folder",
@@ -551,6 +899,7 @@ impl Mailbox {
         index: usize,
         message: &CachedMessage,
         search: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let selected = if search {
@@ -558,6 +907,45 @@ impl Mailbox {
         } else {
             self.selected == Some(index)
         };
+        let motion_id = format!("mail-row-{:?}", message.location);
+        let background = motion::color(
+            format!("{motion_id}-background"),
+            if selected {
+                ColorRole::SECONDARY_CONTAINER
+            } else {
+                ColorRole::SURFACE
+            },
+            window,
+            cx,
+        );
+        let border = motion::color(
+            format!("{motion_id}-border"),
+            if selected {
+                ColorRole::PRIMARY
+            } else {
+                ColorRole::SURFACE
+            },
+            window,
+            cx,
+        );
+        let unread = motion::value(
+            format!("{motion_id}-unread"),
+            if message.seen { 0. } else { 1. },
+            MotionToken::FastEffects,
+            window,
+            cx,
+        )
+        .clamp(0., 1.);
+        let star = motion::color(
+            format!("{motion_id}-star"),
+            if message.flagged {
+                ColorRole::PRIMARY
+            } else {
+                ColorRole::OUTLINE
+            },
+            window,
+            cx,
+        );
         let uid = message.location.clone();
         let checked = self.checked.contains(&uid);
         let time = sync::display_time(message.envelope.received_at);
@@ -576,16 +964,8 @@ impl Mailbox {
             .pr_3()
             .cursor_pointer()
             .border_l_4()
-            .border_color(theme::color(if selected {
-                ColorRole::PRIMARY
-            } else {
-                ColorRole::SURFACE
-            }))
-            .bg(theme::color(if selected {
-                ColorRole::SECONDARY_CONTAINER
-            } else {
-                ColorRole::SURFACE
-            }))
+            .border_color(border)
+            .bg(background)
             .when(!search, |row| {
                 row.child(
                     tool(
@@ -609,9 +989,8 @@ impl Mailbox {
                     .w(px(6.))
                     .h(px(6.))
                     .rounded_full()
-                    .when(!message.seen, |dot| {
-                        dot.bg(theme::color(ColorRole::PRIMARY))
-                    }),
+                    .bg(theme::color(ColorRole::PRIMARY))
+                    .opacity(unread),
             )
             .child(
                 div()
@@ -672,11 +1051,7 @@ impl Mailbox {
                     "star_outline"
                 })
                 .size(px(18.))
-                .color(theme::color(if message.flagged {
-                    ColorRole::PRIMARY
-                } else {
-                    ColorRole::OUTLINE
-                })),
+                .color(star),
             )
             .on_click(cx.listener(move |this, _, window, cx| {
                 if search {
@@ -692,6 +1067,63 @@ impl Mailbox {
 
 impl Render for Mailbox {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::settings::advance_theme(window, cx);
+        if self.page != Page::Mail {
+            let content = match self.page {
+                Page::Accounts => self
+                    .account_page
+                    .as_ref()
+                    .expect("account page initialized")
+                    .clone()
+                    .into_any_element(),
+                Page::Settings => self
+                    .settings_page
+                    .as_ref()
+                    .expect("settings page initialized")
+                    .clone()
+                    .into_any_element(),
+                Page::Drafts => self
+                    .composer
+                    .as_ref()
+                    .map(|e| e.clone().into_any_element())
+                    .unwrap_or_else(|| div().into_any_element()),
+                Page::Mail => unreachable!(),
+            };
+            return div()
+                .size_full()
+                .flex()
+                .bg(theme::color(ColorRole::SURFACE))
+                .text_color(theme::color(ColorRole::ON_SURFACE))
+                .child(self.sidebar(window, cx))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .flex()
+                        .flex_col()
+                        .when(self.page != Page::Drafts, |column| {
+                            column.child(self.page_bar(cx))
+                        })
+                        .child(motion::page(
+                            format!("mailbox-page-{:?}", self.page),
+                            div().flex_1().min_h_0().overflow_hidden().child(content),
+                            cx,
+                        ))
+                        .when(self.page == Page::Drafts, |column| {
+                            column.child(
+                                div()
+                                    .h(px(28.))
+                                    .px_4()
+                                    .flex()
+                                    .justify_end()
+                                    .items_center()
+                                    .child(self.sync_status_popup(cx)),
+                            )
+                        }),
+                )
+                .into_any_element();
+        }
         let title = self
             .selected_folder
             .as_deref()
@@ -782,7 +1214,7 @@ impl Render for Mailbox {
                 uniform_list(
                     "message-index",
                     count,
-                    cx.processor(|this, range: std::ops::Range<usize>, _, cx| {
+                    cx.processor(|this, range: std::ops::Range<usize>, window, cx| {
                         if range.end >= this.messages().len().saturating_sub(5)
                             && this.can_load_more()
                         {
@@ -794,11 +1226,23 @@ impl Render for Mailbox {
                         range
                             .map(|index| {
                                 if let Some(results) = &this.search_results {
-                                    this.message_row(index, &results[index].message, true, cx)
-                                        .into_any_element()
+                                    this.message_row(
+                                        index,
+                                        &results[index].message,
+                                        true,
+                                        window,
+                                        cx,
+                                    )
+                                    .into_any_element()
                                 } else {
-                                    this.message_row(index, &this.messages()[index], false, cx)
-                                        .into_any_element()
+                                    this.message_row(
+                                        index,
+                                        &this.messages()[index],
+                                        false,
+                                        window,
+                                        cx,
+                                    )
+                                    .into_any_element()
                                 }
                             })
                             .collect()
@@ -946,7 +1390,8 @@ impl Render for Mailbox {
                 ),
         );
         if self.confirm_delete {
-            detail = detail.child(
+            detail = detail.child(motion::enter(
+                "mail-delete-enter",
                 div()
                     .px_4()
                     .py_2()
@@ -971,10 +1416,15 @@ impl Render for Mailbox {
                             cx.notify();
                         },
                     ))),
-            );
+                cx,
+            ));
         }
         detail = if let Some(inline) = inline {
-            detail.child(div().flex_1().min_h_0().child(inline.view.clone()))
+            detail.child(motion::page(
+                format!("reader-{:?}", inline.location),
+                div().flex_1().min_h_0().child(inline.view.clone()),
+                cx,
+            ))
         } else {
             detail.child(
                 div()
@@ -996,7 +1446,11 @@ impl Render for Mailbox {
         };
         let available = window.bounds().size.width.as_f32() - 216.;
         self.list_width = self.list_width.clamp(300., (available - 420.).max(300.));
-        if let Some(editor) = &self.composer {
+        if let Some(editor) = self
+            .composer
+            .as_ref()
+            .filter(|e| e.read(cx).workspace_folder().is_none())
+        {
             let width = if wide {
                 available - self.list_width - 5.
             } else {
@@ -1004,7 +1458,11 @@ impl Render for Mailbox {
             };
             // Only update the child layout hint; the child renders after this host.
             editor.update(cx, |editor, _| editor.pane_width = width);
-            detail = div().size_full().min_w_0().min_h_0().child(editor.clone());
+            detail = div().size_full().min_w_0().min_h_0().child(motion::page(
+                "inline-composer-enter",
+                div().size_full().child(editor.clone()),
+                cx,
+            ));
         }
         let body = if wide {
             div()
@@ -1073,7 +1531,7 @@ impl Render for Mailbox {
                     cx.notify();
                 }),
             )
-            .child(self.sidebar(cx))
+            .child(self.sidebar(window, cx))
             .child(
                 div()
                     .flex_1()
@@ -1083,7 +1541,18 @@ impl Render for Mailbox {
                     .flex_col()
                     .child(self.topbar(&title, wide, cx))
                     .when(self.filters_open, |column| {
-                        column.child(self.search_filters(cx))
+                        column.child(motion::enter(
+                            "search-filter-enter",
+                            div().flex_none().child(self.search_filters(cx)),
+                            cx,
+                        ))
+                    })
+                    .when(self.confirm_resend.is_some(), |column| {
+                        column.child(motion::enter(
+                            "resend-confirm-enter",
+                            div().flex_none().child(self.resend_confirmation(cx)),
+                            cx,
+                        ))
                     })
                     .child(body)
                     .child(
@@ -1098,8 +1567,11 @@ impl Render for Mailbox {
                             .text_size(px(11.))
                             .text_color(theme::color(ColorRole::ON_SURFACE_VARIANT))
                             .overflow_hidden()
-                            .child(self.status.clone()),
+                            .child(self.status.clone())
+                            .child(div().flex_1())
+                            .child(self.sync_status_popup(cx)),
                     ),
             )
+            .into_any_element()
     }
 }
