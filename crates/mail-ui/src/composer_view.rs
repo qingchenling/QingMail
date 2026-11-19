@@ -1,11 +1,16 @@
 //! 主窗口右侧的写信工作区；复用编辑、草稿、附件和发送状态机。
 use super::*;
-use crate::ui::{icon, quiet, tool};
+use crate::ui::{icon, motion, quiet, tool};
 use gpui_kit::{ClickEvent, Focusable};
 
 impl Composer {
-    fn edit_disabled(&self) -> bool {
-        self.loading || self.closing || self.store.is_none() || self.send_locked()
+    pub(super) fn edit_disabled(&self) -> bool {
+        self.loading
+            || self.closing
+            || self.deleting
+            || self.store.is_none()
+            || self.stored.is_none()
+            || self.send_locked()
     }
     fn format_active(&self, command: &str, cx: &App) -> bool {
         let session = self.session.borrow();
@@ -190,11 +195,35 @@ impl Composer {
                 .on_click(cx.listener(|this, _, w, cx| this.check_send(w, cx))),
         )
         .child(
-            tool("close-compose", "close", "保存草稿并返回阅读")
-                .button_size(ButtonSize::ExtraSmall)
-                .disabled(self.closing)
-                .on_click(cx.listener(|this, _, _, cx| this.request_close(cx))),
+            tool(
+                "close-compose",
+                "close",
+                if self.workspace_folder.is_some() {
+                    "保存草稿并关闭编辑"
+                } else {
+                    "保存草稿并返回阅读"
+                },
+            )
+            .button_size(ButtonSize::ExtraSmall)
+            .disabled(self.closing)
+            .on_click(cx.listener(|this, _, window, cx| {
+                if this.workspace_folder.is_some() {
+                    this.close_selection(window, cx);
+                } else {
+                    this.request_close(cx);
+                }
+            })),
         )
+        .when(self.workspace_folder.is_some(), |row| {
+            row.child(
+                tool("delete-draft", "delete", "删除本地草稿")
+                    .disabled(disabled || self.saving || self.importing)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.confirm_delete = !this.confirm_delete;
+                        cx.notify();
+                    })),
+            )
+        })
     }
     fn footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
@@ -243,6 +272,11 @@ impl Composer {
             "已保存"
         } else {
             "等待保存"
+        };
+        let state = if self.workspace_folder.is_some() {
+            format!("{state} · {}", self.current_sync_label())
+        } else {
+            state.to_owned()
         };
         let sender = self
             .account_scope
@@ -293,33 +327,35 @@ impl Composer {
                 })),
             )
             .child(div().flex_1())
-            .child(
-                MenuPopup::new(
-                    "compose-drafts-popup",
-                    quiet(
-                        "compose-drafts",
-                        &format!("草稿 {position} / {}", self.drafts.len()),
+            .when(self.workspace_folder.is_none(), |row| {
+                row.child(
+                    MenuPopup::new(
+                        "compose-drafts-popup",
+                        quiet(
+                            "compose-drafts",
+                            &format!("草稿 {position} / {}", self.drafts.len()),
+                        )
+                        .icon(icon("expand_more"))
+                        .on_click(cx.listener(
+                            |this, event: &ClickEvent, _, cx| {
+                                if matches!(event, ClickEvent::Keyboard(_)) {
+                                    this.drafts_open = !this.drafts_open;
+                                    cx.notify();
+                                }
+                            },
+                        )),
+                        MaterialMenu::new("compose-drafts-menu").items(items),
                     )
-                    .icon(icon("expand_more"))
-                    .on_click(cx.listener(
-                        |this, event: &ClickEvent, _, cx| {
-                            if matches!(event, ClickEvent::Keyboard(_)) {
-                                this.drafts_open = !this.drafts_open;
-                                cx.notify();
-                            }
-                        },
-                    )),
-                    MaterialMenu::new("compose-drafts-menu").items(items),
+                    .open(self.drafts_open)
+                    .close_on_activate(true)
+                    .on_open_change(cx.listener(|this, open: &bool, _, cx| {
+                        this.drafts_open = *open;
+                        cx.notify();
+                    })),
                 )
-                .open(self.drafts_open)
-                .close_on_activate(true)
-                .on_open_change(cx.listener(|this, open: &bool, _, cx| {
-                    this.drafts_open = *open;
-                    cx.notify();
-                })),
-            )
+            })
             .child(
-                quiet("retry-local-save", state)
+                quiet("retry-local-save", &state)
                     .icon(icon(if self.auto_save_blocked {
                         "error_outline"
                     } else {
@@ -340,8 +376,12 @@ impl Composer {
 impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Account for sidebar + draggable list, rather than the overall window width.
-        let compact = self.pane_width < 590.;
-        div()
+        let compact = if self.workspace_folder.is_some() {
+            window.bounds().size.width.as_f32() - 216. - self.list_width - 5. < 590.
+        } else {
+            self.pane_width < 590.
+        };
+        let editor = div()
             .id("inline-composer")
             .size_full()
             .min_w_0()
@@ -378,6 +418,13 @@ impl Render for Composer {
             }))
             .child(TextSelectionLayer)
             .child(self.toolbar(compact, cx))
+            .when(self.confirm_delete, |root| {
+                root.child(motion::enter(
+                    "draft-delete-enter",
+                    div().flex_none().child(self.delete_confirmation(cx)),
+                    cx,
+                ))
+            })
             .when(self.load_failed && !self.loading, |root| {
                 root.child(
                     div()
@@ -397,7 +444,8 @@ impl Render for Composer {
             })
             .child(self.fields_toolbar(window, cx))
             .when(self.show_link, |root| {
-                root.child(
+                root.child(motion::enter(
+                    "compose-link-enter",
                     div()
                         .px_4()
                         .py_2()
@@ -420,11 +468,18 @@ impl Render for Composer {
                                     cx.notify();
                                 })),
                         ),
-                )
+                    cx,
+                ))
             })
             .when(
                 self.send_review.is_some() || !self.send_tasks.is_empty(),
-                |root| root.child(div().flex_none().px_4().py_2().child(self.send_toolbar(cx))),
+                |root| {
+                    root.child(motion::enter(
+                        "compose-send-enter",
+                        div().flex_none().px_4().py_2().child(self.send_toolbar(cx)),
+                        cx,
+                    ))
+                },
             )
             .child(
                 div()
@@ -448,7 +503,8 @@ impl Render for Composer {
                     .child(Editor::new(&self.input)),
             )
             .when(!self.attachment_ids.is_empty() || self.importing, |root| {
-                root.child(
+                root.child(motion::enter(
+                    "compose-attachments-enter",
                     div()
                         .id("compose-attachments")
                         .max_h(px(120.))
@@ -457,7 +513,8 @@ impl Render for Composer {
                         .py_2()
                         .when(self.importing, |row| row.child("正在添加附件…"))
                         .child(self.attachment_bar(cx)),
-                )
+                    cx,
+                ))
             })
             .child(
                 div()
@@ -474,5 +531,11 @@ impl Render for Composer {
                     .child(self.status.clone()),
             )
             .child(self.footer(cx))
+            .into_any_element();
+        if self.workspace_folder.is_some() {
+            self.workspace(editor, window, cx)
+        } else {
+            editor
+        }
     }
 }

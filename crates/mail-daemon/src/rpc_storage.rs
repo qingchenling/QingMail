@@ -56,6 +56,7 @@ pub(crate) const COMMANDS: &[mail_protocol::CommandName] = &[
     mail_protocol::CommandName::Drafts,
     mail_protocol::CommandName::SelectDraft,
     mail_protocol::CommandName::SaveDraft,
+    mail_protocol::CommandName::DiscardDraft,
     mail_protocol::CommandName::DiscardSelectedDraft,
     mail_protocol::CommandName::AttachmentInfos,
     mail_protocol::CommandName::Tasks,
@@ -84,6 +85,7 @@ fn mutates(command: &Rpc) -> bool {
             | Rpc::NewDraft { .. }
             | Rpc::SelectDraft { .. }
             | Rpc::SaveDraft { .. }
+            | Rpc::DiscardDraft { .. }
             | Rpc::DiscardSelectedDraft { .. }
             | Rpc::StopUncertain { .. }
     )
@@ -372,6 +374,16 @@ fn execute(store: &mut Store, command: Rpc) -> Result<Reply, RpcError> {
                 .save_draft(&account, &draft, revision, &document)
                 .map_err(storage_error)?,
         ),
+        Rpc::DiscardDraft {
+            account,
+            draft,
+            revision,
+        } => {
+            store
+                .discard_draft(&account, &draft, revision)
+                .map_err(storage_error)?;
+            Reply::Acknowledged
+        }
         Rpc::DiscardSelectedDraft { account } => {
             let account = editor_account(store, account).map_err(local_error)?;
             store
@@ -434,6 +446,68 @@ mod tests {
             _ => panic!("expected draft"),
         }
     }
+    #[test]
+    fn discard_draft_replay_after_restart_cannot_delete_another_selection() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("data");
+        let mut store = Store::open(&path).unwrap();
+        let first = draft(dispatch(
+            &mut store,
+            request(
+                'a',
+                Rpc::NewDraft {
+                    account: None,
+                    document: document("first"),
+                },
+            ),
+        ));
+        let second = draft(dispatch(
+            &mut store,
+            request(
+                'b',
+                Rpc::NewDraft {
+                    account: None,
+                    document: document("second"),
+                },
+            ),
+        ));
+        let delete = request(
+            'c',
+            Rpc::DiscardDraft {
+                account: first.account.clone(),
+                draft: first.id.clone(),
+                revision: first.revision,
+            },
+        );
+        assert!(matches!(
+            dispatch(&mut store, delete.clone()).result.unwrap(),
+            Reply::Acknowledged
+        ));
+        drop(store);
+        let mut store = Store::open(&path).unwrap();
+        assert!(matches!(
+            dispatch(&mut store, delete).result.unwrap(),
+            Reply::Acknowledged
+        ));
+        assert_eq!(store.draft(&second.account, &second.id).unwrap(), second);
+        assert!(
+            dispatch(
+                &mut store,
+                request(
+                    'd',
+                    Rpc::SaveDraft {
+                        account: first.account,
+                        draft: first.id,
+                        revision: first.revision,
+                        document: document("late")
+                    }
+                )
+            )
+            .result
+            .is_err()
+        );
+    }
+
     #[test]
     fn lost_response_replay_and_restart_do_not_duplicate_or_overwrite_drafts() {
         let root = tempfile::tempdir().unwrap();

@@ -179,7 +179,14 @@ impl Store {
     pub fn convert_server_draft(&mut self, account: &AccountId, id: &str) -> Result<StoredDraft> {
         let source = self.server_draft_source(account, id)?;
         if let Some(local) = source.converted {
-            return self.draft(account, &local);
+            let exists: bool = self.connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM drafts WHERE account_id=?1 AND id=?2)",
+                params![account.0, local.0],
+                |r| r.get(0),
+            )?;
+            if exists {
+                return self.draft(account, &local);
+            }
         }
         self.convert_server_draft_fresh(account, id)
     }
@@ -244,6 +251,83 @@ mod tests {
             .unwrap();
         a
     }
+    #[test]
+    fn discard_draft_preserves_original_without_automatic_resurrection() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&root.path().join("data")).unwrap();
+        let account = setup(&mut store);
+        store.set_server_draft_folder(&account, "Drafts").unwrap();
+        let raw = b"Subject: original\r\n\r\nkeep me";
+        let source = store
+            .archive_server_draft(&account, "Drafts", 42, 7, raw)
+            .unwrap();
+        let draft = store.convert_server_draft(&account, &source.id).unwrap();
+        store.select_editor_draft(&account, &draft.id).unwrap();
+        store
+            .discard_draft(&account, &draft.id, draft.revision)
+            .unwrap();
+        assert!(store.draft_ids(&account).unwrap().is_empty());
+        assert!(store.selected_local_draft(&account).unwrap().is_none());
+        assert_eq!(
+            store.server_draft_original(&account, &source.id).unwrap(),
+            raw
+        );
+        let archived = store.server_draft_source(&account, &source.id).unwrap();
+        store.reconcile_discovered_draft(&archived, false).unwrap();
+        assert!(store.draft_ids(&account).unwrap().is_empty());
+        let restored = store.convert_server_draft(&account, &source.id).unwrap();
+        assert_ne!(restored.id, draft.id);
+        assert_eq!(restored.document, draft.document);
+    }
+
+    #[test]
+    fn discard_draft_retains_unfinished_upload_and_conflict_evidence() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = Store::open(&root.path().join("data")).unwrap();
+        let account = setup(&mut store);
+        store.set_server_draft_folder(&account, "Drafts").unwrap();
+        let raw = b"Subject: original\r\n\r\nkeep me";
+        let source = store
+            .archive_server_draft(&account, "Drafts", 42, 7, raw)
+            .unwrap();
+        let draft = store.convert_server_draft(&account, &source.id).unwrap();
+        let draft = store
+            .save_draft(&account, &draft.id, draft.revision, &draft.document)
+            .unwrap();
+        let upload = "a".repeat(32);
+        store
+            .prepare_draft_upload(&draft, "Drafts", Some(42), &upload, raw)
+            .unwrap();
+        assert!(
+            store
+                .discard_draft(&account, &draft.id, draft.revision)
+                .is_err()
+        );
+        store.begin_draft_upload(&account, &upload).unwrap();
+        assert!(
+            store
+                .discard_draft(&account, &draft.id, draft.revision)
+                .is_err()
+        );
+        store
+            .record_draft_conflict(&account, &draft.id, Some(&source.id), "conflict")
+            .unwrap();
+        assert!(
+            store
+                .discard_draft(&account, &draft.id, draft.revision)
+                .is_err()
+        );
+        assert_eq!(store.draft(&account, &draft.id).unwrap(), draft);
+        assert_eq!(
+            store.server_draft_original(&account, &source.id).unwrap(),
+            raw
+        );
+        assert_eq!(
+            store.draft_sync_status(&account).unwrap()[0].state,
+            "conflict"
+        );
+    }
+
     #[test]
     fn cache_clear_preserves_server_original_and_editable_copy() {
         let root = tempfile::tempdir().unwrap();

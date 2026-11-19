@@ -6,6 +6,104 @@ pub(super) fn enabled() -> bool {
     std::env::args().any(|arg| matches!(arg.as_str(), "--editor-probe" | "--editor-style-demo"))
 }
 impl Composer {
+    /// Targeted native-widget regression for the account Drafts workspace.
+    pub(crate) fn draft_workspace_probe_step(
+        &mut self,
+        step: u8,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.loading
+            || self.saving
+            || self.deleting
+            || self.pending_draft.is_some()
+            || self.list_refreshing
+        {
+            return false;
+        }
+        match step {
+            0 => {
+                assert!(self.workspace_folder.is_some());
+                assert!(self.stored.is_none());
+                assert!(self.drafts.is_empty());
+                self.new_draft(window, cx);
+            }
+            1 => {
+                return self.inline_probe_step(0, window, cx);
+            }
+            2 => {
+                // Separate typing and clicking into native event turns, as a user
+                // does. Editor change subscriptions must commit before switching.
+                if self.probe_step == 0 {
+                    if !self.input.read(cx).is_editable() {
+                        return false;
+                    }
+                    self.input.update(cx, |i, cx| {
+                        let n = i.value().len();
+                        i.set_selected_range(n..n, cx);
+                        i.replace_text_in_range(None, "切换前修改", window, cx);
+                    });
+                    self.probe_step = 1;
+                    return false;
+                }
+                assert_eq!(
+                    self.session.borrow().draft.text(),
+                    "内嵌写信 Chinese 🙂切换前修改"
+                );
+                self.new_draft(window, cx);
+            }
+            3 => {
+                return self.inline_probe_step(4, window, cx);
+            }
+            4 => {
+                let Some(draft) = self
+                    .drafts
+                    .iter()
+                    .find(|d| d.document.headers.subject == "内嵌草稿一")
+                else {
+                    return false;
+                };
+                self.switch_draft_id(Some(draft.id.clone()), window, cx);
+            }
+            5 => {
+                assert_eq!(
+                    self.session.borrow().draft.text(),
+                    "内嵌写信 Chinese 🙂切换前修改"
+                );
+                self.close_selection(window, cx);
+            }
+            6 => {
+                if self.stored.is_some() {
+                    return false;
+                }
+                assert_eq!(self.drafts.len(), 2);
+                self.switch_draft_id(Some(self.drafts[0].id.clone()), window, cx);
+            }
+            7 => {
+                self.confirm_delete = true;
+                self.delete_draft(window, cx);
+            }
+            8 => {
+                if self.drafts.len() != 1 {
+                    return false;
+                }
+                assert!(self.stored.is_some());
+                self.input.update(cx, |i, cx| {
+                    i.set_selected_range(0..i.value().len(), cx);
+                    i.replace_text_in_range(None, "未保存修改也明确删除", window, cx);
+                });
+                self.confirm_delete = true;
+                self.delete_draft(window, cx);
+            }
+            9 => {
+                assert!(self.stored.is_none());
+                assert!(self.drafts.is_empty());
+                assert_eq!(self.saved, Some(self.session.borrow().revision));
+            }
+            _ => unreachable!(),
+        }
+        true
+    }
     pub(super) fn probe(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.importing {
             return;

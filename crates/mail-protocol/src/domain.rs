@@ -159,6 +159,8 @@ mod server_draft_contract_tests {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct DraftSyncInfo {
+    #[serde(default)]
+    pub updated_at: i64,
     pub draft: DraftId,
     pub subject: String,
     pub revision: u32,

@@ -1,6 +1,7 @@
-QingMail local development preview
+QingMail 1.0.0
 
 The repository has not selected a project license. LicenseRef-Unspecified is
 packaging metadata only; it does not grant permission to publish or redistribute
-this project or its dependencies. This package is prepared for local testing.
+this project or its dependencies. Building an installation package does not
+change the licensing status.
 Project licensing and dependency license review remain P5 release work.

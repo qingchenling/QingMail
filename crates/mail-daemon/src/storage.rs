@@ -828,6 +828,7 @@ impl StorageClient {
             command,
             mail_protocol::Command::SetAutostart { .. }
                 | mail_protocol::Command::UpdateDesktopSettings { .. }
+                | mail_protocol::Command::DiscardDraft { .. }
         ) && let Some(client) = &self.remote
         {
             return remote::call(client, command);

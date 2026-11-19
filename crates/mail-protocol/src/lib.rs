@@ -227,6 +227,11 @@ pub enum Command {
     SelectedDraftBody {
         account: Option<AccountId>,
     },
+    DiscardDraft {
+        account: AccountId,
+        draft: DraftId,
+        revision: u32,
+    },
     DiscardSelectedDraft {
         account: Option<AccountId>,
     },
@@ -401,6 +406,13 @@ impl Command {
                 Err(ProtocolError::Invalid)
             }
             Self::ConvertServerDraft { source, .. } if !valid_id(source) => {
+                Err(ProtocolError::Invalid)
+            }
+            Self::DiscardDraft {
+                account,
+                draft,
+                revision,
+            } if !valid_id(&account.0) || !valid_id(&draft.0) || *revision == 0 => {
                 Err(ProtocolError::Invalid)
             }
             Self::AttachmentInfos { ids, .. } if ids.len() > 32 => Err(ProtocolError::Invalid),
@@ -638,6 +650,7 @@ pub enum CommandName {
     SelectDraft,
     SaveDraft,
     SelectedDraftBody,
+    DiscardDraft,
     DiscardSelectedDraft,
     AttachmentInfos,
     ReviewSend,
@@ -721,6 +734,7 @@ impl Command {
             Self::SelectDraft { .. } => CommandName::SelectDraft,
             Self::SaveDraft { .. } => CommandName::SaveDraft,
             Self::SelectedDraftBody { .. } => CommandName::SelectedDraftBody,
+            Self::DiscardDraft { .. } => CommandName::DiscardDraft,
             Self::DiscardSelectedDraft { .. } => CommandName::DiscardSelectedDraft,
             Self::AttachmentInfos { .. } => CommandName::AttachmentInfos,
             Self::ReviewSend { .. } => CommandName::ReviewSend,

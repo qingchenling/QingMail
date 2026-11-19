@@ -31,6 +31,7 @@ pub(super) fn call(client: &Client, command: Rpc) -> StorageResult<Reply> {
             | Rpc::NewDraft { .. }
             | Rpc::SelectDraft { .. }
             | Rpc::SaveDraft { .. }
+            | Rpc::DiscardDraft { .. }
             | Rpc::DiscardSelectedDraft { .. }
             | Rpc::StopUncertain { .. }
             | Rpc::FinishUpload { .. }

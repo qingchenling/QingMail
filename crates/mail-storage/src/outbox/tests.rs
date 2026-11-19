@@ -77,6 +77,36 @@ fn multiple_drafts_roundtrip_formats_headers_attachments_and_revision_conflicts(
 }
 
 #[test]
+fn discard_draft_checks_owner_and_revision_before_removing_exact_draft() {
+    let (_root, mut store, account) = setup();
+    let other = store.create_account(&settings()).unwrap();
+    let a = store.create_draft(&account, &document("first")).unwrap();
+    let b = store.create_draft(&account, &document("second")).unwrap();
+    let newer = store
+        .save_draft(&account, &a.id, a.revision, &document("latest"))
+        .unwrap();
+    assert!(matches!(
+        store.discard_draft(&other, &a.id, newer.revision),
+        Err(Error::Conflict)
+    ));
+    assert!(matches!(
+        store.discard_draft(&account, &a.id, a.revision),
+        Err(Error::Conflict)
+    ));
+    assert_eq!(store.draft(&account, &a.id).unwrap(), newer);
+    store
+        .discard_draft(&account, &a.id, newer.revision)
+        .unwrap();
+    assert_eq!(store.draft(&account, &b.id).unwrap(), b);
+    assert!(
+        store
+            .save_draft(&account, &a.id, newer.revision, &document("late save"))
+            .is_err()
+    );
+    assert_eq!(store.draft_ids(&account).unwrap(), vec![b.id]);
+}
+
+#[test]
 fn task_snapshot_stays_frozen_after_draft_change_and_discard() {
     let (_root, mut store, account) = setup();
     let a = store

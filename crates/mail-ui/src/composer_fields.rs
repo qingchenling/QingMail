@@ -255,88 +255,89 @@ impl Composer {
                 || self.header_inputs[index]
                     .focus_handle(cx)
                     .is_focused(window);
-            fields =
-                fields.child(
+            let row = div()
+                .px_4()
+                .py_1()
+                .border_b_1()
+                .border_color(theme::color(ColorRole::OUTLINE_VARIANT))
+                .child(
                     div()
-                        .px_4()
-                        .py_1()
-                        .border_b_1()
-                        .border_color(theme::color(ColorRole::OUTLINE_VARIANT))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(div().w(px(54.)).flex_none().text_sm().child(label))
-                                .when(editing, |row| {
-                                    row.child(
-                                        TextField::new(
-                                            ("draft-header", index),
-                                            &self.header_inputs[index],
-                                        )
-                                        .density(TextFieldDensity::Compact)
-                                        .placeholder(if index == 3 {
-                                            "填写主题"
-                                        } else {
-                                            "输入邮箱地址，以逗号分隔"
-                                        })
-                                        .disabled(disabled)
-                                        .flex_1()
-                                        .min_w_0(),
-                                    )
-                                })
-                                .when(!editing, |row| {
-                                    row.child(
-                                        div()
-                                            .min_h(px(48.))
-                                            .flex_1()
-                                            .min_w_0()
-                                            .flex()
-                                            .items_center()
-                                            .gap_1()
-                                            .child(self.recipient_chips(index, cx))
-                                            .child(
-                                                crate::ui::tool(
-                                                    ("edit-recipients", index),
-                                                    "edit",
-                                                    "编辑收件地址",
-                                                )
-                                                .button_size(ButtonSize::ExtraSmall)
-                                                .disabled(disabled)
-                                                .on_click(cx.listener(move |this, _, w, cx| {
-                                                    this.header_inputs[index]
-                                                        .update(cx, |i, cx| i.focus(w, cx))
-                                                })),
-                                            ),
-                                    )
-                                })
-                                .when(index == 0, |row| {
-                                    row.child(
-                                        MaterialButton::new("toggle-cc-bcc")
-                                            .variant(ButtonVariant::Text)
-                                            .button_size(ButtonSize::ExtraSmall)
-                                            .child(if self.show_cc_bcc {
-                                                "收起"
-                                            } else {
-                                                "抄送 / 密送"
-                                            })
-                                            .disabled(disabled)
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.show_cc_bcc = !this.show_cc_bcc;
-                                                cx.notify();
-                                            })),
-                                    )
-                                }),
-                        )
-                        .when_some(self.field_errors[index].clone(), |row, error| {
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(div().w(px(54.)).flex_none().text_sm().child(label))
+                        .when(editing, |row| {
+                            row.child(
+                                TextField::new(("draft-header", index), &self.header_inputs[index])
+                                    .density(TextFieldDensity::Compact)
+                                    .placeholder(if index == 3 {
+                                        "填写主题"
+                                    } else {
+                                        "输入邮箱地址，以逗号分隔"
+                                    })
+                                    .disabled(disabled)
+                                    .flex_1()
+                                    .min_w_0(),
+                            )
+                        })
+                        .when(!editing, |row| {
                             row.child(
                                 div()
-                                    .text_sm()
-                                    .text_color(theme::color(ColorRole::ERROR))
-                                    .child(error),
+                                    .min_h(px(48.))
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(self.recipient_chips(index, cx))
+                                    .child(
+                                        crate::ui::tool(
+                                            ("edit-recipients", index),
+                                            "edit",
+                                            "编辑收件地址",
+                                        )
+                                        .button_size(ButtonSize::ExtraSmall)
+                                        .disabled(disabled)
+                                        .on_click(
+                                            cx.listener(move |this, _, w, cx| {
+                                                this.header_inputs[index]
+                                                    .update(cx, |i, cx| i.focus(w, cx))
+                                            }),
+                                        ),
+                                    ),
+                            )
+                        })
+                        .when(index == 0, |row| {
+                            row.child(
+                                MaterialButton::new("toggle-cc-bcc")
+                                    .variant(ButtonVariant::Text)
+                                    .button_size(ButtonSize::ExtraSmall)
+                                    .child(if self.show_cc_bcc {
+                                        "收起"
+                                    } else {
+                                        "抄送 / 密送"
+                                    })
+                                    .disabled(disabled)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.show_cc_bcc = !this.show_cc_bcc;
+                                        cx.notify();
+                                    })),
                             )
                         }),
-                );
+                )
+                .when_some(self.field_errors[index].clone(), |row, error| {
+                    row.child(
+                        div()
+                            .text_sm()
+                            .text_color(theme::color(ColorRole::ERROR))
+                            .child(error),
+                    )
+                });
+            fields = fields.child(if index == 1 || index == 2 {
+                crate::ui::motion::enter(("compose-optional-header", index), row, cx)
+            } else {
+                row.into_any_element()
+            });
         }
         fields
     }

@@ -20,7 +20,6 @@ mod reader;
 mod remote;
 mod reply;
 mod send_labels;
-mod send_tasks;
 mod server_drafts;
 mod settings;
 mod ui;
@@ -335,10 +334,7 @@ fn main() {
     use mail_daemon::{Command, Instance, Launch};
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "--version") {
-        println!(
-            "QingMail {} (P4 preview; IPC v2)",
-            env!("CARGO_PKG_VERSION")
-        );
+        println!("QingMail {} (IPC v2)", env!("CARGO_PKG_VERSION"));
         return;
     }
     if (std::env::var_os("QINGMAIL_IPC_TEST_EDITOR").is_some()
@@ -519,7 +515,7 @@ fn main() {
                 mailbox::open(cx);
             }
             if command == Command::SendTasks {
-                send_tasks::open(cx);
+                lifecycle::open_sync_status(cx);
             }
             if args
                 .iter()

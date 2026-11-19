@@ -3,6 +3,8 @@
 mod compose_probe;
 #[path = "mailbox_loading.rs"]
 mod loading;
+#[path = "mailbox_sync.rs"]
+mod sync_status;
 #[path = "mailbox_view.rs"]
 mod view;
 use gpui_kit::{
@@ -81,6 +83,33 @@ fn tree_rows(folders: &[RemoteFolder], collapsed: &BTreeSet<String>) -> Vec<Tree
         })
         .collect()
 }
+fn is_drafts_folder(name: &str) -> bool {
+    name.rsplit(['/', '.', '\\']).next().is_some_and(|part| {
+        matches!(
+            part.to_ascii_lowercase().as_str(),
+            "draft" | "drafts" | "草稿" | "草稿箱"
+        )
+    })
+}
+fn sync_counts(tasks: &[mail_storage::SendTask]) -> (usize, bool) {
+    let pending = tasks
+        .iter()
+        .filter(|task| {
+            matches!(
+                task.state,
+                mail_core::SendState::Pending
+                    | mail_core::SendState::Sending
+                    | mail_core::SendState::Failed
+                    | mail_core::SendState::Uncertain
+                    | mail_core::SendState::CopyPending
+            )
+        })
+        .count();
+    let sending = tasks
+        .iter()
+        .any(|task| task.state == mail_core::SendState::Sending);
+    (pending, sending)
+}
 pub(super) fn open(cx: &mut App) {
     if crate::lifecycle::reuse_mailbox(cx) {
         return;
@@ -114,7 +143,24 @@ type ComposeRequest = (
     Option<mail_storage::DraftDocument>,
     bool,
 );
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum Page {
+    #[default]
+    Mail,
+    Accounts,
+    Settings,
+    Drafts,
+}
 pub(super) struct Mailbox {
+    page: Page,
+    pending_page: Option<Page>,
+    account_page: Option<Entity<crate::accounts::Accounts>>,
+    settings_page: Option<Entity<crate::settings::Settings>>,
+    sync_open: bool,
+    sync_state: sync_status::Status,
+    sync_refreshing: bool,
+    keep_operation_confirm: Option<String>,
+    confirm_resend: Option<(AccountId, mail_core::SendTaskId)>,
     composer: Option<Entity<crate::composer::Composer>>,
     composer_subscription: Option<gpui_kit::Subscription>,
     pending_compose: Option<ComposeRequest>,
@@ -177,6 +223,15 @@ impl Mailbox {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         crate::perf_probe::mailbox_idle(window, cx);
         let mut this = Self {
+            page: Page::Mail,
+            pending_page: None,
+            account_page: None,
+            settings_page: None,
+            sync_open: false,
+            sync_state: sync_status::Status::default(),
+            sync_refreshing: false,
+            keep_operation_confirm: None,
+            confirm_resend: None,
             composer: None,
             composer_subscription: None,
             pending_compose: None,
@@ -237,6 +292,8 @@ impl Mailbox {
         };
         this.reload(cx);
         Self::start_compose_probe(window, cx);
+        Self::start_drafts_probe(window, cx);
+        Self::start_motion_probe(window, cx);
         if std::env::var("QINGMAIL_WINDOW_PERF").as_deref() == Ok("interaction")
             && std::env::var_os("QINGMAIL_IPC_ROOT").is_some()
         {
@@ -317,6 +374,9 @@ impl Mailbox {
                         if !this.busy && this.sync_revision != crate::lifecycle::sync_revision(cx) {
                             this.refresh_local(cx);
                         }
+                        // Queue progress is independent of the current folder or an
+                        // open popup. Keep the icon and its open contents live.
+                        this.refresh_sync_status(cx);
                         let status = format!(
                             "{}|{}",
                             crate::lifecycle::sync_status(cx),
@@ -334,6 +394,7 @@ impl Mailbox {
             }
         })
         .detach();
+        this.refresh_sync_status(cx);
         if std::env::args().any(|a| a == "--mailbox-ui-probe")
             || std::env::var_os("QINGMAIL_IPC_TEST_MAILBOX").is_some()
         {
@@ -425,6 +486,116 @@ impl Mailbox {
         }
         this
     }
+    pub(super) fn pages_saving(&self, cx: &App) -> bool {
+        self.account_page
+            .as_ref()
+            .is_some_and(|p| p.read(cx).saving)
+            || self
+                .settings_page
+                .as_ref()
+                .is_some_and(|p| p.read(cx).saving())
+    }
+    pub(super) fn show_page(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
+        self.pane_generation += 1;
+        self.pending_compose = None;
+        self.pending_page = None;
+        if let Some(editor) = &self.composer
+            && (page != Page::Mail || editor.read(cx).workspace_folder().is_some())
+        {
+            self.pending_page = Some(page);
+            editor.update(cx, |editor, cx| editor.request_close(cx));
+            return;
+        }
+        if page == Page::Accounts && self.account_page.is_none() {
+            self.account_page = Some(cx.new(|cx| crate::accounts::Accounts::new(window, cx)));
+        }
+        if page == Page::Settings && self.settings_page.is_none() {
+            self.settings_page = Some(cx.new(crate::settings::Settings::new));
+        }
+        if page == Page::Drafts
+            && let (Some((account, settings)), Some(folder)) =
+                (&self.account, &self.selected_folder)
+        {
+            let account = (account.clone(), settings.address.clone());
+            let folder = folder.clone();
+            let editor =
+                cx.new(|cx| crate::composer::Composer::new_workspace(account, folder, window, cx));
+            self.install_editor(editor, window, cx);
+        }
+        self.page = page;
+        self.more_open = false;
+        self.resize_start = None;
+        cx.notify();
+    }
+    fn show_selected_drafts(&mut self, cx: &mut Context<Self>) {
+        self.pane_generation += 1;
+        self.pending_compose = None;
+        self.pending_page = None;
+        if let Some(editor) = &self.composer {
+            self.pending_page = Some(Page::Drafts);
+            editor.update(cx, |editor, cx| editor.request_close(cx));
+        } else {
+            cx.defer(|cx| crate::lifecycle::open_page(Page::Drafts, cx));
+        }
+        cx.notify();
+    }
+    pub(super) fn open_sync_status(&mut self, cx: &mut Context<Self>) {
+        self.sync_open = true;
+        self.keep_operation_confirm = None;
+        self.refresh_sync_status(cx);
+        cx.notify();
+    }
+    pub(super) fn refresh_sync_status(&mut self, cx: &mut Context<Self>) {
+        if self.sync_refreshing {
+            return;
+        }
+        self.sync_refreshing = true;
+        let store = self.store.clone();
+        let task = cx
+            .background_executor()
+            .spawn(async move { sync_status::read(&store) });
+        cx.spawn(async move |entity, cx| {
+            let result = task.await;
+            let _ = entity.update(cx, |this, cx| {
+                this.sync_refreshing = false;
+                this.sync_state.update(result);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+    pub(super) fn run_sync_operation(
+        &mut self,
+        command: mail_protocol::Command,
+        cx: &mut Context<Self>,
+    ) {
+        let store = self.store.clone();
+        let task = cx
+            .background_executor()
+            .spawn(async move { store.control(command) });
+        cx.spawn(async move |entity, cx| {
+            let _ = task.await;
+            let _ = entity.update(cx, |this, cx| this.refresh_sync_status(cx));
+        })
+        .detach();
+    }
+    pub(super) fn confirm_resend(
+        &mut self,
+        account: AccountId,
+        task: mail_core::SendTaskId,
+        cx: &mut Context<Self>,
+    ) {
+        self.confirm_resend = None;
+        let reply = crate::lifecycle::sending(cx).resend(self.store.clone(), account, task);
+        let future = cx
+            .background_executor()
+            .spawn(async move { receive(reply) });
+        cx.spawn(async move |entity, cx| {
+            let _ = future.await;
+            let _ = entity.update(cx, |this, cx| this.refresh_sync_status(cx));
+        })
+        .detach();
+    }
     pub(super) fn compose(
         &mut self,
         account: Option<(AccountId, String)>,
@@ -433,6 +604,13 @@ impl Mailbox {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let workspace = self.page == Page::Drafts
+            && document.is_none()
+            && self.account.as_ref().map(|(id, _)| id) == account.as_ref().map(|(id, _)| id);
+        if !workspace {
+            self.page = Page::Mail;
+        }
+        self.pending_page = None;
         self.pane_generation += 1;
         if let Some(editor) = &self.composer {
             if !force
@@ -440,6 +618,9 @@ impl Mailbox {
                 && !editor.read(cx).leaving()
                 && editor.read(cx).account_id() == account.as_ref().map(|(id, _)| id)
             {
+                if workspace {
+                    editor.update(cx, |editor, cx| editor.new_draft(window, cx));
+                }
                 self.narrow_detail = true;
                 cx.notify();
                 return;
@@ -448,18 +629,67 @@ impl Mailbox {
             editor.update(cx, |editor, cx| editor.request_close(cx));
             return;
         }
-        let editor = cx.new(|cx| crate::composer::Composer::new(account, document, window, cx));
+        let editor = if workspace {
+            let folder = self.selected_folder.clone().expect("draft folder");
+            cx.new(|cx| {
+                crate::composer::Composer::new_workspace(
+                    account.expect("account"),
+                    folder,
+                    window,
+                    cx,
+                )
+            })
+        } else {
+            cx.new(|cx| crate::composer::Composer::new(account, document, window, cx))
+        };
+        self.install_editor(editor, window, cx);
+    }
+    fn install_editor(
+        &mut self,
+        editor: Entity<crate::composer::Composer>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.composer_subscription = Some(cx.subscribe_in(
             &editor,
             window,
-            |this, _, event: &crate::composer::ComposerEvent, window, cx| {
+            |this, editor, event: &crate::composer::ComposerEvent, window, cx| {
                 if matches!(event, crate::composer::ComposerEvent::CloseCancelled) {
+                    if let Some(folder) = editor.read(cx).workspace_folder() {
+                        this.page = Page::Drafts;
+                        this.selected_folder = Some(folder.to_owned());
+                        this.account = this
+                            .accounts
+                            .iter()
+                            .find(|(id, _)| Some(id) == editor.read(cx).account_id())
+                            .cloned();
+                        if let Some((account, _)) = &this.account {
+                            let (folders, at) =
+                                this.catalogs.get(&account.0).cloned().unwrap_or_default();
+                            this.folders = folders;
+                            this.catalog_at = at;
+                        }
+                    }
                     this.pending_compose = None;
+                    this.pending_page = None;
                     cx.notify();
                     return;
                 }
                 this.composer = None;
                 this.composer_subscription = None;
+                if let Some(page) = this.pending_page.take() {
+                    let host = cx.weak_entity();
+                    let generation = this.pane_generation;
+                    window.on_next_frame(move |window, cx| {
+                        let _ = host.update(cx, |this, cx| {
+                            if this.pane_generation == generation
+                                && !crate::lifecycle::is_closing(cx)
+                            {
+                                this.show_page(page, window, cx);
+                            }
+                        });
+                    });
+                }
                 if let Some((account, document, force)) = this.pending_compose.take()
                     && !crate::lifecycle::is_closing(cx)
                 {
@@ -485,6 +715,8 @@ impl Mailbox {
         cx.notify();
     }
     fn leave_composer(&mut self, cx: &mut Context<Self>) {
+        self.page = Page::Mail;
+        self.pending_page = None;
         self.pane_generation += 1;
         self.pending_compose = None;
         if let Some(editor) = &self.composer {
@@ -502,6 +734,9 @@ impl Mailbox {
         }
     }
     fn apply_notification(&mut self, cx: &mut Context<Self>) {
+        self.page = Page::Mail;
+        self.pending_page = None;
+        cx.notify();
         let Some(target) = self.notification_target.take() else {
             return;
         };
@@ -596,6 +831,9 @@ impl Mailbox {
         )
     }
     fn switch_account(&mut self, id: AccountId, folder: String, cx: &mut Context<Self>) {
+        self.page = Page::Mail;
+        self.pending_page = None;
+        cx.notify();
         if self.busy {
             return;
         }
@@ -626,6 +864,9 @@ impl Mailbox {
         }
     }
     fn select_unified(&mut self, cx: &mut Context<Self>) {
+        self.page = Page::Mail;
+        self.pending_page = None;
+        cx.notify();
         if self.busy {
             return;
         }
@@ -875,6 +1116,14 @@ impl Mailbox {
         cx.notify();
     }
     fn select_folder(&mut self, name: String, cx: &mut Context<Self>) {
+        if let Some(editor) = &self.composer
+            && editor.read(cx).workspace_folder().is_some()
+        {
+            editor.update(cx, |editor, cx| editor.request_close(cx));
+        }
+        self.page = Page::Mail;
+        self.pending_page = None;
+        cx.notify();
         if self.busy {
             return;
         }
@@ -908,6 +1157,16 @@ impl Mailbox {
         self.undo_flags = None;
         self.confirm_delete = false;
         self.history_exhausted = false;
+        if self.selected_folder.as_deref().is_some_and(|name| {
+            is_drafts_folder(name)
+                || self
+                    .folders
+                    .iter()
+                    .any(|f| f.name == name && is_drafts_folder(&f.display_name))
+        }) {
+            self.show_selected_drafts(cx);
+            return;
+        }
         self.load_cache(cx);
     }
     fn load_cache(&mut self, cx: &mut Context<Self>) {
@@ -1306,10 +1565,25 @@ impl Mailbox {
             if let Some(client) = store.ipc_client() {
                 let content = mail_daemon::client::content_cancellable(
                     &client,
-                    Op::Read { location, folder },
+                    Op::Read {
+                        location: location.clone(),
+                        folder: folder.clone(),
+                    },
                     &cancel,
                 )?;
-                return Ok((content, account, reader_account));
+                let delivery = receive(store.tasks(account.clone()))
+                    .ok()
+                    .and_then(|tasks| {
+                        tasks.into_iter().find(|task| {
+                            task.copy.as_ref().is_some_and(|copy| {
+                                copy.folder == folder
+                                    && copy.uid == Some(location.uid)
+                                    && copy.uidvalidity == location.uidvalidity
+                            })
+                        })
+                    })
+                    .map(|task| crate::send_labels::state_label(&task));
+                return Ok((content, account, reader_account, delivery));
             }
             let raw = match receive(store.message_body(location.clone()))? {
                 Some(raw) => raw,
@@ -1337,9 +1611,21 @@ impl Mailbox {
                 }
             };
             let content = mail_content::parse(&raw).map_err(|e| e.to_string())?;
+            let delivery = receive(store.tasks(account.clone()))
+                .ok()
+                .and_then(|tasks| {
+                    tasks.into_iter().find(|task| {
+                        task.copy.as_ref().is_some_and(|copy| {
+                            copy.folder == folder
+                                && copy.uid == Some(location.uid)
+                                && copy.uidvalidity == location.uidvalidity
+                        })
+                    })
+                })
+                .map(|task| crate::send_labels::state_label(&task));
             // 记录附件数量，供本地“有附件”搜索使用；失败不影响阅读。
             let _ = receive(store.mark_attachments(location, content.attachments.len() as u32));
-            Ok::<_, String>((content, account, reader_account))
+            Ok::<_, String>((content, account, reader_account, delivery))
         });
         cx.spawn(async move |entity, cx| {
             let result = task.await;
@@ -1349,9 +1635,14 @@ impl Mailbox {
                     && this.selected_location() == Some(&inline_location);
                 if current {
                     match result {
-                        Ok((content, _, reader_account)) => {
+                        Ok((content, _, reader_account, delivery)) => {
                             let view = cx.new(|cx| {
-                                crate::reader::Reader::embedded(content.clone(), reader_account, cx)
+                                crate::reader::Reader::embedded(
+                                    content.clone(),
+                                    reader_account,
+                                    delivery,
+                                    cx,
+                                )
                             });
                             this.inline = Some(InlineReading {
                                 location: inline_location,
@@ -1710,7 +2001,7 @@ impl Mailbox {
                     }
                     Err(error) => {
                         this.status =
-                            format!("标记操作保存未确认，请查看待同步操作后再尝试：{error}");
+                            format!("标记操作保存未确认，请查看右下角同步状态后再尝试：{error}");
                     }
                 }
                 cx.notify();
@@ -1843,7 +2134,7 @@ impl Mailbox {
                         this.quiet_reload = true;
                         this.load_cache(cx);
                     }
-                    Err(error) => this.status = format!("移动操作保存未确认，请查看待同步操作后再尝试：{error}"),
+                    Err(error) => this.status = format!("移动操作保存未确认，请查看右下角同步状态后再尝试：{error}"),
                 }
                 cx.notify();
             });
@@ -2209,5 +2500,22 @@ mod tests {
         let rows = tree_rows(&folders, &BTreeSet::from(["Work".into()]));
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[1].name, "Work");
+    }
+
+    #[test]
+    fn drafts_folder_names_route_to_the_account_draft_page() {
+        for folder in [
+            "Drafts",
+            "draft",
+            "[Gmail]/Drafts",
+            "草稿/Drafts",
+            "草稿",
+            "草稿箱",
+        ] {
+            assert!(is_drafts_folder(folder), "{folder}");
+        }
+        for folder in ["INBOX", "Draft Archive", "Projects/Drafts-2026"] {
+            assert!(!is_drafts_folder(folder), "{folder}");
+        }
     }
 }

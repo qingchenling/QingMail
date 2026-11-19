@@ -919,6 +919,7 @@ impl Service {
                         | Command::NewDraft { .. }
                         | Command::SelectDraft { .. }
                         | Command::SaveDraft { .. }
+                        | Command::DiscardDraft { .. }
                         | Command::DiscardSelectedDraft { .. }
                         | Command::StopUncertain { .. }
                         | Command::SetCacheBudget { .. }

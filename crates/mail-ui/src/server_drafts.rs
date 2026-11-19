@@ -1,32 +1,12 @@
 //! 服务器草稿原件入口；只在明确确认后转换编辑副本，不覆盖服务器。
-use gpui_kit::{
-    App, Bounds, Context, Render, TitlebarOptions, Window, WindowBounds, WindowOptions, div,
-    prelude::*, px, size,
-};
+use gpui_kit::{Context, Render, Window, div, prelude::*};
 use gpui_kit_material::{prelude::*, theme};
 use mail_core::{AccountId, AccountSettings, RemoteFolder};
 use mail_daemon::storage::StorageClient;
 use mail_protocol::{
     BusinessOperation, Command, DraftConflict, DraftResolution, Reply, ServerDraftSource,
 };
-pub(super) fn open(cx: &mut App) {
-    let options = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
-            None,
-            size(px(1050.), px(780.)),
-            cx,
-        ))),
-        titlebar: Some(TitlebarOptions {
-            title: Some("QingMail — 服务器草稿".into()),
-            ..Default::default()
-        }),
-        ..crate::ui::window_options()
-    };
-    if let Err(e) = gpui_kit::open_window(options, cx, |_, cx| cx.new(ServerDrafts::new)) {
-        eprintln!("无法打开服务器草稿：{e}");
-    }
-}
-struct ServerDrafts {
+pub(super) struct ServerDrafts {
     store: StorageClient,
     accounts: Vec<(AccountId, AccountSettings)>,
     account: Option<AccountId>,
@@ -55,12 +35,12 @@ struct Loaded {
     notice: String,
 }
 impl ServerDrafts {
-    fn new(cx: &mut Context<Self>) -> Self {
+    pub(super) fn new_for(account: AccountId, folder: String, cx: &mut Context<Self>) -> Self {
         let mut this = Self {
             store: crate::lifecycle::storage(cx),
             accounts: vec![],
-            account: None,
-            folder: None,
+            account: Some(account.clone()),
+            folder: Some(folder.clone()),
             choices: vec![],
             epoch: 0,
             uids: vec![],
@@ -73,7 +53,7 @@ impl ServerDrafts {
             status: "正在读取…".into(),
             notice: String::new(),
         };
-        this.load(None, false, cx);
+        this.load(Some(Command::DraftSyncFolder { account, folder }), true, cx);
         cx.spawn(async move |entity, cx| {
             loop {
                 cx.background_executor()
@@ -256,10 +236,12 @@ impl ServerDrafts {
         let Some(account) = self.account.clone() else {
             return;
         };
-        let converted = self
-            .originals
-            .iter()
-            .any(|s| s.id == source && s.converted.is_some());
+        let converted = self.originals.iter().any(|s| {
+            s.id == source
+                && s.converted
+                    .as_ref()
+                    .is_some_and(|d| self.sync_items.iter().any(|i| &i.draft == d))
+        });
         if convert && !converted && self.confirm.as_ref() != Some(&source) {
             self.confirm = Some(source);
             self.status="转换会以清理后的纯文本创建本地副本，HTML排版可能丢失；附件保留，原件和服务器不变。再次点击确认转换。".into();
@@ -358,32 +340,6 @@ impl ServerDrafts {
 }
 impl Render for ServerDrafts {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut accounts = div().flex().flex_wrap().gap_2();
-        for (id, settings) in &self.accounts {
-            let account = id.clone();
-            accounts = accounts.child(
-                MaterialButton::new(format!("draft-account-{}", id.0))
-                    .variant(ButtonVariant::Outlined)
-                    .disabled(self.busy)
-                    .child(format!(
-                        "{}{}",
-                        if self.account.as_ref() == Some(id) {
-                            "✓ "
-                        } else {
-                            ""
-                        },
-                        settings.display_name
-                    ))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.account = Some(account.clone());
-                        this.folder = None;
-                        this.uids.clear();
-                        this.epoch = 0;
-                        this.confirm = None;
-                        this.load(None, false, cx);
-                    })),
-            );
-        }
         let mut list = div()
             .id("server-drafts-list")
             .flex_1()
@@ -493,14 +449,7 @@ impl Render for ServerDrafts {
             list = list.child("本地草稿服务器同步状态");
             for item in &self.sync_items {
                 let draft = item.draft.clone();
-                let state = match item.state.as_str() {
-                    "synced" => "已核验服务器版本",
-                    "pending" => "待同步",
-                    "uncertain" => "结果不确定（只查证）",
-                    "conflict" => "冲突（已暂停）",
-                    "failed" => "失败（修正后再编辑）",
-                    _ => "已停止",
-                };
+                let state = crate::composer::drafts_view::sync_label(item.revision, Some(item));
                 list = list.child(
                     div()
                         .p_3()
@@ -525,7 +474,10 @@ impl Render for ServerDrafts {
             for source in &self.originals {
                 let id = source.id.clone();
                 let convert_id = id.clone();
-                let converted = source.converted.is_some();
+                let converted = source
+                    .converted
+                    .as_ref()
+                    .is_some_and(|d| self.sync_items.iter().any(|i| &i.draft == d));
                 list = list.child(
                     div()
                         .p_3()
@@ -584,8 +536,16 @@ impl Render for ServerDrafts {
             .gap_3()
             .bg(theme::color(ColorRole::SURFACE))
             .text_color(theme::color(ColorRole::ON_SURFACE))
-            .child(div().text_xl().child("服务器草稿"))
-            .child(accounts)
+            .child(div().text_xl().child("草稿"))
+            .child(format!(
+                "{} · {}",
+                self.accounts
+                    .iter()
+                    .find(|(id, _)| Some(id) == self.account.as_ref())
+                    .map(|(_, settings)| settings.address.as_str())
+                    .unwrap_or("邮箱账号"),
+                self.folder.as_deref().unwrap_or("草稿文件夹")
+            ))
             .child(
                 MaterialButton::new("scan-server-drafts")
                     .variant(ButtonVariant::Outlined)

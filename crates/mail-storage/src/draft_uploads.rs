@@ -23,9 +23,10 @@ pub struct DraftUpload {
 }
 impl Store {
     pub fn draft_sync_status(&self, account: &AccountId) -> Result<Vec<DraftSyncInfo>> {
-        let mut q=self.connection.prepare("SELECT s.draft_id,d.subject,d.revision,s.base_revision,s.state,s.detail,s.base_source FROM draft_sync s JOIN drafts d ON d.account_id=s.account_id AND d.id=s.draft_id WHERE s.account_id=?1 ORDER BY s.changed_at DESC,s.draft_id LIMIT 200")?;
+        let mut q=self.connection.prepare("SELECT s.draft_id,d.subject,d.revision,s.base_revision,s.state,s.detail,s.base_source,s.changed_at FROM draft_sync s JOIN drafts d ON d.account_id=s.account_id AND d.id=s.draft_id WHERE s.account_id=?1 ORDER BY s.changed_at DESC,s.draft_id LIMIT 200")?;
         Ok(q.query_map([&account.0], |r| {
             Ok(DraftSyncInfo {
+                updated_at: r.get(7)?,
                 draft: DraftId(r.get(0)?),
                 subject: r.get(1)?,
                 revision: r.get(2)?,

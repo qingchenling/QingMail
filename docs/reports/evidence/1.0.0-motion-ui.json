@@ -1,0 +1,18 @@
+{
+  "passed": true,
+  "synthetic_only": true,
+  "sends": 0,
+  "checks": [
+    "real disclosure opening and closing intermediate frames",
+    "mail selection and reader switch",
+    "filter open and close",
+    "settings and account navigation",
+    "theme settles after rapid retarget",
+    "reduced disclosure samples equal endpoint",
+    "reduced theme switches immediately",
+    "animation resumes after preference disabled"
+  ],
+  "limits": [
+    "Native integration; subjective smoothness and physical IME remain manual"
+  ]
+}
