@@ -7,11 +7,15 @@ fn setup() -> (tempfile::TempDir, Store, StoredDraft) {
     let root = tempfile::tempdir().unwrap();
     let mut store = Store::open(&root.path().join("data")).unwrap();
     let server = ServerSettings {
+        authentication: Default::default(),
         host: "example.invalid".into(),
         port: 993,
         username: "synthetic".into(),
         security: ConnectionSecurity::Tls,
     };
+    let mut preferences = store.desktop_preferences().unwrap();
+    preferences.save_sent_copy = true;
+    store.update_desktop_preferences(&preferences).unwrap();
     let account = store
         .create_account(&AccountSettings {
             display_name: "synthetic".into(),
@@ -91,7 +95,7 @@ fn empty_subject_confirmation_and_duplicate_versions_do_not_create_second_permis
     let ready = begin(&mut store, first, true).unwrap();
     assert!(begin(&mut store, duplicate, true).is_err());
     store
-        .finish_smtp(ready.attempt, SmtpOutcome::Uncertain)
+        .finish_smtp(ready.attempt, SmtpOutcome::Uncertain, None)
         .unwrap();
     let changed = store
         .save_draft(&draft.account, &draft.id, draft.revision, &changed)
@@ -424,7 +428,7 @@ fn failed_history_allows_editing_but_blocks_same_version_and_uncertain() {
     let preview = review(&store, &draft).unwrap();
     let ready = begin(&mut store, preview, false).unwrap();
     store
-        .finish_smtp(ready.attempt, SmtpOutcome::DefinitelyRejected)
+        .finish_smtp(ready.attempt, SmtpOutcome::DefinitelyRejected, None)
         .unwrap();
     // 未修改的同一版本仍被拒绝，失败任务只能通过任务入口重发。
     assert!(review(&store, &draft).is_err());
@@ -436,7 +440,7 @@ fn failed_history_allows_editing_but_blocks_same_version_and_uncertain() {
     let preview = review(&store, &changed).unwrap();
     let ready = begin(&mut store, preview, false).unwrap();
     store
-        .finish_smtp(ready.attempt, SmtpOutcome::Uncertain)
+        .finish_smtp(ready.attempt, SmtpOutcome::Uncertain, None)
         .unwrap();
     // 结果不确定后，即使再改版本也不能绕过原任务。
     let mut again = changed.document.clone();
@@ -555,5 +559,43 @@ fn resend_without_credentials_creates_no_new_task() {
         .is_err()
     );
     assert_eq!(receive(client.tasks(draft.account)).unwrap().len(), 1);
+    worker.stop();
+}
+
+#[test]
+fn disabled_sent_copy_does_not_contact_imap_after_smtp_acceptance() {
+    let (root, mut store, draft) = setup();
+    let mut p = store.desktop_preferences().unwrap();
+    p.save_sent_copy = false;
+    store.update_desktop_preferences(&p).unwrap();
+    drop(store);
+    let mut worker = StorageWorker::start(Some(root.path().join("data"))).unwrap();
+    let client = worker.client();
+    let preview = receive(client.review_send(draft.clone())).unwrap();
+    let mut smtp_calls = 0;
+    let task = dispatch(
+        client.clone(),
+        preview,
+        false,
+        &Vault(true),
+        |_, _, _| {
+            smtp_calls += 1;
+            outgoing::Delivery {
+                outcome: SmtpOutcome::Accepted,
+                detail: outgoing::DeliveryDetail::Accepted,
+            }
+        },
+        |_, _, _, _, _| panic!("disabled copy must never call IMAP APPEND or its lookup"),
+    )
+    .unwrap();
+    assert_eq!(smtp_calls, 1);
+    assert_eq!(task.state, SendState::Sent);
+    assert!(task.copy.is_none());
+    assert_eq!(
+        receive(client.draft_tasks(draft.account, draft.id))
+            .unwrap()
+            .len(),
+        1
+    );
     worker.stop();
 }

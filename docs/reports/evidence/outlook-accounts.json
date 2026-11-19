@@ -1,0 +1,15 @@
+{
+  "passed": true,
+  "synthetic_only": true,
+  "accounts": 0,
+  "sends": 0,
+  "checks": [
+    "empty and invalid form cannot start network check",
+    "password input returns real value",
+    "save binds to checked settings",
+    "editing discards checked credentials",
+    "Outlook and Microsoft365 profiles render in the shared account page",
+    "Microsoft login uses the built-in app registration without a client ID input",
+    "no account or send task persisted"
+  ]
+}

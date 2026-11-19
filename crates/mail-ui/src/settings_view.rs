@@ -127,6 +127,18 @@ impl Render for Settings {
                             })),
                     ),
             ))
+            .child(setting_row(
+                "自动加载邮件内图片",
+                MaterialSwitch::new("settings-auto-images", "自动加载邮件内图片")
+                    .checked(preferences.auto_load_images)
+                    .on_change(cx.listener(|_, on: &bool, _, cx| {
+                        let mut p = prefs(cx);
+                        p.auto_load_images = *on;
+                        set(cx, p);
+                        cx.notify();
+                    })),
+            ))
+            .child(note("默认开启。关闭后，远程图片需在每封邮件中手动加载；加载远程图片可能让发件人知道你已阅读。"))
             .child(setting_row("列表密度", density))
             .child(setting_row(
                 "减少动态",
@@ -142,6 +154,19 @@ impl Render for Settings {
             .child(note(
                 "减少动态会关闭页面、展开、选中与主题过渡；同时遵循系统减少动态和省电设置。",
             ));
+        let mut sending = page_card("邮件发送");
+        if let Some(settings) = &self.desktop {
+            sending = sending.child(setting_row(
+                "发送后保存到发件箱",
+                MaterialSwitch::new("save-sent-copy", "发送后保存到发件箱")
+                    .checked(settings.preferences.save_sent_copy)
+                    .disabled(self.desktop_busy)
+                    .on_change(cx.listener(|this, _, _, cx| this.desktop_command(Some(3), cx))),
+            ));
+        } else {
+            sending = sending.child(note("正在读取发送设置…"));
+        }
+        sending = sending.child(note("默认开启。新发送的邮件会保存到服务器的发件箱；关闭后仅保留本地发送记录；邮箱服务商也可能自行保存副本。"));
         let mut desktop = page_card("桌面与启动");
         if let Some(settings) = &self.desktop {
             let p = &settings.preferences;
@@ -340,6 +365,7 @@ impl Render for Settings {
                             .flex()
                             .flex_col()
                             .gap_4()
+                            .child(sending)
                             .child(desktop)
                             .child(diagnostics),
                     ),

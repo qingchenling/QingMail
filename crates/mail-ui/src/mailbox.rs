@@ -134,9 +134,19 @@ pub(super) fn open(cx: &mut App) {
     }
 }
 struct InlineReading {
-    location: mail_core::MailUid,
+    location: Option<mail_core::MailUid>,
+    account: Option<(AccountId, String)>,
     content: mail_content::MailContent,
     view: Entity<crate::reader::Reader>,
+}
+fn inline_matches_selection(
+    inline: Option<&mail_core::MailUid>,
+    selected: Option<&mail_core::MailUid>,
+) -> bool {
+    match inline {
+        Some(location) => selected == Some(location),
+        None => selected.is_none(),
+    }
 }
 type ComposeRequest = (
     Option<(AccountId, String)>,
@@ -163,6 +173,7 @@ pub(super) struct Mailbox {
     confirm_resend: Option<(AccountId, mail_core::SendTaskId)>,
     composer: Option<Entity<crate::composer::Composer>>,
     composer_subscription: Option<gpui_kit::Subscription>,
+    composer_observation: Option<gpui_kit::Subscription>,
     pending_compose: Option<ComposeRequest>,
     pane_generation: u64,
     notification_target: Option<mail_protocol::OpenMailTarget>,
@@ -234,6 +245,7 @@ impl Mailbox {
             confirm_resend: None,
             composer: None,
             composer_subscription: None,
+            composer_observation: None,
             pending_compose: None,
             pane_generation: 0,
             notification_target: None,
@@ -325,7 +337,7 @@ impl Mailbox {
                                 for index in 0..30 { this.select_message(index, cx); }
                             }
                             1 => {
-                                assert_eq!(this.inline.as_ref().unwrap().location, *this.selected_location().unwrap());
+                                assert_eq!(this.inline.as_ref().unwrap().location.as_ref(), Some(this.selected_location().unwrap()));
                                 this.account = this.accounts.first().cloned();
                                 this.search_scope = 2;
                                 this.search_text.update(cx, |input, cx| input.set_value("中文性能样本", window, cx));
@@ -650,10 +662,15 @@ impl Mailbox {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.composer_observation = Some(cx.observe(&editor, |_, _, cx| cx.notify()));
         self.composer_subscription = Some(cx.subscribe_in(
             &editor,
             window,
             |this, editor, event: &crate::composer::ComposerEvent, window, cx| {
+                if let crate::composer::ComposerEvent::Sent(account, task) = event {
+                    this.open_local_sent_record(account.clone(), task.clone(), cx);
+                    return;
+                }
                 if matches!(event, crate::composer::ComposerEvent::CloseCancelled) {
                     if let Some(folder) = editor.read(cx).workspace_folder() {
                         this.page = Page::Drafts;
@@ -677,6 +694,7 @@ impl Mailbox {
                 }
                 this.composer = None;
                 this.composer_subscription = None;
+                this.composer_observation = None;
                 if let Some(page) = this.pending_page.take() {
                     let host = cx.weak_entity();
                     let generation = this.pane_generation;
@@ -1541,7 +1559,7 @@ impl Mailbox {
         if self
             .inline
             .as_ref()
-            .is_some_and(|inline| inline.location == location)
+            .is_some_and(|inline| inline.location.as_ref() == Some(&location))
         {
             self.reading_status.clear();
             return;
@@ -1639,13 +1657,14 @@ impl Mailbox {
                             let view = cx.new(|cx| {
                                 crate::reader::Reader::embedded(
                                     content.clone(),
-                                    reader_account,
+                                    reader_account.clone(),
                                     delivery,
                                     cx,
                                 )
                             });
                             this.inline = Some(InlineReading {
-                                location: inline_location,
+                                location: Some(inline_location),
+                                account: reader_account,
                                 content,
                                 view,
                             });
@@ -1661,6 +1680,96 @@ impl Mailbox {
                 {
                     this.read_location(location, folder, cx);
                 }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn open_local_sent_record(
+        &mut self,
+        account: AccountId,
+        task: mail_core::SendTaskId,
+        cx: &mut Context<Self>,
+    ) {
+        self.page = Page::Mail;
+        self.pending_page = None;
+        self.unified = false;
+        self.search_results = None;
+        self.search_previous = None;
+        self.search_selected = None;
+        self.selected = None;
+        self.selected_folder = self
+            .catalogs
+            .get(&account.0)
+            .and_then(|(folders, _)| {
+                folders.iter().find(|folder| {
+                    let name = folder.name.to_ascii_lowercase();
+                    name == "sent"
+                        || name == "sent items"
+                        || name == "sent messages"
+                        || folder.display_name.contains("已发送")
+                        || folder.display_name.contains("已发件")
+                })
+            })
+            .map(|folder| folder.name.clone());
+        self.account = self.accounts.iter().find(|(id, _)| id == &account).cloned();
+        if let Some((folders, at)) = self.catalogs.get(&account.0).cloned() {
+            self.folders = folders;
+            self.catalog_at = at;
+        }
+        self.invalidate_read();
+        self.cache = None;
+        self.inbox = None;
+        self.narrow_detail = true;
+        self.reading_status = "正在打开本地发送记录…".into();
+        if self.selected_folder.is_some() {
+            self.quiet_reload = false;
+            self.load_cache(cx);
+        }
+        let store = self.store.clone();
+        let task = cx.background_executor().spawn(async move {
+            let snapshot = receive(store.task_snapshot(account.clone(), task))?;
+            let mime = mail_service::outgoing::prepare(&snapshot, true)
+                .map_err(|error| error.to_string())?;
+            let content = mail_content::parse(mime.raw()).map_err(|error| error.to_string())?;
+            let settings = receive(store.accounts())?
+                .into_iter()
+                .find(|(id, _)| id == &account)
+                .ok_or("发送记录所属账号已移除")?;
+            Ok::<_, String>((account, snapshot, content, settings.1.address))
+        });
+        cx.spawn(async move |entity, cx| {
+            let result = task.await;
+            let _ = entity.update(cx, |this, cx| {
+                match result {
+                    Ok((account, snapshot, content, address)) => {
+                        let view = cx.new(|cx| {
+                            crate::reader::Reader::embedded(
+                                content.clone(),
+                                Some((account.clone(), address)),
+                                Some("本地发送记录".into()),
+                                cx,
+                            )
+                        });
+                        this.inline = Some(InlineReading {
+                            location: None,
+                            account: this
+                                .account
+                                .as_ref()
+                                .map(|(id, settings)| (id.clone(), settings.address.clone())),
+                            content,
+                            view,
+                        });
+                        this.reading_status.clear();
+                        this.status = format!("已发送：{}", snapshot.headers.subject);
+                    }
+                    Err(error) => {
+                        this.reading_status = format!("本地发送记录暂不可用：{error}");
+                    }
+                }
+                this.sync_revision = crate::lifecycle::sync_revision(cx);
                 cx.notify();
             });
         })
@@ -1844,7 +1953,7 @@ impl Mailbox {
                             folders::archive(&catalog.0, None)
                         }
                         .ok_or("未找到目标文件夹；此账号未移动")?;
-                        if destination == folder.remote_name {
+                        if destination == folder.remote_name && !trash {
                             return Err("邮件已在目标文件夹".into());
                         }
                         Op::Move {
@@ -2059,14 +2168,19 @@ impl Mailbox {
             cx.notify();
             return;
         };
-        if destination == name {
+        if destination == name && !trash {
             self.status = "邮件已在目标文件夹".into();
             cx.notify();
             return;
         }
+        let permanent = trash && destination == name;
         self.busy = true;
         self.confirm_delete = false;
-        self.status = format!("正在移动到 {destination}…");
+        self.status = if destination == name {
+            "正在保存服务器永久删除操作…".into()
+        } else {
+            format!("正在移动到 {destination}…")
+        };
         let store = self.store.clone();
         let uids = targets.clone();
         let task = cx.background_executor().spawn(async move {
@@ -2121,7 +2235,9 @@ impl Mailbox {
                 this.undo_flags = None;
                 match result {
                     Ok((actions::MoveOutcome::Moved, count, destination)) => {
-                        this.status = format!("已保存 {count} 封移至 {destination} 的操作 · 待同步");
+                        this.status = if permanent {
+                            format!("已保存 {count} 封永久删除操作 · 待同步")
+                        } else { format!("已保存 {count} 封移至 {destination} 的操作 · 待同步") };
                         this.checked.clear();
                         this.quiet_reload = true;
                         this.load_cache(cx);
@@ -2234,6 +2350,9 @@ impl Mailbox {
             .unwrap_or(&[])
     }
     fn keys(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.page != Page::Mail {
+            return;
+        }
         if let Some(results) = &self.search_results {
             let count = results.len();
             if count == 0 {
@@ -2285,7 +2404,10 @@ impl Mailbox {
             }
             1 => {
                 assert!(!self.read_running);
-                assert_eq!(self.inline.as_ref().unwrap().location.uid, 238);
+                assert_eq!(
+                    self.inline.as_ref().unwrap().location.as_ref().unwrap().uid,
+                    238
+                );
                 self.select_message(0, cx);
                 self.select_folder("Projects/2026".into(), cx);
             }
@@ -2297,7 +2419,10 @@ impl Mailbox {
             }
             3 => self.select_message(0, cx),
             4 => {
-                assert_eq!(self.inline.as_ref().unwrap().location.uid, 240);
+                assert_eq!(
+                    self.inline.as_ref().unwrap().location.as_ref().unwrap().uid,
+                    240
+                );
                 self.search_text
                     .update(cx, |input, cx| input.set_value("合成主题 240", window, cx));
                 self.run_search(cx);
@@ -2307,12 +2432,18 @@ impl Mailbox {
                 self.open_hit(0, cx);
             }
             6 => {
-                assert_eq!(self.inline.as_ref().unwrap().location.uid, 240);
+                assert_eq!(
+                    self.inline.as_ref().unwrap().location.as_ref().unwrap().uid,
+                    240
+                );
                 self.clear_search(cx);
             }
             7 => {
                 assert!(self.search_results.is_none());
-                assert_eq!(self.inline.as_ref().unwrap().location.uid, 240);
+                assert_eq!(
+                    self.inline.as_ref().unwrap().location.as_ref().unwrap().uid,
+                    240
+                );
                 let mut preferences = crate::settings::prefs(cx);
                 preferences.dark = false;
                 crate::settings::set(cx, preferences);
@@ -2334,7 +2465,10 @@ impl Mailbox {
                 self.load_more(cx);
             }
             _ => {
-                assert_eq!(self.inline.as_ref().unwrap().location.uid, 240);
+                assert_eq!(
+                    self.inline.as_ref().unwrap().location.as_ref().unwrap().uid,
+                    240
+                );
                 assert_eq!(self.messages().len(), 240);
                 assert_eq!(self.messages().last().unwrap().location.uid, 1);
                 eprintln!(
@@ -2418,20 +2552,24 @@ fn enqueue_action(store: &StorageClient, operation: Op) -> Result<Reply, String>
             uids,
             destination,
         } => {
-            let target = receive(store.folders(account.clone()))?
-                .into_iter()
-                .find(|f| f.remote_name == destination)
-                .ok_or("目标文件夹尚未同步，请先同步账号")?;
-            (
-                account,
-                name,
-                epoch,
-                uids,
+            let catalog = match store.control(Command::Catalog {
+                account: account.clone(),
+            })? {
+                Reply::Catalog { folders, .. } => folders,
+                _ => return Err("账号目录响应无效".into()),
+            };
+            let op = if folders::trash(&catalog, None).as_deref() == Some(destination.as_str()) {
+                MailOperation::Delete
+            } else {
+                let target = receive(store.folders(account.clone()))?
+                    .into_iter()
+                    .find(|f| f.remote_name == destination)
+                    .ok_or("目标文件夹尚未同步，请先同步账号")?;
                 MailOperation::Move {
                     destination: target.id,
-                },
-                Some(destination),
-            )
+                }
+            };
+            (account, name, epoch, uids, op, Some(destination))
         }
         _ => return Err("此入口仅处理邮件标记与移动".into()),
     };
@@ -2476,6 +2614,26 @@ impl Drop for Mailbox {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn location(uid: u32) -> mail_core::MailUid {
+        mail_core::MailUid {
+            account: AccountId("test-account".into()),
+            folder_id: "inbox".into(),
+            uidvalidity: 42,
+            uid,
+        }
+    }
+
+    #[test]
+    fn inline_reader_matches_selected_message_in_any_folder_and_keeps_local_sent_record() {
+        let inbox = location(7);
+        let other = location(8);
+        assert!(inline_matches_selection(Some(&inbox), Some(&inbox)));
+        assert!(!inline_matches_selection(Some(&inbox), Some(&other)));
+        assert!(!inline_matches_selection(Some(&inbox), None));
+        assert!(inline_matches_selection(None, None));
+        assert!(!inline_matches_selection(None, Some(&inbox)));
+    }
+
     #[test]
     fn hierarchy_creates_implicit_parents_and_collapse_keeps_stable_names() {
         let folders = vec![

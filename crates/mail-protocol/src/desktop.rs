@@ -9,6 +9,8 @@ pub struct DesktopPreferences {
     pub notifications: bool,
     pub show_sender_subject: bool,
     pub show_preview: bool,
+    /// 新发送任务是否另存服务器副本；在确认发送时冻结。
+    pub save_sent_copy: bool,
 }
 impl Default for DesktopPreferences {
     fn default() -> Self {
@@ -17,6 +19,7 @@ impl Default for DesktopPreferences {
             notifications: true,
             show_sender_subject: false,
             show_preview: false,
+            save_sent_copy: true,
         }
     }
 }

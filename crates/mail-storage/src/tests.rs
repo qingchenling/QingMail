@@ -10,12 +10,14 @@ pub(super) fn settings() -> AccountSettings {
         display_name: "个人邮箱".into(),
         address: "tester@example.org".into(),
         imap: ServerSettings {
+            authentication: Default::default(),
             host: "imap.example.org".into(),
             port: 993,
             username: "imap-user".into(),
             security: ConnectionSecurity::Tls,
         },
         smtp: ServerSettings {
+            authentication: Default::default(),
             host: "smtp.example.org".into(),
             port: 587,
             username: "smtp-user".into(),
@@ -97,7 +99,7 @@ fn schema10_upgrade_backs_up_and_removing_default_selects_remaining_account() {
     drop(store);
     let connection = Connection::open(path.join("state.sqlite3")).unwrap();
     connection
-        .execute_batch("DROP TABLE autostart_intent; DROP TABLE notification_candidates; DROP TABLE notification_pending; DROP TABLE notification_baselines; DROP TABLE desktop_settings; DROP VIEW protected_objects; DROP TRIGGER cache_body_insert; DROP TRIGGER cache_part_insert; DROP TABLE cache_access; DROP TABLE cache_settings; DROP TRIGGER stop_sent_draft_sync; DROP TRIGGER track_draft_scan_account; DROP TABLE draft_conflicts; DROP TABLE draft_scan_failures; DROP TABLE draft_scans; DROP TRIGGER track_server_draft_insert; DROP TRIGGER track_server_draft_update; DROP TABLE draft_uploads; DROP TABLE draft_sync; DROP TABLE server_draft_sources; DROP TABLE server_draft_folders; DROP TABLE part_resources; DROP TABLE message_structures; DROP VIEW visible_folder_messages; DROP TABLE mail_operations; DROP TRIGGER account_default_options; DROP TABLE account_options; PRAGMA user_version=10;")
+        .execute_batch("DROP TRIGGER track_server_draft_update; CREATE TRIGGER track_server_draft_update AFTER UPDATE OF revision ON drafts BEGIN UPDATE draft_sync SET changed_at=unixepoch() WHERE account_id=NEW.account_id AND draft_id=NEW.id; END; ALTER TABLE draft_sync DROP COLUMN local_only; ALTER TABLE drafts DROP COLUMN deleted_at; ALTER TABLE accounts DROP COLUMN imap_auth; ALTER TABLE accounts DROP COLUMN smtp_auth; ALTER TABLE send_tasks DROP COLUMN save_sent_copy; DROP TABLE autostart_intent; DROP TABLE notification_candidates; DROP TABLE notification_pending; DROP TABLE notification_baselines; DROP TABLE desktop_settings; DROP VIEW protected_objects; DROP TRIGGER cache_body_insert; DROP TRIGGER cache_part_insert; DROP TABLE cache_access; DROP TABLE cache_settings; DROP TRIGGER stop_sent_draft_sync; DROP TRIGGER track_draft_scan_account; DROP TABLE draft_conflicts; DROP TABLE draft_scan_failures; DROP TABLE draft_scans; DROP TRIGGER track_server_draft_insert; DROP TRIGGER track_server_draft_update; DROP TABLE draft_uploads; DROP TABLE draft_sync; DROP TABLE server_draft_sources; DROP TABLE server_draft_folders; DROP TABLE part_resources; DROP TABLE message_structures; DROP VIEW visible_folder_messages; DROP TABLE mail_operations; DROP TRIGGER account_default_options; DROP TABLE account_options; PRAGMA user_version=10;")
         .unwrap();
     drop(connection);
     let mut store = Store::open(&path).unwrap();
@@ -564,4 +566,92 @@ fn local_search_filters_cached_text_sender_folder_and_known_attachments() {
             .unwrap()
             .is_empty()
     );
+}
+
+#[test]
+fn microsoft_schema20_upgrade_preserves_password_accounts_and_auth_version_baselines() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("data");
+    let mut store = Store::open(&path).unwrap();
+    let id = store.create_account(&settings()).unwrap();
+    let old = store.account_version(&id).unwrap();
+    drop(store);
+    let connection = Connection::open(path.join("state.sqlite3")).unwrap();
+    connection.execute_batch("DROP TRIGGER track_server_draft_update; CREATE TRIGGER track_server_draft_update AFTER UPDATE OF revision ON drafts BEGIN UPDATE draft_sync SET changed_at=unixepoch() WHERE account_id=NEW.account_id AND draft_id=NEW.id; END; ALTER TABLE draft_sync DROP COLUMN local_only; ALTER TABLE drafts DROP COLUMN deleted_at; ALTER TABLE accounts DROP COLUMN imap_auth; ALTER TABLE accounts DROP COLUMN smtp_auth; PRAGMA user_version=20;").unwrap();
+    drop(connection);
+    let mut store = Store::open(&path).unwrap();
+    assert_eq!(store.account_version(&id).unwrap(), old);
+    assert!(fs::read_dir(&path).unwrap().any(|e| {
+        e.unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("migration-v20-")
+    }));
+    let mut microsoft = settings();
+    microsoft.imap.authentication = mail_core::Authentication::MicrosoftPersonal;
+    microsoft.smtp.authentication = mail_core::Authentication::MicrosoftPersonal;
+    // No tokens or client secrets belong to account settings or SQLite.
+    store.update_account_row(&id, &microsoft).unwrap();
+    assert_eq!(store.account(&id).unwrap(), Some(microsoft.clone()));
+    assert!(store.validate_account_commit(Some(&old)).is_err());
+    let personal = store.create_account(&microsoft).unwrap();
+    microsoft.imap.authentication = mail_core::Authentication::Microsoft365;
+    microsoft.smtp.authentication = mail_core::Authentication::Microsoft365;
+    let work = store.create_account(&microsoft).unwrap();
+    drop(store);
+    let mut store = Store::open(&path).unwrap();
+    assert_eq!(
+        store
+            .account(&personal)
+            .unwrap()
+            .unwrap()
+            .imap
+            .authentication,
+        mail_core::Authentication::MicrosoftPersonal
+    );
+    assert_eq!(store.account(&work).unwrap().unwrap(), microsoft);
+    store.local_draft_account().unwrap();
+}
+
+#[test]
+fn draft_schema21_upgrade_preserves_versions_and_backs_up_before_migration() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("data");
+    let mut s = Store::open(&path).unwrap();
+    let a = s.create_account(&settings()).unwrap();
+    let d = s
+        .create_draft(
+            &a,
+            &DraftDocument {
+                headers: Default::default(),
+                body: mail_content::draft::Draft::plain("迁移保留").unwrap(),
+                attachments: vec![],
+            },
+        )
+        .unwrap();
+    let version = s.account_version(&a).unwrap();
+    s.connection.execute_batch("DROP TRIGGER track_server_draft_update; ALTER TABLE draft_sync DROP COLUMN local_only; ALTER TABLE drafts DROP COLUMN deleted_at;").unwrap();
+    s.connection
+        .execute_batch(
+            include_str!("schema-v16.sql")
+                .rsplit("DROP TRIGGER track_server_draft_update;")
+                .next()
+                .unwrap(),
+        )
+        .unwrap();
+    s.connection
+        .pragma_update(None, "user_version", 21)
+        .unwrap();
+    drop(s);
+    let s = Store::open(&path).unwrap();
+    assert_eq!(s.draft(&a, &d.id).unwrap(), d);
+    assert_eq!(s.account_version(&a).unwrap(), version);
+    assert_eq!(s.draft_ids(&a).unwrap(), vec![d.id]);
+    assert_eq!(validate_schema(&s.connection).unwrap(), 22);
+    assert!(fs::read_dir(&path).unwrap().any(|e| {
+        e.unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("migration-v21-")
+    }));
 }

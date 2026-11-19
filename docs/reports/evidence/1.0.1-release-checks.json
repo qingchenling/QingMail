@@ -1,0 +1,24 @@
+{
+  "passed": true,
+  "version": "QingMail 1.0.1 (IPC v4)",
+  "package": "dist/arch-1.0.1/qingmail-1.0.1-1-x86_64.pkg.tar.zst",
+  "size_bytes": 52680005,
+  "sha256": "0e8abe7bdb38e75e45c2b63c67b2d386d8ee81dee3530834bf76f3984fa10d22",
+  "source_hashes_verified": 170,
+  "internal_crates_version": "1.0.1",
+  "schema": 21,
+  "ipc": 4,
+  "build_info_workspace_dirty": true,
+  "checks": [
+    "source and package SHA256SUMS",
+    "all snapshot source file hashes",
+    "seven crate versions",
+    "packaged UI version and IPC",
+    "both executable permissions and shared libraries",
+    "desktop file",
+    "included Outlook help, release notes and install instructions",
+    "packaged BUILD-INFO matches snapshot"
+  ],
+  "host_install": false,
+  "real_mailbox_access": false
+}

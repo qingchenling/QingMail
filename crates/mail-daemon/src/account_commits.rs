@@ -328,6 +328,7 @@ mod tests {
     }
     fn settings() -> AccountSettings {
         let server = ServerSettings {
+            authentication: Default::default(),
             host: "mail.example.test".into(),
             username: "test".into(),
             port: 993,

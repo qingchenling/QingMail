@@ -206,6 +206,12 @@ mod tests {
             ..Default::default()
         }));
         assert_eq!(status.summary().pending(), 0);
+        status.update(Ok(Snapshot {
+            drafts: vec![draft("deleting", 2, 2)],
+            ..Default::default()
+        }));
+        assert_eq!(status.summary().drafts, 1);
+        assert_eq!(status.indicator().0, "sync");
     }
     #[test]
     fn read_failure_preserves_last_known_items_and_never_reports_completion() {

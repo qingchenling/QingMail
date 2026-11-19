@@ -334,7 +334,11 @@ fn main() {
     use mail_daemon::{Command, Instance, Launch};
     let args: Vec<_> = std::env::args().skip(1).collect();
     if args.iter().any(|arg| arg == "--version") {
-        println!("QingMail {} (IPC v2)", env!("CARGO_PKG_VERSION"));
+        println!(
+            "QingMail {} (IPC v{})",
+            env!("CARGO_PKG_VERSION"),
+            mail_protocol::PROTOCOL_VERSION
+        );
         return;
     }
     if (std::env::var_os("QINGMAIL_IPC_TEST_EDITOR").is_some()

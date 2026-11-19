@@ -263,6 +263,7 @@ fn open_scoped(
 pub(super) enum ComposerEvent {
     Closed,
     CloseCancelled,
+    Sent(mail_core::AccountId, mail_core::SendTaskId),
 }
 impl EventEmitter<ComposerEvent> for Composer {}
 
@@ -298,10 +299,9 @@ pub(super) struct Composer {
     last_list_refresh: Instant,
     server_details: Option<Entity<crate::server_drafts::ServerDrafts>>,
     show_server_details: bool,
+    pending_details: bool,
     confirm_delete: bool,
     deleting: bool,
-    list_width: f32,
-    resize_start: Option<(f32, f32)>,
     list_visible: bool,
     _selection_subscription: Subscription,
     close_error: Option<String>,
@@ -463,10 +463,9 @@ impl Composer {
             last_list_refresh: Instant::now() - Duration::from_secs(3),
             server_details: None,
             show_server_details: false,
+            pending_details: false,
             confirm_delete: false,
             deleting: false,
-            list_width: 360.,
-            resize_start: None,
             list_visible: true,
             _selection_subscription: cx.observe(&input, |_, _, cx| cx.notify()),
             close_error: None,
@@ -539,7 +538,7 @@ impl Composer {
                             if let Some(draft) = draft {
                                 this.restore_draft(draft, window, cx);
                             } else {
-                                this.saved = Some(0);
+                                this.clear_selection(window, cx);
                                 this.status = "暂无草稿，点击左侧写邮件开始".into();
                             }
                             this.refresh_workspace(cx);
@@ -886,6 +885,15 @@ impl Composer {
             self.finish_close(cx);
             return;
         }
+        if self.pending_details
+            && !self.saving
+            && !self.closing
+            && self.saved == Some(self.session.borrow().revision)
+        {
+            self.pending_details = false;
+            self.show_details(window, cx);
+            return;
+        }
         if !self.closing
             && !self.saving
             && self.saved == Some(self.session.borrow().revision)
@@ -961,6 +969,7 @@ impl Composer {
                     }
                     Err(e) => {
                         this.pending_draft = None;
+                        this.pending_details = false;
                         this.deselect_requested = false;
                         this.auto_save_blocked = true;
                         this.closing = false;

@@ -224,6 +224,7 @@ mod tests {
     use super::*;
     fn setup(store: &mut Store) -> AccountId {
         let server = ServerSettings {
+            authentication: Default::default(),
             host: "mail.example.invalid".into(),
             port: 993,
             username: "test".into(),
@@ -324,7 +325,7 @@ mod tests {
         );
         assert_eq!(
             store.draft_sync_status(&account).unwrap()[0].state,
-            "conflict"
+            "uncertain"
         );
     }
 
@@ -474,7 +475,7 @@ mod tests {
                 },
             )
             .unwrap();
-        s.connection.execute_batch("DROP TABLE autostart_intent; DROP TABLE notification_candidates; DROP TABLE notification_pending; DROP TABLE notification_baselines; DROP TABLE desktop_settings; DROP VIEW protected_objects; DROP TRIGGER cache_body_insert; DROP TRIGGER cache_part_insert; DROP TABLE cache_access; DROP TABLE cache_settings; DROP TRIGGER stop_sent_draft_sync; DROP TRIGGER track_draft_scan_account; DROP TABLE draft_conflicts; DROP TABLE draft_scan_failures; DROP TABLE draft_scans; DROP TRIGGER track_server_draft_insert; DROP TRIGGER track_server_draft_update; DROP TABLE draft_uploads; DROP TABLE draft_sync; DROP TABLE server_draft_sources; DROP TABLE server_draft_folders; PRAGMA user_version=13;").unwrap();
+        s.connection.execute_batch("DROP TRIGGER track_server_draft_update; CREATE TRIGGER track_server_draft_update AFTER UPDATE OF revision ON drafts BEGIN UPDATE draft_sync SET changed_at=unixepoch() WHERE account_id=NEW.account_id AND draft_id=NEW.id; END; ALTER TABLE draft_sync DROP COLUMN local_only; ALTER TABLE drafts DROP COLUMN deleted_at; ALTER TABLE accounts DROP COLUMN imap_auth; ALTER TABLE accounts DROP COLUMN smtp_auth; ALTER TABLE send_tasks DROP COLUMN save_sent_copy; DROP TABLE autostart_intent; DROP TABLE notification_candidates; DROP TABLE notification_pending; DROP TABLE notification_baselines; DROP TABLE desktop_settings; DROP VIEW protected_objects; DROP TRIGGER cache_body_insert; DROP TRIGGER cache_part_insert; DROP TABLE cache_access; DROP TABLE cache_settings; DROP TRIGGER stop_sent_draft_sync; DROP TRIGGER track_draft_scan_account; DROP TABLE draft_conflicts; DROP TABLE draft_scan_failures; DROP TABLE draft_scans; DROP TRIGGER track_server_draft_insert; DROP TRIGGER track_server_draft_update; DROP TABLE draft_uploads; DROP TABLE draft_sync; DROP TABLE server_draft_sources; DROP TABLE server_draft_folders; PRAGMA user_version=13;").unwrap();
         drop(s);
         let s = Store::open(&data).unwrap();
         assert_eq!(s.draft(&a, &draft.id).unwrap(), draft);
@@ -490,5 +491,126 @@ mod tests {
                 .to_string_lossy()
                 .starts_with("migration-v13-")
         }));
+    }
+    #[test]
+    fn delete_draft_queues_known_versions_atomically_and_retains_recovery_evidence() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("data");
+        let mut s = Store::open(&path).unwrap();
+        let a = setup(&mut s);
+        let b = setup(&mut s);
+        let mut catalog = s.remote_folders(&a).unwrap();
+        catalog.push(mail_core::RemoteFolder {
+            name: "Trash".into(),
+            display_name: "Trash".into(),
+            delimiter: None,
+            selectable: true,
+        });
+        s.replace_remote_folders(&a, &catalog, 1).unwrap();
+        s.set_server_draft_folder(&a, "Drafts").unwrap();
+        s.set_server_draft_folder(&b, "Drafts").unwrap();
+        let raw = b"Subject: original\r\n\r\nkeep evidence";
+        let source = s.archive_server_draft(&a, "Drafts", 42, 7, raw).unwrap();
+        let other = s.archive_server_draft(&b, "Drafts", 42, 7, raw).unwrap();
+        let draft = s.convert_server_draft(&a, &source.id).unwrap();
+        let other = s.convert_server_draft(&b, &other.id).unwrap();
+        // Bad revision or a failed transaction cannot hide the draft or publish half a delete.
+        assert!(
+            s.delete_draft(&a, &draft.id, draft.revision + 1, Some("Trash"))
+                .is_err()
+        );
+        assert!(s.operations(None).unwrap().is_empty());
+        assert_eq!(s.draft(&a, &draft.id).unwrap(), draft);
+        s.connection.execute_batch("CREATE TRIGGER fail_draft_delete BEFORE DELETE ON drafts BEGIN SELECT RAISE(ABORT,'disk failure'); END;").unwrap();
+        assert!(
+            s.delete_draft(&a, &draft.id, draft.revision, Some("Trash"))
+                .is_err()
+        );
+        assert!(s.operations(None).unwrap().is_empty());
+        s.connection
+            .execute_batch("DROP TRIGGER fail_draft_delete")
+            .unwrap();
+        s.delete_draft(&a, &draft.id, draft.revision, Some("Trash"))
+            .unwrap();
+        assert!(s.draft_ids(&a).unwrap().is_empty());
+        assert_eq!(s.draft(&b, &other.id).unwrap(), other);
+        assert_eq!(s.server_draft_original(&a, &source.id).unwrap(), raw);
+        let ops = s.operations(Some(&a)).unwrap();
+        assert_eq!(ops.len(), 1);
+        assert_eq!(ops[0].location.account, a);
+        assert_eq!(ops[0].location.uidvalidity, 42);
+        assert_eq!(ops[0].location.uid, 7);
+        assert_eq!(
+            ops[0].operation,
+            mail_protocol::MailOperation::Trash {
+                destination: "Trash".into()
+            }
+        );
+        // Target Trash has never been synchronized and has no invented epoch.
+        assert!(
+            !s.folders(&a)
+                .unwrap()
+                .iter()
+                .any(|f| f.remote_name == "Trash")
+        );
+        drop(s);
+        let mut s = Store::open(&path).unwrap();
+        assert_eq!(
+            s.operations(Some(&a)).unwrap()[0].state,
+            mail_protocol::OperationState::Pending
+        );
+        let archived = s.server_draft_source(&a, &source.id).unwrap();
+        s.reconcile_discovered_draft(&archived, false).unwrap();
+        assert!(s.draft_ids(&a).unwrap().is_empty());
+    }
+
+    #[test]
+    fn deletion_hides_conflicts_and_preserves_original_until_cloud_cleanup_is_possible() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("data");
+        let mut s = Store::open(&path).unwrap();
+        let a = setup(&mut s);
+        s.set_server_draft_folder(&a, "Drafts").unwrap();
+        let source = s
+            .archive_server_draft(&a, "Drafts", 42, 7, b"Subject: test\r\n\r\noriginal")
+            .unwrap();
+        let draft = s.convert_server_draft(&a, &source.id).unwrap();
+        let remote = s
+            .archive_server_draft(&a, "Drafts", 42, 9, b"Subject: changed\r\n\r\nremote edit")
+            .unwrap();
+        s.record_draft_conflict(&a, &draft.id, Some(&remote.id), "conflict")
+            .unwrap();
+        s.delete_draft(&a, &draft.id, draft.revision, None).unwrap();
+        assert!(s.operations(None).unwrap().is_empty());
+        assert!(s.draft_ids(&a).unwrap().is_empty());
+        assert!(s.draft(&a, &draft.id).is_err());
+        assert!(s.draft_conflicts(Some(&a)).unwrap().is_empty());
+        assert_eq!(s.draft_sync_status(&a).unwrap()[0].state, "deleting");
+        assert!(!s.finish_draft_deletion(&a, &draft.id, None).unwrap());
+        drop(s);
+        let mut s = Store::open(&path).unwrap();
+        assert!(s.draft_ids(&a).unwrap().is_empty());
+        assert_eq!(
+            s.server_draft_original(&a, &source.id).unwrap(),
+            b"Subject: test\r\n\r\noriginal"
+        );
+        let mut catalog = s.remote_folders(&a).unwrap();
+        catalog.push(mail_core::RemoteFolder {
+            name: "Trash".into(),
+            display_name: "Trash".into(),
+            delimiter: None,
+            selectable: true,
+        });
+        s.replace_remote_folders(&a, &catalog, 0).unwrap();
+        assert!(
+            s.finish_draft_deletion(&a, &draft.id, Some("Trash"))
+                .unwrap()
+        );
+        assert!(s.draft_sync_status(&a).unwrap().is_empty());
+        let operations = s.operations(Some(&a)).unwrap();
+        assert_eq!(operations.len(), 2);
+        let mut uids: Vec<_> = operations.iter().map(|o| o.location.uid).collect();
+        uids.sort();
+        assert_eq!(uids, vec![7, 9]);
     }
 }

@@ -534,6 +534,7 @@ mod tests {
     }
     fn settings() -> AccountSettings {
         let server = ServerSettings {
+            authentication: Default::default(),
             host: "test.invalid".into(),
             port: 993,
             username: "test".into(),

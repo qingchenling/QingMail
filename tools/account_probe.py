@@ -29,5 +29,7 @@ with tempfile.TemporaryDirectory(prefix='qingmail-p2-accounts-') as directory:
     args.evidence.write_text(json.dumps(dict(passed=True, synthetic_only=True, accounts=0, sends=0,
         checks=['empty and invalid form cannot start network check', 'password input returns real value',
                 'save binds to checked settings', 'editing discards checked credentials',
+                'Outlook and Microsoft365 profiles render in the shared account page',
+                'Microsoft login uses the built-in app registration without a client ID input',
                 'no account or send task persisted']), ensure_ascii=False, indent=2) + '\n')
     print(f'PASS: native account form; {args.evidence}')

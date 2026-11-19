@@ -35,8 +35,10 @@ pub(crate) fn state_label(task: &SendTask) -> String {
         SendState::Sent => {
             if task.detail == "copy_already_present" {
                 "发送成功；服务器上已有同一副本，未重复保存"
-            } else {
+            } else if task.copy.is_some() {
                 "发送成功，已保存副本"
+            } else {
+                "发送成功"
             }
         }
         SendState::Failed => "发送未完成；不会自动重试",
@@ -92,6 +94,7 @@ mod tests {
             state_label(&unknown),
             "发送未完成；不会自动重试。未记录更多原因"
         );
+        assert_eq!(state_label(&task(SendState::Sent, "")), "发送成功");
         let sent = task(SendState::Sent, "copy_already_present");
         assert!(state_label(&sent).contains("未重复保存"));
         assert!(copy.copy.is_none());

@@ -28,6 +28,9 @@ fn document(text: &str) -> DraftDocument {
 fn setup() -> (tempfile::TempDir, Store, AccountId) {
     let root = tempfile::tempdir().unwrap();
     let mut store = Store::open(&root.path().join("qingmail")).unwrap();
+    let mut preferences = store.desktop_preferences().unwrap();
+    preferences.save_sent_copy = true;
+    store.update_desktop_preferences(&preferences).unwrap();
     let account = store.create_account(&settings()).unwrap();
     (root, store, account)
 }
@@ -143,7 +146,9 @@ fn task_snapshot_stays_frozen_after_draft_change_and_discard() {
     let attempt = store.begin_smtp(&account, &id).unwrap();
     assert_eq!(attempt.snapshot(), &snapshot);
     assert!(store.begin_smtp(&account, &id).is_err());
-    store.finish_smtp(attempt, SmtpOutcome::Accepted).unwrap();
+    store
+        .finish_smtp(attempt, SmtpOutcome::Accepted, None)
+        .unwrap();
     assert_eq!(
         store.task(&account, &id).unwrap().state,
         SendState::CopyPending
@@ -193,7 +198,9 @@ fn restart_never_resumes_pending_or_sending_and_keeps_copy_only_path() {
     let _attempt = store.begin_smtp(&account, &sending).unwrap();
     let copy = task(&mut store, &account);
     let accepted = store.begin_smtp(&account, &copy).unwrap();
-    store.finish_smtp(accepted, SmtpOutcome::Accepted).unwrap();
+    store
+        .finish_smtp(accepted, SmtpOutcome::Accepted, None)
+        .unwrap();
     let unsent = store
         .create_draft(&account, &document("离线编辑，不自动发送"))
         .unwrap();
@@ -231,7 +238,7 @@ fn explicit_resend_creates_one_new_task_and_preserves_uncertain_record() {
     for outcome in [SmtpOutcome::Uncertain, SmtpOutcome::DefinitelyRejected] {
         let previous = task(&mut store, &account);
         let attempt = store.begin_smtp(&account, &previous).unwrap();
-        store.finish_smtp(attempt, outcome).unwrap();
+        store.finish_smtp(attempt, outcome, None).unwrap();
         let original = store.task(&account, &previous).unwrap();
         assert!(store.begin_smtp(&account, &previous).is_err());
         let next = store
@@ -258,7 +265,7 @@ fn explicit_resend_creates_one_new_task_and_preserves_uncertain_record() {
         assert!(store.begin_copy(&account, &next).is_err());
         let attempt = store.begin_smtp(&account, &next).unwrap();
         store
-            .finish_smtp(attempt, SmtpOutcome::DefinitelyRejected)
+            .finish_smtp(attempt, SmtpOutcome::DefinitelyRejected, None)
             .unwrap();
     }
 }
@@ -451,7 +458,9 @@ fn process_exit_after_smtp_acceptance_can_only_resume_copy() {
         let account = store.accounts().unwrap()[0].0.clone();
         let id = task(&mut store, &account);
         let attempt = store.begin_smtp(&account, &id).unwrap();
-        store.finish_smtp(attempt, SmtpOutcome::Accepted).unwrap();
+        store
+            .finish_smtp(attempt, SmtpOutcome::Accepted, None)
+            .unwrap();
         std::process::exit(74);
     }
     let (root, store, account) = setup();
@@ -515,7 +524,9 @@ fn cancel_and_stop_do_not_create_submissions_or_claim_recall() {
             .resend_task(&account, &uncertain, ResendAuthorization::UserConfirmed)
             .is_err()
     );
-    store.finish_smtp(attempt, SmtpOutcome::Uncertain).unwrap();
+    store
+        .finish_smtp(attempt, SmtpOutcome::Uncertain, None)
+        .unwrap();
     store.stop_uncertain(&account, &uncertain).unwrap();
     assert_eq!(
         store.task(&account, &uncertain).unwrap().state,
@@ -645,7 +656,7 @@ fn v2_upgrade_keeps_existing_drafts_and_remote_account_identity() {
     drop(store);
     // 从当前库移除 v3/v4 的结构，恢复真实 v2 布局；正文和 v2 行保持原样。
     let conn = Connection::open(path.join("state.sqlite3")).unwrap();
-    conn.execute_batch("DROP TABLE autostart_intent; DROP TABLE notification_candidates; DROP TABLE notification_pending; DROP TABLE notification_baselines; DROP TABLE desktop_settings; DROP VIEW protected_objects; DROP TRIGGER cache_body_insert; DROP TRIGGER cache_part_insert; DROP TABLE cache_access; DROP TABLE cache_settings; DROP TRIGGER stop_sent_draft_sync; DROP TRIGGER track_draft_scan_account; DROP TABLE draft_conflicts; DROP TABLE draft_scan_failures; DROP TABLE draft_scans; DROP TRIGGER track_server_draft_insert; DROP TRIGGER track_server_draft_update; DROP TABLE draft_uploads; DROP TABLE draft_sync; DROP TABLE server_draft_sources; DROP TABLE server_draft_folders; DROP TABLE part_resources; DROP TABLE message_structures; DROP VIEW visible_folder_messages; DROP TABLE mail_operations; DROP TRIGGER account_default_options; DROP TABLE account_options; DROP TRIGGER account_legacy_credential; DROP TABLE account_credentials; DROP TABLE mutation_results; DROP TABLE message_bodies; DROP TABLE remote_folders; DROP TABLE folder_sync; DROP TABLE catalog_sync; DROP TABLE local_editor; DROP INDEX one_local_workspace; ALTER TABLE accounts DROP COLUMN kind; ALTER TABLE send_tasks DROP COLUMN copy_folder; ALTER TABLE send_tasks DROP COLUMN copy_uidvalidity; ALTER TABLE send_tasks DROP COLUMN copy_uid; ALTER TABLE folder_messages DROP COLUMN seen; ALTER TABLE folder_messages DROP COLUMN flagged; ALTER TABLE messages DROP COLUMN has_attachments; PRAGMA user_version=2;").unwrap();
+    conn.execute_batch("DROP TRIGGER track_server_draft_update; CREATE TRIGGER track_server_draft_update AFTER UPDATE OF revision ON drafts BEGIN UPDATE draft_sync SET changed_at=unixepoch() WHERE account_id=NEW.account_id AND draft_id=NEW.id; END; ALTER TABLE draft_sync DROP COLUMN local_only; ALTER TABLE drafts DROP COLUMN deleted_at; ALTER TABLE accounts DROP COLUMN imap_auth; ALTER TABLE accounts DROP COLUMN smtp_auth; ALTER TABLE send_tasks DROP COLUMN save_sent_copy; DROP TABLE autostart_intent; DROP TABLE notification_candidates; DROP TABLE notification_pending; DROP TABLE notification_baselines; DROP TABLE desktop_settings; DROP VIEW protected_objects; DROP TRIGGER cache_body_insert; DROP TRIGGER cache_part_insert; DROP TABLE cache_access; DROP TABLE cache_settings; DROP TRIGGER stop_sent_draft_sync; DROP TRIGGER track_draft_scan_account; DROP TABLE draft_conflicts; DROP TABLE draft_scan_failures; DROP TABLE draft_scans; DROP TRIGGER track_server_draft_insert; DROP TRIGGER track_server_draft_update; DROP TABLE draft_uploads; DROP TABLE draft_sync; DROP TABLE server_draft_sources; DROP TABLE server_draft_folders; DROP TABLE part_resources; DROP TABLE message_structures; DROP VIEW visible_folder_messages; DROP TABLE mail_operations; DROP TRIGGER account_default_options; DROP TABLE account_options; DROP TRIGGER account_legacy_credential; DROP TABLE account_credentials; DROP TABLE mutation_results; DROP TABLE message_bodies; DROP TABLE remote_folders; DROP TABLE folder_sync; DROP TABLE catalog_sync; DROP TABLE local_editor; DROP INDEX one_local_workspace; ALTER TABLE accounts DROP COLUMN kind; ALTER TABLE send_tasks DROP COLUMN copy_folder; ALTER TABLE send_tasks DROP COLUMN copy_uidvalidity; ALTER TABLE send_tasks DROP COLUMN copy_uid; ALTER TABLE folder_messages DROP COLUMN seen; ALTER TABLE folder_messages DROP COLUMN flagged; ALTER TABLE messages DROP COLUMN has_attachments; PRAGMA user_version=2;").unwrap();
     drop(conn);
     let mut store = Store::open(&path).unwrap();
     assert_eq!(store.draft(&account, &draft.id).unwrap(), draft);
@@ -666,7 +677,9 @@ fn copy_is_confirmed_before_sent_and_failures_keep_the_task_retryable() {
     let (_root, mut store, account) = setup();
     let id = task(&mut store, &account);
     let attempt = store.begin_smtp(&account, &id).unwrap();
-    store.finish_smtp(attempt, SmtpOutcome::Accepted).unwrap();
+    store
+        .finish_smtp(attempt, SmtpOutcome::Accepted, None)
+        .unwrap();
     assert_eq!(
         store.task(&account, &id).unwrap().state,
         SendState::CopyPending
@@ -748,12 +761,14 @@ fn v5_upgrade_adds_copy_columns_and_preserves_copy_pending_tasks() {
     let (root, mut store, account) = setup();
     let id = task(&mut store, &account);
     let attempt = store.begin_smtp(&account, &id).unwrap();
-    store.finish_smtp(attempt, SmtpOutcome::Accepted).unwrap();
+    store
+        .finish_smtp(attempt, SmtpOutcome::Accepted, None)
+        .unwrap();
     let path = root.path().join("qingmail");
     drop(store);
     let conn = Connection::open(path.join("state.sqlite3")).unwrap();
     conn.execute_batch(
-        "DROP TABLE autostart_intent; DROP TABLE notification_candidates; DROP TABLE notification_pending; DROP TABLE notification_baselines; DROP TABLE desktop_settings; DROP VIEW protected_objects; DROP TRIGGER cache_body_insert; DROP TRIGGER cache_part_insert; DROP TABLE cache_access; DROP TABLE cache_settings; DROP TRIGGER stop_sent_draft_sync; DROP TRIGGER track_draft_scan_account; DROP TABLE draft_conflicts; DROP TABLE draft_scan_failures; DROP TABLE draft_scans; DROP TRIGGER track_server_draft_insert; DROP TRIGGER track_server_draft_update; DROP TABLE draft_uploads; DROP TABLE draft_sync; DROP TABLE server_draft_sources; DROP TABLE server_draft_folders; DROP TABLE part_resources; DROP TABLE message_structures; DROP VIEW visible_folder_messages; DROP TABLE mail_operations; DROP TRIGGER account_default_options; DROP TABLE account_options; DROP TRIGGER account_legacy_credential; DROP TABLE account_credentials; DROP TABLE mutation_results; ALTER TABLE send_tasks DROP COLUMN copy_folder; \
+        "DROP TRIGGER track_server_draft_update; CREATE TRIGGER track_server_draft_update AFTER UPDATE OF revision ON drafts BEGIN UPDATE draft_sync SET changed_at=unixepoch() WHERE account_id=NEW.account_id AND draft_id=NEW.id; END; ALTER TABLE draft_sync DROP COLUMN local_only; ALTER TABLE drafts DROP COLUMN deleted_at; ALTER TABLE accounts DROP COLUMN imap_auth; ALTER TABLE accounts DROP COLUMN smtp_auth; ALTER TABLE send_tasks DROP COLUMN save_sent_copy; DROP TABLE autostart_intent; DROP TABLE notification_candidates; DROP TABLE notification_pending; DROP TABLE notification_baselines; DROP TABLE desktop_settings; DROP VIEW protected_objects; DROP TRIGGER cache_body_insert; DROP TRIGGER cache_part_insert; DROP TABLE cache_access; DROP TABLE cache_settings; DROP TRIGGER stop_sent_draft_sync; DROP TRIGGER track_draft_scan_account; DROP TABLE draft_conflicts; DROP TABLE draft_scan_failures; DROP TABLE draft_scans; DROP TRIGGER track_server_draft_insert; DROP TRIGGER track_server_draft_update; DROP TABLE draft_uploads; DROP TABLE draft_sync; DROP TABLE server_draft_sources; DROP TABLE server_draft_folders; DROP TABLE part_resources; DROP TABLE message_structures; DROP VIEW visible_folder_messages; DROP TABLE mail_operations; DROP TRIGGER account_default_options; DROP TABLE account_options; DROP TRIGGER account_legacy_credential; DROP TABLE account_credentials; DROP TABLE mutation_results; ALTER TABLE send_tasks DROP COLUMN copy_folder; \
          ALTER TABLE send_tasks DROP COLUMN copy_uidvalidity; \
          ALTER TABLE send_tasks DROP COLUMN copy_uid; \
          ALTER TABLE folder_messages DROP COLUMN seen; ALTER TABLE folder_messages DROP COLUMN flagged; ALTER TABLE messages DROP COLUMN has_attachments; PRAGMA user_version=5;",
@@ -822,4 +837,148 @@ fn cache_clear_preserves_drafts_and_send_snapshots() {
     );
     assert!(store.task_snapshot(&account, &send).is_ok());
     assert_eq!(store.cache_status().unwrap().protected_bytes, before);
+}
+
+#[test]
+fn sent_copy_is_default_on_and_policy_is_frozen_when_confirmed() {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = Store::open(&root.path().join("data")).unwrap();
+    let account = store.create_account(&settings()).unwrap();
+    assert!(store.desktop_preferences().unwrap().save_sent_copy);
+    let with_copy = task(&mut store, &account);
+    let mut p = store.desktop_preferences().unwrap();
+    p.save_sent_copy = false;
+    store.update_desktop_preferences(&p).unwrap();
+    let without_copy = task(&mut store, &account);
+    for (id, expected) in [
+        (&without_copy, SendState::Sent),
+        (&with_copy, SendState::CopyPending),
+    ] {
+        let attempt = store.begin_smtp(&account, id).unwrap();
+        store
+            .finish_smtp(attempt, SmtpOutcome::Accepted, None)
+            .unwrap();
+        assert_eq!(store.task(&account, id).unwrap().state, expected);
+        assert!(store.begin_smtp(&account, id).is_err());
+        assert_eq!(
+            store.begin_copy(&account, id).is_ok(),
+            expected == SendState::CopyPending
+        );
+    }
+    drop(store);
+    let store = Store::open(&root.path().join("data")).unwrap();
+    assert!(!store.desktop_preferences().unwrap().save_sent_copy);
+    assert_eq!(
+        store.task(&account, &without_copy).unwrap().state,
+        SendState::Sent
+    );
+    assert_eq!(
+        store.task(&account, &with_copy).unwrap().state,
+        SendState::CopyPending
+    );
+}
+
+#[test]
+fn accepted_send_removes_only_its_draft_and_keeps_the_local_sent_snapshot() {
+    let (_root, mut store, account) = setup();
+    let id = task(&mut store, &account);
+    let sent = store.task(&account, &id).unwrap();
+    let attempt = store.begin_smtp(&account, &id).unwrap();
+    store
+        .finish_smtp(attempt, SmtpOutcome::Accepted, None)
+        .unwrap();
+
+    assert!(store.draft(&account, &sent.source_draft).is_err());
+    assert!(store.draft_sync_status(&account).unwrap().is_empty());
+    let snapshot = store.task_snapshot(&account, &id).unwrap();
+    assert_eq!(snapshot.headers.subject, "主题🙂");
+    assert_eq!(snapshot.headers.to, vec!["to@example.org"]);
+}
+
+#[test]
+fn rejected_or_uncertain_send_keeps_its_draft() {
+    let (_root, mut store, account) = setup();
+    for outcome in [SmtpOutcome::DefinitelyRejected, SmtpOutcome::Uncertain] {
+        let id = task(&mut store, &account);
+        let sent = store.task(&account, &id).unwrap();
+        let attempt = store.begin_smtp(&account, &id).unwrap();
+        store.finish_smtp(attempt, outcome, None).unwrap();
+        assert!(store.draft(&account, &sent.source_draft).is_ok());
+    }
+}
+
+#[test]
+fn schema19_upgrade_preserves_confirmed_copy_policy_and_defaults_new_tasks_on() {
+    let (root, mut store, account) = setup();
+    let old = task(&mut store, &account);
+    let attempt = store.begin_smtp(&account, &old).unwrap();
+    store
+        .finish_smtp(attempt, SmtpOutcome::Accepted, None)
+        .unwrap();
+    store.connection.execute_batch("DROP TRIGGER track_server_draft_update; CREATE TRIGGER track_server_draft_update AFTER UPDATE OF revision ON drafts BEGIN UPDATE draft_sync SET changed_at=unixepoch() WHERE account_id=NEW.account_id AND draft_id=NEW.id; END; ALTER TABLE draft_sync DROP COLUMN local_only; ALTER TABLE drafts DROP COLUMN deleted_at; ALTER TABLE accounts DROP COLUMN imap_auth; ALTER TABLE accounts DROP COLUMN smtp_auth; ALTER TABLE send_tasks DROP COLUMN save_sent_copy; ALTER TABLE desktop_settings DROP COLUMN save_sent_copy; PRAGMA user_version=19;").unwrap();
+    drop(store);
+    let mut store = Store::open(&root.path().join("qingmail")).unwrap();
+    assert!(store.desktop_preferences().unwrap().save_sent_copy);
+    let new = task(&mut store, &account);
+    assert_eq!(
+        store.task(&account, &old).unwrap().state,
+        SendState::CopyPending
+    );
+    let attempt = store.begin_smtp(&account, &new).unwrap();
+    store
+        .finish_smtp(attempt, SmtpOutcome::Accepted, None)
+        .unwrap();
+    assert_eq!(
+        store.task(&account, &new).unwrap().state,
+        SendState::CopyPending
+    );
+    assert!(
+        std::fs::read_dir(root.path().join("qingmail"))
+            .unwrap()
+            .any(|p| p
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("migration-v19-"))
+    );
+}
+
+#[test]
+fn schema22_upgrade_enables_sent_copy_without_changing_confirmed_tasks() {
+    let (root, mut store, account) = setup();
+    let mut p = store.desktop_preferences().unwrap();
+    p.save_sent_copy = false;
+    store.update_desktop_preferences(&p).unwrap();
+    let old = task(&mut store, &account);
+    let attempt = store.begin_smtp(&account, &old).unwrap();
+    store
+        .finish_smtp(attempt, SmtpOutcome::Accepted, None)
+        .unwrap();
+    let revision = store.desktop_preferences().unwrap().revision;
+    store
+        .connection
+        .pragma_update(None, "user_version", 22)
+        .unwrap();
+    drop(store);
+    let mut store = Store::open(&root.path().join("qingmail")).unwrap();
+    assert!(store.desktop_preferences().unwrap().save_sent_copy);
+    assert_eq!(store.desktop_preferences().unwrap().revision, revision + 1);
+    let new = task(&mut store, &account);
+    assert_eq!(store.task(&account, &old).unwrap().state, SendState::Sent);
+    assert!(store.begin_smtp(&account, &old).is_err());
+    let attempt = store.begin_smtp(&account, &new).unwrap();
+    store
+        .finish_smtp(attempt, SmtpOutcome::Accepted, None)
+        .unwrap();
+    assert_eq!(
+        store.task(&account, &new).unwrap().state,
+        SendState::CopyPending
+    );
+    assert!(store.begin_smtp(&account, &new).is_err());
+    let mut p = store.desktop_preferences().unwrap();
+    p.save_sent_copy = false;
+    store.update_desktop_preferences(&p).unwrap();
+    drop(store);
+    let store = Store::open(&root.path().join("qingmail")).unwrap();
+    assert!(!store.desktop_preferences().unwrap().save_sent_copy);
 }

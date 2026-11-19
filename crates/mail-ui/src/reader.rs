@@ -4,12 +4,12 @@ use crate::{
     ui::{icon, quiet, tool},
 };
 use gpui_kit::{
-    App, Bounds, Context, Entity, Image, ImageFormat, KeyDownEvent, Render, TitlebarOptions,
-    Window, WindowBounds, WindowOptions,
-    base::{TextSelectionLayer, TextView, TextViewState},
-    div, img,
+    App, Bounds, Context, Entity, Image, ImageFormat, ImageSource, KeyDownEvent, Render,
+    TitlebarOptions, Window, WindowBounds, WindowOptions,
+    base::{TextSelectionLayer, TextView, TextViewState, TextViewStyle},
+    div,
     prelude::*,
-    px, size,
+    px, relative, rems, size,
 };
 use gpui_kit_material::{prelude::*, theme};
 use mail_content::{CopyStore, MailContent};
@@ -114,6 +114,14 @@ pub(super) fn open_content(
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RemoteImageState {
+    Idle,
+    Loading,
+    Incomplete,
+    Complete,
+}
+
 pub(super) struct Reader {
     external: bool,
     embedded: bool,
@@ -125,6 +133,7 @@ pub(super) struct Reader {
     plain: bool,
     font_size: f32,
     busy: bool,
+    remote_state: RemoteImageState,
     status: String,
     images: Vec<Arc<Image>>,
     active_downloads: std::collections::HashSet<String>,
@@ -143,7 +152,12 @@ impl Reader {
         account: Option<(AccountId, String)>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let text = cx.new(|cx| TextViewState::html(&content.document.native_html(), cx));
+        let text = cx.new(|cx| {
+            TextViewState::html(
+                &content.document.native_html_with_images(&content.images),
+                cx,
+            )
+        });
         let mut this = Self {
             active_downloads: Default::default(),
             download_cancel: Default::default(),
@@ -158,8 +172,9 @@ impl Reader {
             plain: false,
             font_size: crate::settings::prefs(cx).reader_font,
             busy: false,
+            remote_state: RemoteImageState::Idle,
             status: if external {
-                "已打开缓存邮件 · 简化阅读 · 远程图片默认阻止".into()
+                "已打开缓存邮件 · 简化阅读".into()
             } else {
                 "合成邮件 · 不连接真实邮箱".into()
             },
@@ -203,7 +218,9 @@ impl Reader {
         let html = if self.plain {
             mail_content::Document::from_plain(&self.content.plain).native_html()
         } else {
-            self.content.document.native_html()
+            self.content
+                .document
+                .native_html_with_images(&self.content.images)
         };
         self.text.update(cx, |text, cx| text.set_text(&html, cx));
         self.images = self
@@ -232,6 +249,7 @@ impl Reader {
                 this.busy = false;
                 match result {
                     Ok(content) => {
+                        this.remote_state = RemoteImageState::Idle;
                         this.content = content;
                         this.plain = false;
                         this.status = "合成邮件已解析，远程资源默认阻止".into();
@@ -293,12 +311,37 @@ impl Reader {
         .detach();
     }
 
+    fn schedule_remote_images(&mut self, cx: &mut Context<Self>) {
+        if !should_auto_load_images(
+            self.external,
+            crate::settings::prefs(cx).auto_load_images,
+            !self.content.remote_images.is_empty(),
+            self.busy,
+            self.remote_state,
+        ) {
+            return;
+        }
+        // Defer until construction/render completes; never start a second load on redraw.
+        self.remote_state = RemoteImageState::Loading;
+        let entity = cx.entity().downgrade();
+        cx.defer(move |cx| {
+            let _ = entity.update(cx, |this, cx| {
+                if !crate::settings::prefs(cx).auto_load_images || this.busy {
+                    this.remote_state = RemoteImageState::Idle;
+                    return;
+                }
+                this.load_remote(cx);
+            });
+        });
+    }
+
     fn load_remote(&mut self, cx: &mut Context<Self>) {
         if self.busy {
             return;
         }
         self.busy = true;
-        self.status = "仅为当前邮件加载远程图片…".into();
+        self.remote_state = RemoteImageState::Loading;
+        self.status = "正在加载当前邮件的远程图片…".into();
         cx.notify();
         let mut content = self.content.clone();
         let client = crate::lifecycle::storage(cx).ipc_client();
@@ -325,9 +368,17 @@ impl Reader {
                 this.content = content;
                 this.status = match result {
                     Ok(count) => {
+                        this.remote_state = if this.content.remote_images.is_empty() {
+                            RemoteImageState::Complete
+                        } else {
+                            RemoteImageState::Incomplete
+                        };
                         format!("已校验并加载 {count} 张图片；本地/私有网络和主动资源继续阻止")
                     }
-                    Err(error) => format!("加载失败：{error}"),
+                    Err(error) => {
+                        this.remote_state = RemoteImageState::Incomplete;
+                        format!("加载失败：{error}")
+                    }
                 };
                 this.refresh_text(cx);
             });
@@ -571,6 +622,7 @@ impl Reader {
 
 impl Render for Reader {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.schedule_remote_images(cx);
         let mut replies = div().flex().flex_wrap().gap_2();
         if self.account.is_some() && !self.embedded {
             for (id, label, symbol, mode) in [
@@ -757,31 +809,40 @@ impl Render for Reader {
                         }),
                 )
                 .child(toolbar)
-                .when(!self.content.remote_images.is_empty(), |body| {
-                    body.child(
-                        div()
-                            .px_3()
-                            .py_2()
-                            .rounded_lg()
-                            .bg(theme::color(ColorRole::TERTIARY_CONTAINER))
-                            .flex()
-                            .flex_wrap()
-                            .items_center()
-                            .gap_2()
-                            .child(icon("shield"))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .text_sm()
-                                    .child("已阻止远程图片，加载可能暴露阅读行为"),
-                            )
-                            .child(
-                                quiet("remote-consent", "仅此邮件加载")
-                                    .disabled(self.busy)
-                                    .on_click(cx.listener(|this, _, _, cx| this.load_remote(cx))),
-                            ),
-                    )
-                })
+                .when(
+                    !self.content.remote_images.is_empty()
+                        && self.remote_state != RemoteImageState::Complete,
+                    |body| {
+                        body.child(
+                            div()
+                                .px_3()
+                                .py_2()
+                                .rounded_lg()
+                                .bg(theme::color(ColorRole::TERTIARY_CONTAINER))
+                                .flex()
+                                .flex_wrap()
+                                .items_center()
+                                .gap_2()
+                                .child(icon("shield"))
+                                .child(div().flex_1().text_sm().child(
+                                    if self.remote_state == RemoteImageState::Loading {
+                                        "正在加载远程图片…"
+                                    } else if self.remote_state == RemoteImageState::Incomplete {
+                                        "部分远程图片未能加载，可以重试"
+                                    } else {
+                                        "远程图片尚未加载，加载可能暴露阅读行为"
+                                    },
+                                ))
+                                .child(
+                                    quiet("remote-consent", "仅此邮件加载")
+                                        .disabled(self.busy)
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| this.load_remote(cx)),
+                                        ),
+                                ),
+                        )
+                    },
+                )
                 .children(self.content.warnings.iter().map(|warning| {
                     div()
                         .text_color(theme::color(ColorRole::ERROR))
@@ -789,22 +850,21 @@ impl Render for Reader {
                 }))
                 .child(
                     div()
+                        .w_full()
+                        .min_w_0()
+                        .max_w(px(760.))
                         .text_size(px(self.font_size))
-                        .child(TextView::new(&self.text).selectable(true)),
+                        .line_height(relative(1.7))
+                        .child(
+                            TextView::new(&self.text)
+                                .selectable(true)
+                                .style(reader_style(cx))
+                                .image_source({
+                                    let images = self.images.clone();
+                                    move |uri| inline_image_source(uri.as_ref(), &images)
+                                }),
+                        ),
                 )
-                .when(!self.plain && !self.images.is_empty(), |body| {
-                    body.child(
-                        div()
-                            .child("已校验的内嵌图片（简化视图集中显示）")
-                            .children(self.images.iter().zip(&self.content.images).map(
-                                |(image, resource)| {
-                                    img(image.clone())
-                                        .w(px(resource.width.min(600) as f32))
-                                        .h(px(resource.height.min(400) as f32))
-                                },
-                            )),
-                    )
-                })
                 .children(self.content.attachments.iter().enumerate().map(
                     |(index, attachment)| {
                         div()
@@ -896,6 +956,28 @@ impl Render for Reader {
     }
 }
 
+fn reader_style(cx: &App) -> TextViewStyle {
+    TextViewStyle::default()
+        .with_foreground(theme::color(ColorRole::ON_SURFACE).into())
+        .with_muted_foreground(theme::color(ColorRole::ON_SURFACE_VARIANT).into())
+        .with_link(theme::color(ColorRole::PRIMARY).into())
+        .with_selection(theme::color(ColorRole::PRIMARY_CONTAINER).into())
+        .with_code_background(theme::color(ColorRole::SURFACE_CONTAINER).into())
+        .with_border(theme::color(ColorRole::OUTLINE_VARIANT).into())
+        .with_dark(crate::settings::prefs(cx).dark)
+        .with_paragraph_gap(rems(0.65))
+}
+
+fn inline_image_source(source: &str, images: &[Arc<Image>]) -> ImageSource {
+    source
+        .strip_prefix("qingmail-image://")
+        .and_then(|index| index.parse::<usize>().ok())
+        .and_then(|index| images.get(index))
+        .map(|image| ImageSource::Image(image.clone()))
+        // Never fall back to URLs or filesystem paths supplied by message content.
+        .unwrap_or_else(|| ImageSource::Custom(Arc::new(|_, _| None)))
+}
+
 fn cache_parent() -> std::io::Result<PathBuf> {
     if let Some(root) = std::env::var_os("QINGMAIL_P0_DRAFT_ROOT") {
         let path = PathBuf::from(root).join("reading-cache");
@@ -975,4 +1057,60 @@ fn save_resource(
     drop(file);
     let _ = fs::remove_file(temporary);
     result
+}
+
+/// Synthetic security samples never contact remote servers automatically.
+fn should_auto_load_images(
+    external: bool,
+    enabled: bool,
+    has_remote: bool,
+    busy: bool,
+    state: RemoteImageState,
+) -> bool {
+    external && enabled && has_remote && !busy && state == RemoteImageState::Idle
+}
+
+#[cfg(test)]
+mod image_policy_tests {
+    use super::{
+        Arc, Image, ImageFormat, ImageSource, RemoteImageState::*, inline_image_source,
+        should_auto_load_images,
+    };
+
+    #[test]
+    fn reader_image_resolver_never_falls_back_to_network_or_files() {
+        let image = Arc::new(Image::from_bytes(ImageFormat::Png, Vec::new()));
+        let images = vec![image.clone()];
+        let ImageSource::Image(resolved) = inline_image_source("qingmail-image://0", &images)
+        else {
+            panic!("validated index must resolve")
+        };
+        assert!(Arc::ptr_eq(&image, &resolved));
+        for source in [
+            "https://example.invalid/tracker",
+            "file:///etc/passwd",
+            "data:image/svg+xml,<svg/>",
+            "qingmail-image://99",
+            "qingmail-image://../0",
+        ] {
+            assert!(matches!(
+                inline_image_source(source, &images),
+                ImageSource::Custom(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn automatic_images_respect_preference_and_only_start_once() {
+        assert!(should_auto_load_images(true, true, true, false, Idle));
+        assert!(!should_auto_load_images(true, false, true, false, Idle));
+        assert!(!should_auto_load_images(true, true, false, false, Idle));
+        assert!(!should_auto_load_images(true, true, true, true, Idle));
+        assert!(!should_auto_load_images(true, true, true, false, Loading));
+        assert!(!should_auto_load_images(false, true, true, false, Idle));
+        assert!(!should_auto_load_images(
+            true, true, true, false, Incomplete
+        ));
+        assert!(!should_auto_load_images(true, true, true, false, Complete));
+    }
 }

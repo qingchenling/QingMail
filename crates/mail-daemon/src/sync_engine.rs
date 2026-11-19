@@ -198,10 +198,15 @@ impl SyncEngine {
             account_states,
         }
     }
-    pub fn stop(&mut self) {
+    pub(crate) fn request_stop(&self) {
         self.stop.store(true, Ordering::Release);
-        if let Some(t) = self.thread.take() {
+        if let Some(t) = &self.thread {
             t.thread().unpark();
+        }
+    }
+    pub fn stop(&mut self) {
+        self.request_stop();
+        if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
     }
@@ -280,7 +285,7 @@ fn run_account(
             let credentials = SystemVault
                 .load(&access.credential_key)
                 .map_err(|e| e.to_string())?;
-            mail_service::idle::watch(&access.settings.imap, &credentials.imap)
+            mail_service::idle::watch_with_cancel(&access.settings.imap, &credentials.imap, &stop)
                 .map_err(|e| e.to_string())
         },
     );

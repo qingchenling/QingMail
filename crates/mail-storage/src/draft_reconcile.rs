@@ -130,6 +130,10 @@ impl Store {
         if reason.len() > 2048 {
             return Err(Error::Invalid("冲突提示过长"));
         }
+        let withdrawn: bool = self.connection.query_row("SELECT EXISTS(SELECT 1 FROM drafts d JOIN draft_sync s ON s.account_id=d.account_id AND s.draft_id=d.id WHERE d.account_id=?1 AND d.id=?2 AND (d.deleted_at IS NOT NULL OR s.local_only=1))",params![account.0,draft.0],|r|r.get(0))?;
+        if withdrawn {
+            return Ok(());
+        }
         if let Some(source) = remote {
             self.server_draft_source(account, source)?;
         }
@@ -159,7 +163,9 @@ impl Store {
         {
             tx.execute("INSERT INTO draft_conflicts(id,account_id,draft_id,base_source,remote_source,reason) VALUES (?1,?2,?3,?4,?5,?6)",params![new_id()?,account.0,draft.0,base,remote,reason])?;
         }
-        tx.execute("UPDATE draft_sync SET state='conflict',detail=?1,attempted_at=unixepoch() WHERE account_id=?2 AND draft_id=?3",params![reason,account.0,draft.0])?;
+        // Recording an unresolved old upload must not reactivate a sent draft,
+        // including if the process exits before its caller finishes handling it.
+        tx.execute("UPDATE draft_sync SET state=CASE WHEN state='stopped' THEN state ELSE 'conflict' END,detail=?1,attempted_at=unixepoch() WHERE account_id=?2 AND draft_id=?3",params![reason,account.0,draft.0])?;
         tx.commit()?;
         Ok(())
     }
@@ -189,10 +195,8 @@ impl Store {
             return Ok(());
         }
         let unknown: bool=self.connection.query_row("SELECT EXISTS(SELECT 1 FROM draft_uploads WHERE account_id=?1 AND draft_id=?2 AND state IN ('in_flight','uncertain'))",params![account.0,draft],|r|r.get(0))?;
-        if unknown && !matches!(resolution, DraftResolution::KeepBoth) {
-            return Err(Error::Invalid(
-                "上传结果未查证；只能明确保留两份并另存新版本，旧上传不再自动执行",
-            ));
+        if unknown && matches!(resolution, DraftResolution::KeepRemote) {
+            return Err(Error::Invalid("上传结果尚未确认；请继续核验，或仅保留本地"));
         }
         let local = self.draft(account, &DraftId(draft.clone()))?;
         let source = remote
@@ -206,7 +210,9 @@ impl Store {
             .execute_batch("SAVEPOINT resolve_draft_conflict")?;
         let result = (|| {
             let mut copy = None;
-            if let Some(source) = &source {
+            if let Some(source) = &source
+                && !matches!(resolution, DraftResolution::KeepLocal)
+            {
                 match self.convert_server_draft_fresh(account, &source.id) {
                     Ok(d) => {
                         copy = Some(d.id);
@@ -215,20 +221,28 @@ impl Store {
                     Err(_) => (), // 两份/本地允许远端不可编辑；原始字节仍保留。
                 }
             }
-            self.connection.execute("UPDATE draft_uploads SET state='conflict',detail='操作者明确选择版本，旧准备快照保留' WHERE account_id=?1 AND draft_id=?2 AND state IN ('prepared','in_flight','uncertain')",params![account.0,draft])?;
+            if !(unknown && matches!(resolution, DraftResolution::KeepLocal)) {
+                self.connection.execute("UPDATE draft_uploads SET state='conflict',detail='操作者明确选择版本，旧准备快照保留' WHERE account_id=?1 AND draft_id=?2 AND state IN ('prepared','in_flight','uncertain')",params![account.0,draft])?;
+            }
             // 不重用同revision的旧上传ID；增加本地版本，旧快照永久保留。
-            if matches!(resolution, DraftResolution::KeepRemote) {
-                self.connection.execute("UPDATE draft_sync SET state='stopped',detail='保留本地副本；已选择远端编辑副本' WHERE account_id=?1 AND draft_id=?2",params![account.0,draft])?;
+            if unknown && matches!(resolution, DraftResolution::KeepLocal) {
+                self.connection.execute("UPDATE draft_sync SET local_only=1,state='stopped',detail='已保留本地，暂停云端同步；旧上传证据保留' WHERE account_id=?1 AND draft_id=?2",params![account.0,draft])?;
+            } else if matches!(resolution, DraftResolution::KeepRemote) {
+                self.connection.execute("UPDATE draft_sync SET local_only=1,state='stopped',detail='保留本地副本；已选择远端编辑副本' WHERE account_id=?1 AND draft_id=?2",params![account.0,draft])?;
                 self.select_editor_draft(account, copy.as_ref().ok_or(Error::Conflict)?)?;
             } else {
                 let saved = self.save_draft(account, &local.id, local.revision, &local.document)?;
-                self.connection.execute("UPDATE draft_sync SET base_source=?1,base_revision=0,state='pending',lineage=?4,detail='已明确保留本地，将上传新版本；远端原件保留',attempted_at=0,changed_at=unixepoch()-5 WHERE account_id=?2 AND draft_id=?3",params![source.as_ref().map(|s|&s.id),account.0,saved.id.0,new_id()?])?;
+                if matches!(resolution, DraftResolution::KeepLocal)
+                    && let Some(source) = &source
+                    && source.converted.is_none()
+                {
+                    // The explicitly replaced version belongs to this draft.
+                    // Retain its original locally, but allow cleanup only after
+                    // the replacement APPEND has been verified.
+                    self.connection.execute("UPDATE server_draft_sources SET converted=?1 WHERE id=?2 AND account_id=?3 AND converted IS NULL",params![local.id.0,source.id,account.0])?;
+                }
+                self.connection.execute("UPDATE draft_sync SET local_only=0,base_source=?1,base_revision=0,state='pending',lineage=?4,detail='已明确保留本地，将上传新版本；远端原件保留',attempted_at=0,changed_at=unixepoch()-5 WHERE account_id=?2 AND draft_id=?3",params![source.as_ref().map(|s|&s.id),account.0,saved.id.0,new_id()?])?;
                 self.select_editor_draft(account, &saved.id)?;
-            }
-            if matches!(resolution, DraftResolution::KeepLocal)
-                && let Some(remote) = &copy
-            {
-                self.connection.execute("UPDATE draft_sync SET state='stopped',detail='选择本地版本；远端转换副本与原件仍保留' WHERE account_id=?1 AND draft_id=?2",params![account.0,remote.0])?;
             }
             self.connection.execute(
                 "UPDATE draft_conflicts SET state=?1,remote_copy=?2 WHERE id=?3 AND account_id=?4",
@@ -267,6 +281,56 @@ impl Store {
         }
         let raw = self.server_draft_original(&source.account, &source.id)?;
         let identity = mail_content::server_draft_identity(&raw);
+        if let Some((_, value)) = &identity {
+            // A lineage associates versions; only the frozen MIME identifies our
+            // unchanged upload. A different body with the same lineage is a real
+            // remote edit, not a duplicate to suppress.
+            let uploads: Vec<(String, String)> = self.connection.prepare("SELECT draft_id,raw_id FROM draft_uploads WHERE account_id=?1 AND remote_name=?2 AND state IN ('in_flight','uncertain','conflict')")?.query_map(params![source.account.0,source.folder],|r|Ok((r.get(0)?,r.get(1)?)))?.collect::<std::result::Result<_,_>>()?;
+            let mut owners = std::collections::BTreeSet::new();
+            for (draft, object) in uploads {
+                let frozen = objects::read(
+                    &self.objects,
+                    &self.connection,
+                    &source.account,
+                    &object,
+                    "attachment",
+                    mail_content::MAX_SERVER_DRAFT_BYTES as u64,
+                )?;
+                if mail_content::server_draft_identity(&frozen)
+                    .as_ref()
+                    .map(|(_, v)| v)
+                    != Some(value)
+                {
+                    continue;
+                }
+                if mail_content::same_server_draft_content(&frozen, &raw) {
+                    return Ok(());
+                }
+                owners.insert(draft);
+            }
+            if !owners.is_empty() {
+                for draft in owners {
+                    let branch: Option<String> = self.connection.query_row(
+                        "SELECT lineage FROM draft_sync WHERE account_id=?1 AND draft_id=?2",
+                        params![source.account.0, draft],
+                        |r| r.get(0),
+                    )?;
+                    if branch.as_ref().is_none_or(|b| b == value) {
+                        self.record_draft_conflict(
+                            &source.account,
+                            &DraftId(draft),
+                            Some(&source.id),
+                            "上传核验期间云端内容发生变化；两份内容均已保留",
+                        )?;
+                    }
+                }
+                return Ok(());
+            }
+            let withdrawn: bool = self.connection.query_row("SELECT EXISTS(SELECT 1 FROM draft_sync s JOIN drafts d ON d.account_id=s.account_id AND d.id=s.draft_id WHERE s.account_id=?1 AND COALESCE(s.lineage,s.draft_id)=?2 AND (d.deleted_at IS NOT NULL OR s.local_only=1))",params![source.account.0,value],|r|r.get(0))?;
+            if withdrawn {
+                return Ok(());
+            }
+        }
         let mut q=self.connection.prepare("SELECT d.id,s.base_source,s.state,s.lineage FROM draft_sync s JOIN drafts d ON d.id=s.draft_id AND d.account_id=s.account_id WHERE s.account_id=?1 AND s.base_source IS NOT NULL AND s.state!='stopped'")?;
         let links = q
             .query_map([&source.account.0], |r| {
@@ -343,6 +407,125 @@ impl Store {
 mod tests {
     use super::*;
     use crate::draft_refresh::tests::{linked, raw, setup};
+    #[test]
+    fn choosing_local_does_not_create_an_editor_copy_and_cleans_only_after_verified_replacement() {
+        let root = tempfile::tempdir().unwrap();
+        let mut s = Store::open(&root.path().join("data")).unwrap();
+        let a = setup(&mut s);
+        let base = linked(&mut s, &a);
+        let mut document = base.draft.document.clone();
+        document.body = mail_content::draft::Draft::plain("local edit").unwrap();
+        let d = s
+            .save_draft(&a, &base.draft.id, base.draft.revision, &document)
+            .unwrap();
+        let remote = s
+            .archive_server_draft(&a, "Drafts", 42, 9, &raw("remote edit"))
+            .unwrap();
+        s.record_draft_conflict(&a, &d.id, Some(&remote.id), "both edited")
+            .unwrap();
+        let conflict = s.draft_conflicts(Some(&a)).unwrap().remove(0);
+        s.resolve_draft_conflict(&a, &conflict.id, DraftResolution::KeepLocal)
+            .unwrap();
+        assert_eq!(s.draft_ids(&a).unwrap(), vec![d.id.clone()]);
+        assert_eq!(s.draft(&a, &d.id).unwrap().document, document);
+        assert!(s.operations(Some(&a)).unwrap().is_empty());
+        let mut folders = s.remote_folders(&a).unwrap();
+        folders.push(mail_core::RemoteFolder {
+            name: "Trash".into(),
+            display_name: "Trash".into(),
+            delimiter: None,
+            selectable: true,
+        });
+        s.replace_remote_folders(&a, &folders, 0).unwrap();
+        let d = s.draft(&a, &d.id).unwrap();
+        let upload = s
+            .prepare_draft_upload(&d, "Drafts", Some(42), &"d".repeat(32), &raw("local edit"))
+            .unwrap();
+        s.begin_draft_upload(&a, &upload.id).unwrap();
+        s.complete_draft_upload(&upload, 42, 11, Some("Trash"))
+            .unwrap();
+        let mut uids: Vec<_> = s
+            .operations(Some(&a))
+            .unwrap()
+            .iter()
+            .map(|o| o.location.uid)
+            .collect();
+        uids.sort();
+        assert_eq!(uids, vec![7, 9]);
+        assert_eq!(
+            s.server_draft_original(&a, &remote.id).unwrap(),
+            raw("remote edit")
+        );
+        assert_eq!(s.draft_ids(&a).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn scanning_own_unknown_upload_does_not_import_a_duplicate_or_revive_a_deletion() {
+        for persisted_lineage in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let path = root.path().join("data");
+            let mut s = Store::open(&path).unwrap();
+            let a = setup(&mut s);
+            let b = setup(&mut s);
+            let original = linked(&mut s, &a);
+            let d = s
+                .save_draft(
+                    &a,
+                    &original.draft.id,
+                    original.draft.revision,
+                    &original.draft.document,
+                )
+                .unwrap();
+            let bytes = [
+                b"X-QingMail-Draft: <fixture@example.invalid>\r\n".as_slice(),
+                &raw("own upload"),
+            ]
+            .concat();
+            let u = s
+                .prepare_draft_upload(&d, "Drafts", Some(42), &"a".repeat(32), &bytes)
+                .unwrap();
+            s.begin_draft_upload(&a, &u.id).unwrap();
+            if persisted_lineage {
+                s.connection.execute("UPDATE draft_sync SET lineage='<fixture@example.invalid>' WHERE account_id=?1", [&a.0]).unwrap();
+            }
+            let traced = [b"X-QQ-mid: fixture\r\n".as_slice(), &bytes].concat();
+            let source = s
+                .archive_server_draft(&a, "Drafts", 42, 9, &traced)
+                .unwrap();
+            s.reconcile_discovered_draft(&source, false).unwrap();
+            assert_eq!(s.draft_ids(&a).unwrap(), vec![d.id.clone()]);
+            assert!(s.draft_conflicts(Some(&a)).unwrap().is_empty());
+            let changed = [
+                b"X-QingMail-Draft: <fixture@example.invalid>\r\n".as_slice(),
+                &raw("external edit during upload"),
+            ]
+            .concat();
+            let changed = s
+                .archive_server_draft(&a, "Drafts", 42, 10, &changed)
+                .unwrap();
+            s.reconcile_discovered_draft(&changed, false).unwrap();
+            assert_eq!(
+                s.draft_conflicts(Some(&a)).unwrap()[0].original.as_ref(),
+                Some(&changed.id)
+            );
+            assert_eq!(s.draft_ids(&a).unwrap(), vec![d.id.clone()]);
+            // An identical identity in a different account has no ownership here.
+            let other = s.archive_server_draft(&b, "Drafts", 42, 9, &bytes).unwrap();
+            s.reconcile_discovered_draft(&other, false).unwrap();
+            assert_eq!(s.draft_ids(&b).unwrap().len(), 1);
+            s.delete_draft(&a, &d.id, d.revision, None).unwrap();
+            drop(s);
+            let mut s = Store::open(&path).unwrap();
+            let source = s
+                .archive_server_draft(&a, "Drafts", 42, 11, &bytes)
+                .unwrap();
+            s.reconcile_discovered_draft(&source, false).unwrap();
+            assert!(s.draft_ids(&a).unwrap().is_empty());
+            assert_eq!(s.server_draft_original(&a, &source.id).unwrap(), bytes);
+            assert!(s.operations(Some(&a)).unwrap().is_empty());
+        }
+    }
+
     #[test]
     fn alternating_remote_uid_updates_and_concurrent_edits_keep_both_across_restart() {
         let root = tempfile::tempdir().unwrap();
@@ -452,6 +635,14 @@ mod tests {
         let mut s = Store::open(&root.path().join("data")).unwrap();
         let a = setup(&mut s);
         let old = linked(&mut s, &a);
+        let mut folders = s.remote_folders(&a).unwrap();
+        folders.push(mail_core::RemoteFolder {
+            name: "Trash".into(),
+            display_name: "Trash".into(),
+            delimiter: None,
+            selectable: true,
+        });
+        s.replace_remote_folders(&a, &folders, 0).unwrap();
         let raw=b"Message-ID: <fixture@example.invalid>\r\nSubject: external update\r\nBcc: hidden@example.invalid\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nexternal plain";
         let source = s.archive_server_draft(&a, "Drafts", 42, 9, raw).unwrap();
         s.reconcile_discovered_draft(&source, false).unwrap();
@@ -497,7 +688,7 @@ mod tests {
             .unwrap();
         let conflict = s.draft_conflicts(Some(&a)).unwrap().remove(0);
         assert!(
-            s.resolve_draft_conflict(&a, &conflict.id, DraftResolution::KeepLocal)
+            s.resolve_draft_conflict(&a, &conflict.id, DraftResolution::KeepRemote)
                 .is_err()
         );
         s.resolve_draft_conflict(&a, &conflict.id, DraftResolution::KeepBoth)
@@ -568,7 +759,7 @@ mod tests {
         s.fail_draft_sync(&a, &old.draft.id, "conflict", "old conflict")
             .unwrap();
         let version = s.account_version(&a).unwrap();
-        s.connection.execute_batch("DROP TABLE autostart_intent; DROP TABLE notification_candidates; DROP TABLE notification_pending; DROP TABLE notification_baselines; DROP TABLE desktop_settings; DROP VIEW protected_objects; DROP TRIGGER cache_body_insert; DROP TRIGGER cache_part_insert; DROP TABLE cache_access; DROP TABLE cache_settings; DROP TRIGGER stop_sent_draft_sync; DROP TRIGGER track_draft_scan_account; DROP TABLE draft_conflicts; DROP TABLE draft_scan_failures; DROP TABLE draft_scans; ALTER TABLE draft_sync DROP COLUMN lineage; PRAGMA user_version=15;").unwrap();
+        s.connection.execute_batch("DROP TRIGGER track_server_draft_update; CREATE TRIGGER track_server_draft_update AFTER UPDATE OF revision ON drafts BEGIN UPDATE draft_sync SET changed_at=unixepoch() WHERE account_id=NEW.account_id AND draft_id=NEW.id; END; ALTER TABLE draft_sync DROP COLUMN local_only; ALTER TABLE drafts DROP COLUMN deleted_at; ALTER TABLE accounts DROP COLUMN imap_auth; ALTER TABLE accounts DROP COLUMN smtp_auth; ALTER TABLE send_tasks DROP COLUMN save_sent_copy; DROP TABLE autostart_intent; DROP TABLE notification_candidates; DROP TABLE notification_pending; DROP TABLE notification_baselines; DROP TABLE desktop_settings; DROP VIEW protected_objects; DROP TRIGGER cache_body_insert; DROP TRIGGER cache_part_insert; DROP TABLE cache_access; DROP TABLE cache_settings; DROP TRIGGER stop_sent_draft_sync; DROP TRIGGER track_draft_scan_account; DROP TABLE draft_conflicts; DROP TABLE draft_scan_failures; DROP TABLE draft_scans; ALTER TABLE draft_sync DROP COLUMN lineage; PRAGMA user_version=15;").unwrap();
         drop(s);
         let s = Store::open(&path).unwrap();
         assert_eq!(s.draft(&a, &old.draft.id).unwrap(), old.draft);
@@ -603,7 +794,7 @@ mod tests {
             .prepare_draft_upload(&draft, "Drafts", Some(42), &id, &raw)
             .unwrap();
         s.begin_draft_upload(&a, &id).unwrap();
-        s.complete_draft_upload(&upload, 42, 2).unwrap();
+        s.complete_draft_upload(&upload, 42, 2, None).unwrap();
         assert_eq!(s.server_draft_sources(&a).unwrap().len(), 2);
         s.remove_account(&a).unwrap();
     }
@@ -614,11 +805,30 @@ mod lifecycle_tests {
     use super::*;
     use crate::draft_refresh::tests::{linked, setup};
     #[test]
-    fn smtp_acceptance_stops_draft_sync_and_new_edit_can_create_a_new_version() {
+    fn smtp_acceptance_removes_sent_revision_and_stops_draft_sync() {
         let root = tempfile::tempdir().unwrap();
         let mut s = Store::open(&root.path().join("data")).unwrap();
         let a = setup(&mut s);
         let old = linked(&mut s, &a);
+        s.replace_remote_folders(
+            &a,
+            &[
+                mail_core::RemoteFolder {
+                    name: "Drafts".into(),
+                    display_name: "Drafts".into(),
+                    delimiter: None,
+                    selectable: true,
+                },
+                mail_core::RemoteFolder {
+                    name: "Trash".into(),
+                    display_name: "Trash".into(),
+                    delimiter: None,
+                    selectable: true,
+                },
+            ],
+            0,
+        )
+        .unwrap();
         let mut doc = old.draft.document.clone();
         doc.headers.to = vec!["to@example.invalid".into()];
         let draft = s
@@ -628,21 +838,18 @@ mod lifecycle_tests {
             .unwrap();
         let task = s.enqueue_draft(&a, &draft.id, draft.revision).unwrap();
         let attempt = s.begin_smtp(&a, &task).unwrap();
-        s.finish_smtp(attempt, mail_core::SmtpOutcome::Accepted)
+        s.finish_smtp(attempt, mail_core::SmtpOutcome::Accepted, Some("Trash"))
             .unwrap();
-        assert_eq!(s.draft_sync_status(&a).unwrap()[0].state, "stopped");
+        assert!(s.draft(&a, &draft.id).is_err());
+        assert!(s.draft_sync_status(&a).unwrap().is_empty());
         assert!(s.draft_conflicts(Some(&a)).unwrap().is_empty());
-        s.flush_draft_sync(&a).unwrap();
+        assert_eq!(s.operations(Some(&a)).unwrap().len(), 1);
         assert!(s.next_draft_upload().unwrap().is_none());
         assert!(s.next_draft_refresh().unwrap().is_none());
         assert_eq!(
             s.server_draft_original(&a, &old.source.id).unwrap(),
             crate::draft_refresh::tests::raw("first")
         );
-        let newer = s.save_draft(&a, &draft.id, draft.revision, &doc).unwrap();
-        assert_eq!(s.draft_sync_status(&a).unwrap()[0].state, "pending");
-        s.flush_draft_sync(&a).unwrap();
-        assert_eq!(s.next_draft_upload().unwrap().unwrap().draft, newer);
     }
     #[test]
     fn oversize_failure_does_not_starve_later_uids_and_has_visible_notice() {

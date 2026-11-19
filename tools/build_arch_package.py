@@ -36,7 +36,8 @@ def main():
     (snapshot / 'tests').mkdir()
     shutil.copytree(ROOT / 'tests/fixtures', snapshot / 'tests/fixtures')
     (snapshot / 'docs').mkdir()
-    shutil.copy2(ROOT / 'docs/发行说明.md', snapshot / 'docs/发行说明.md')
+    for name in ('发行说明.md', 'Outlook邮箱接入.md'):
+        shutil.copy2(ROOT / 'docs' / name, snapshot / 'docs' / name)
     if (ROOT / '.cargo').exists():
         shutil.copytree(ROOT / '.cargo', snapshot / '.cargo')
     files = {str(p.relative_to(snapshot)): sha256(p)

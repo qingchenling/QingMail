@@ -92,6 +92,7 @@ fn multi_account_inbox_search_read_drafts_and_options_survive_daemon_restart() {
         let mut store = mail_storage::Store::open(&root.path().join("data")).unwrap();
         for n in 0..2 {
             let server = ServerSettings {
+                authentication: Default::default(),
                 host: "example.invalid".into(),
                 port: 993,
                 username: "fixture".into(),
@@ -579,6 +580,7 @@ fn frontend_lease_events_and_save_failure_keep_daemon_alive() {
             session: first.clone(),
         })
         .unwrap();
+    let started = Instant::now();
     client.request(Command::PrepareShutdown).unwrap();
     client
         .request(Command::FinishShutdown {
@@ -587,6 +589,15 @@ fn frontend_lease_events_and_save_failure_keep_daemon_alive() {
         })
         .unwrap();
     daemon.exited();
+    eprintln!("confirmed idle daemon exit: {:?}", started.elapsed());
+    assert!(started.elapsed() < Duration::from_secs(1));
+    let mut restarted = Daemon::start(root.path());
+    let client = restarted.ready(root.path());
+    assert!(
+        matches!(client.request(Command::Drafts { account: None }).unwrap(), Reply::Drafts(d) if d.len() == 1)
+    );
+    client.request(Command::PrepareShutdown).unwrap();
+    restarted.exited();
 }
 
 #[test]
@@ -750,6 +761,7 @@ fn business_cached_reader_resource_cleanup_identity_and_removal_replay() {
     let location = {
         let mut store = mail_storage::Store::open(&root.path().join("data")).unwrap();
         let server = ServerSettings {
+            authentication: Default::default(),
             host: "example.invalid".into(),
             port: 993,
             username: "synthetic".into(),
@@ -997,6 +1009,7 @@ fn offline_operations_lost_reply_restart_overlay_and_explicit_resolution() {
     let (loc, trash) = {
         let mut store = mail_storage::Store::open(&root.path().join("data")).unwrap();
         let server = ServerSettings {
+            authentication: Default::default(),
             host: "example.invalid".into(),
             port: 993,
             username: "fixture".into(),
@@ -1132,6 +1145,7 @@ fn parts_deferred_large_attachment_offline_body_browser_and_file_resource_stream
     let (location, large) = {
         let mut store = mail_storage::Store::open(&root.path().join("data")).unwrap();
         let server = ServerSettings {
+            authentication: Default::default(),
             host: "example.invalid".into(),
             port: 993,
             username: "fixture".into(),
@@ -1308,6 +1322,7 @@ fn server_draft_original_conversion_replay_isolation_and_offline_restart() {
     let (account, other, source, second) = {
         let mut store = mail_storage::Store::open(&root.path().join("data")).unwrap();
         let server = ServerSettings {
+            authentication: Default::default(),
             host: "example.invalid".into(),
             port: 993,
             username: "fixture".into(),
@@ -1454,6 +1469,7 @@ fn draft_upload_intent_and_uncertain_status_survive_isolated_daemon_restart_with
     let (account, draft, id) = {
         let mut s = mail_storage::Store::open(&root.path().join("data")).unwrap();
         let server = ServerSettings {
+            authentication: Default::default(),
             host: "example.invalid".into(),
             port: 993,
             username: "fixture".into(),
@@ -1530,6 +1546,40 @@ fn draft_upload_intent_and_uncertain_status_survive_isolated_daemon_restart_with
     let intent = s.draft_upload(&account, &id).unwrap();
     assert!(intent.probe_only);
     assert_eq!(intent.raw, b"Subject: fixed upload\r\n\r\nfrozen");
+    drop(s);
+    let deletion = Request::new(
+        "f".repeat(32),
+        Command::DiscardDraft {
+            account: account.clone(),
+            draft: draft.id.clone(),
+            revision: draft.revision,
+        },
+    );
+    // Deletion is visible immediately, even though the unknown APPEND still
+    // needs verification. Replaying the same request after restart is harmless.
+    for _ in 0..2 {
+        let mut daemon = Daemon::start(root.path());
+        let client = daemon.ready(root.path());
+        assert!(matches!(
+            client.call(&deletion).unwrap(),
+            Reply::Acknowledged
+        ));
+        assert!(
+            matches!(client.request(Command::Drafts { account: Some(account.clone()) }).unwrap(), Reply::Drafts(items) if items.is_empty())
+        );
+        assert!(
+            matches!(client.request(Command::DraftSyncStatus { account: account.clone() }).unwrap(), Reply::DraftSyncStatus(items) if items.len()==1 && items[0].state=="deleting")
+        );
+        assert!(
+            matches!(client.request(Command::Tasks { account: account.clone() }).unwrap(), Reply::Tasks(items) if items.is_empty())
+        );
+        client.request(Command::PrepareShutdown).unwrap();
+        daemon.exited();
+    }
+    let mut s = mail_storage::Store::open(&root.path().join("data")).unwrap();
+    let candidate = s.next_draft_upload().unwrap().unwrap();
+    assert!(candidate.deleting);
+    assert!(candidate.previous.unwrap().probe_only);
 }
 
 #[test]
@@ -1539,6 +1589,7 @@ fn draft_conflict_choice_replay_and_restart_preserve_two_versions_without_smtp()
     let (account, other, draft, remote) = {
         let mut s = mail_storage::Store::open(&root.path().join("data")).unwrap();
         let server = ServerSettings {
+            authentication: Default::default(),
             host: "example.invalid".into(),
             port: 993,
             username: "fixture".into(),

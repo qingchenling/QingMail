@@ -1,4 +1,4 @@
-//! QingMail IPC v2：有界 NDJSON 控制帧；资源数据通过单独连接的二进制帧传输。
+//! QingMail IPC v4：有界 NDJSON 控制帧；资源数据通过单独连接的二进制帧传输。
 mod business;
 mod desktop;
 pub use desktop::*;
@@ -12,7 +12,7 @@ use mail_core::*;
 use serde::{Deserialize, Serialize};
 pub use wire::*;
 
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 4;
 pub const MAX_STORAGE_PAYLOAD: u64 = 16 * 1024 * 1024;
 pub const MAX_CONTROL_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_CHUNK_BYTES: u32 = 64 * 1024;
@@ -116,6 +116,16 @@ pub enum Command {
     },
     AccountOptions,
     Accounts,
+    BeginMicrosoftLogin {
+        address: String,
+        authentication: Authentication,
+    },
+    MicrosoftLoginStatus {
+        session: String,
+    },
+    CancelMicrosoftLogin {
+        session: String,
+    },
     CheckAccount {
         account: Option<AccountId>,
         settings: AccountSettings,
@@ -227,6 +237,7 @@ pub enum Command {
     SelectedDraftBody {
         account: Option<AccountId>,
     },
+    /// v3: user deletion removes the editor draft and durably queues known remote versions for Trash.
     DiscardDraft {
         account: AccountId,
         draft: DraftId,
@@ -384,6 +395,23 @@ impl Command {
             {
                 Err(ProtocolError::Invalid)
             }
+            Self::BeginMicrosoftLogin {
+                address,
+                authentication,
+            } if address.starts_with('@')
+                || address.ends_with('@')
+                || address.len() > 320
+                || address.matches('@').count() != 1
+                || address.chars().any(|c| c.is_control() || c.is_whitespace())
+                || *authentication == Authentication::Password =>
+            {
+                Err(ProtocolError::Invalid)
+            }
+            Self::MicrosoftLoginStatus { session } | Self::CancelMicrosoftLogin { session }
+                if !valid_id(session) =>
+            {
+                Err(ProtocolError::Invalid)
+            }
             Self::CheckAccount { credential_ref, .. } if !valid_id(credential_ref) => {
                 Err(ProtocolError::Invalid)
             }
@@ -466,6 +494,11 @@ pub enum MailOperation {
     Move {
         destination: FolderId,
     },
+    /// Frozen remote Trash name; does not require a locally synchronized target epoch.
+    Trash {
+        destination: String,
+    },
+    /// Permanent deletion, only enqueued when the source is the resolved Trash folder.
     Delete,
 }
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -614,6 +647,9 @@ pub enum CommandName {
     MutationResult,
     AccountOptions,
     Accounts,
+    BeginMicrosoftLogin,
+    MicrosoftLoginStatus,
+    CancelMicrosoftLogin,
     CheckAccount,
     AccountCheckStatus,
     SetDefaultAccount,
@@ -705,6 +741,9 @@ impl Command {
             Self::MutationResult { .. } => CommandName::MutationResult,
             Self::AccountOptions => CommandName::AccountOptions,
             Self::Accounts => CommandName::Accounts,
+            Self::BeginMicrosoftLogin { .. } => CommandName::BeginMicrosoftLogin,
+            Self::MicrosoftLoginStatus { .. } => CommandName::MicrosoftLoginStatus,
+            Self::CancelMicrosoftLogin { .. } => CommandName::CancelMicrosoftLogin,
             Self::CheckAccount { .. } => CommandName::CheckAccount,
             Self::AccountCheckStatus { .. } => CommandName::AccountCheckStatus,
             Self::CommitAccount { .. } => CommandName::CommitAccount,
@@ -812,6 +851,14 @@ pub enum Reply {
     Events(EventBatch),
     Mutation(MutationStatus),
     Accounts(Vec<(AccountId, AccountSettings)>),
+    MicrosoftLoginStarted {
+        session: String,
+        authorization_url: String,
+    },
+    MicrosoftLoginPending,
+    MicrosoftLoginReady {
+        credential_ref: String,
+    },
     AccountCheck(AccountCheckResult),
     AccountCheckPending {
         task: String,
@@ -1035,12 +1082,14 @@ mod contract_tests {
             display_name: "test".into(),
             address: "a@example.test".into(),
             imap: ServerSettings {
+                authentication: Default::default(),
                 host: "imap.example.test".into(),
                 port: 993,
                 username: "a".into(),
                 security: ConnectionSecurity::Tls,
             },
             smtp: ServerSettings {
+                authentication: Default::default(),
                 host: "smtp.example.test".into(),
                 port: 465,
                 username: "a".into(),
@@ -1098,5 +1147,45 @@ mod draft_conflict_contract_tests {
             },
         );
         assert!(request.validate().is_err());
+    }
+}
+
+#[cfg(test)]
+mod microsoft_protocol_tests {
+    use super::*;
+    #[test]
+    fn microsoft_ipc_v4_validates_public_configuration_and_rejects_old_peers() {
+        let command = Command::BeginMicrosoftLogin {
+            address: "test@outlook.com".into(),
+            authentication: Authentication::MicrosoftPersonal,
+        };
+        let mut request = Request::new("a".repeat(32), command);
+        assert!(request.validate().is_ok());
+        request.version = 3;
+        assert!(matches!(request.validate(), Err(ProtocolError::Version)));
+        request.version = PROTOCOL_VERSION;
+        let json = serde_json::to_value(&request).unwrap();
+        let mut injected = json.clone();
+        injected["command"]["args"]["access_token"] = "must-not-enter-ipc".into();
+        assert!(serde_json::from_value::<Request>(injected).is_err());
+        let mut invalid = json.clone();
+        invalid["command"]["args"]["authentication"] = "password".into();
+        assert!(
+            serde_json::from_value::<Request>(invalid)
+                .unwrap()
+                .validate()
+                .is_err()
+        );
+        let mut invalid = json;
+        invalid["command"]["args"]["client_id"] = "cannot-override-built-in-id".into();
+        assert!(serde_json::from_value::<Request>(invalid).is_err());
+        for command in [
+            Command::MicrosoftLoginStatus {
+                session: "../bad".into(),
+            },
+            Command::CancelMicrosoftLogin { session: "".into() },
+        ] {
+            assert!(Request::new("a".repeat(32), command).validate().is_err());
+        }
     }
 }

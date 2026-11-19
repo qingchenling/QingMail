@@ -360,6 +360,7 @@ fn disconnect_after_literal_is_reported_as_unknown_not_saved() {
 #[test]
 fn invalid_identifier_or_bytes_never_open_a_connection() {
     let settings = ServerSettings {
+        authentication: Default::default(),
         host: "127.0.0.1".into(),
         port: 1,
         username: "synthetic".into(),

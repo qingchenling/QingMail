@@ -50,6 +50,7 @@ pub(crate) fn listener() -> TcpListener {
 }
 pub(crate) fn server(l: &TcpListener, security: ConnectionSecurity) -> ServerSettings {
     ServerSettings {
+        authentication: Default::default(),
         host: "localhost".into(),
         port: l.local_addr().unwrap().port(),
         username: "synthetic-user".into(),
@@ -386,4 +387,105 @@ fn tagged_mismatch_and_unexpected_nested_responses_return_errors() {
     let mut escaped = zeroize::Zeroizing::new(Vec::new());
     quoted(&mut escaped, "a\"b\\c");
     assert_eq!(&*escaped, b"\"a\\\"b\\\\c\"");
+}
+
+#[test]
+fn microsoft_imap_xoauth2_success_and_sasl_failure_never_use_login() {
+    struct Wire {
+        input: io::Cursor<Vec<u8>>,
+        output: Vec<u8>,
+    }
+    impl Read for Wire {
+        fn read(&mut self, b: &mut [u8]) -> io::Result<usize> {
+            self.input.read(b)
+        }
+    }
+    impl Write for Wire {
+        fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+            self.output.extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let settings = crate::microsoft::settings(
+        "Test",
+        "test@outlook.com",
+        Authentication::MicrosoftPersonal,
+    )
+    .unwrap();
+    for (response, expected) in [
+        (b"QM2 OK authenticated\r\n".as_slice(), Ok(())),
+        (
+            b"QM2 NO denied\r\n".as_slice(),
+            Err(CheckError::Authentication),
+        ),
+        (b"+ e30=\r\n".as_slice(), Err(CheckError::Authentication)),
+    ] {
+        let mut stream = BufReader::new(Wire {
+            input: io::Cursor::new(response.to_vec()),
+            output: vec![],
+        });
+        assert_eq!(
+            authenticate_imap(&mut stream, &settings.imap, "synthetic-token"),
+            expected
+        );
+        let output = String::from_utf8(stream.into_inner().output).unwrap();
+        assert!(output.starts_with("QM2 AUTHENTICATE XOAUTH2 "));
+        assert!(!output.contains(" LOGIN "));
+        let encoded = output.split_whitespace().nth(3).unwrap();
+        use base64::Engine;
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .unwrap(),
+            b"user=test@outlook.com\x01auth=Bearer synthetic-token\x01\x01"
+        );
+    }
+    let password = Credentials::new("wrong-kind".into(), "wrong-kind".into()).unwrap();
+    let result = check(&settings, &password);
+    assert_eq!(result.imap.err(), Some(CheckError::Invalid));
+    assert_eq!(result.smtp.err(), Some(CheckError::Invalid));
+}
+
+#[test]
+fn microsoft_smtp_connection_check_uses_only_xoauth2_without_sending() {
+    use lettre::transport::smtp::{
+        SmtpTransport,
+        client::{Certificate, Tls, TlsParameters},
+    };
+    let (cert, key) = certificate();
+    let accept = acceptor(&cert, &key);
+    let l = listener();
+    let mut settings = server(&l, ConnectionSecurity::Tls);
+    settings.authentication = Authentication::MicrosoftPersonal;
+    let worker = thread::spawn(move || {
+        let mut r = BufReader::new(accept.accept(socket(l)).unwrap());
+        r.get_mut().write_all(b"220 synthetic\r\n").unwrap();
+        assert!(line(&mut r).starts_with("EHLO "));
+        r.get_mut()
+            .write_all(b"250-localhost\r\n250 AUTH XOAUTH2 PLAIN LOGIN\r\n")
+            .unwrap();
+        assert!(line(&mut r).starts_with("AUTH XOAUTH2 "));
+        r.get_mut().write_all(b"235 authenticated\r\n").unwrap();
+        assert_eq!(line(&mut r), "NOOP\r\n");
+        r.get_mut().write_all(b"250 ok\r\n").unwrap();
+        let quit = line(&mut r);
+        assert!(quit.is_empty() || quit == "QUIT\r\n");
+        if !quit.is_empty() {
+            let _ = r.get_mut().write_all(b"221 bye\r\n");
+        }
+    });
+    let params = TlsParameters::builder("localhost".into())
+        .add_root_certificate(Certificate::from_pem(&cert).unwrap())
+        .build()
+        .unwrap();
+    let result = smtp_using_builder(
+        &settings,
+        "synthetic-token",
+        SmtpTransport::builder_dangerous("localhost").tls(Tls::Wrapper(params)),
+    );
+    assert_eq!(result, Ok(()));
+    worker.join().unwrap();
 }

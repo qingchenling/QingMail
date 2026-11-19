@@ -6,6 +6,7 @@ rust-version.workspace = true
 
 [dependencies]
 mail-core = { workspace = true }
+mail-content = { workspace = true }
 mail-parser = { workspace = true }
 secret-service = { workspace = true }
 imap-proto = { workspace = true }
@@ -14,6 +15,11 @@ lettre = { workspace = true }
 native-tls = { workspace = true }
 zeroize = { workspace = true }
 getrandom = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+url = { workspace = true }
+reqwest = { workspace = true }
 base64 = { workspace = true }
 zbus = { workspace = true }
 
@@ -23,5 +29,4 @@ futures-lite = "=2.6.1"
 [dev-dependencies]
 openssl = "=0.10.82"
 mail-storage = { workspace = true }
-mail-content = { workspace = true }
 tempfile = { workspace = true }

@@ -8,7 +8,7 @@ use lettre::{
         header::{ContentTransferEncoding, ContentType},
     },
     transport::smtp::{
-        authentication::{Credentials, Mechanism},
+        authentication::Credentials,
         client::{SmtpConnection, TlsParameters},
         commands::{Data, Mail, Rcpt},
         extension::ClientId,
@@ -273,6 +273,9 @@ pub const SMTP_TOTAL_TIMEOUT: Duration = Duration::from_secs(180);
 /// 只提交一次；仅能由明确发送操作触发，调用前必须已获得持久化Sending许可。
 /// 不接收“跳过证书验证”选项，不保存密码或返回服务器原始响应。
 pub fn deliver(server: &ServerSettings, password: &str, message: PreparedMessage) -> Delivery {
+    if !crate::microsoft::valid_smtp_server(server) {
+        return failed(DeliveryDetail::Configuration);
+    }
     let Ok(tls) = TlsParameters::new(server.host.clone()) else {
         return failed(DeliveryDetail::Tls);
     };
@@ -308,7 +311,7 @@ fn deliver_using(
         || server.username.len() > 1024
         || server.username.chars().any(char::is_control)
         || password.is_empty()
-        || password.len() > 16384
+        || password.len() > 65536
     {
         return failed(DeliveryDetail::Configuration);
     }
@@ -358,7 +361,7 @@ fn deliver_using(
         return failed(DeliveryDetail::Tls);
     }
     match conn.auth(
-        &[Mechanism::Plain, Mechanism::Login],
+        crate::accounts::smtp_mechanisms(server.authentication),
         &Credentials::new(server.username.clone(), password.to_owned()),
     ) {
         Ok(response) if response.has_code(235) => {}

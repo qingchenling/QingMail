@@ -68,17 +68,23 @@ pub(super) fn observe_batch(
 }
 impl Store {
     pub fn desktop_preferences(&self) -> Result<DesktopPreferences> {
-        Ok(self.connection.query_row("SELECT revision,notifications,show_sender_subject,show_preview FROM desktop_settings WHERE id=1",[],|r|Ok(DesktopPreferences {revision:r.get::<_,i64>(0)? as u64,notifications:r.get(1)?,show_sender_subject:r.get(2)?,show_preview:r.get(3)?}))?)
+        Ok(self.connection.query_row("SELECT revision,notifications,show_sender_subject,show_preview,save_sent_copy FROM desktop_settings WHERE id=1",[],|r|Ok(DesktopPreferences {revision:r.get::<_,i64>(0)? as u64,notifications:r.get(1)?,show_sender_subject:r.get(2)?,show_preview:r.get(3)?,save_sent_copy:r.get(4)?}))?)
     }
     pub fn update_desktop_preferences(
         &mut self,
         prefs: &DesktopPreferences,
     ) -> Result<DesktopPreferences> {
+        let previous = self.desktop_preferences()?;
         let tx = self.connection.transaction()?;
-        if tx.execute("UPDATE desktop_settings SET revision=revision+1,notifications=?1,show_sender_subject=?2,show_preview=?3 WHERE id=1 AND revision=?4",params![prefs.notifications,prefs.show_sender_subject,prefs.show_preview,i64::try_from(prefs.revision).map_err(|_| Error::Conflict)?])? != 1 { return Err(Error::Conflict); }
+        if tx.execute("UPDATE desktop_settings SET revision=revision+1,notifications=?1,show_sender_subject=?2,show_preview=?3,save_sent_copy=?5 WHERE id=1 AND revision=?4",params![prefs.notifications,prefs.show_sender_subject,prefs.show_preview,i64::try_from(prefs.revision).map_err(|_| Error::Conflict)?,prefs.save_sent_copy])? != 1 { return Err(Error::Conflict); }
         // A setting change never releases a backlog of old mail.
-        tx.execute("DELETE FROM notification_pending", [])?;
-        tx.execute("DELETE FROM notification_candidates", [])?;
+        if previous.notifications != prefs.notifications
+            || previous.show_sender_subject != prefs.show_sender_subject
+            || previous.show_preview != prefs.show_preview
+        {
+            tx.execute("DELETE FROM notification_pending", [])?;
+            tx.execute("DELETE FROM notification_candidates", [])?;
+        }
         tx.commit()?;
         self.desktop_preferences()
     }
@@ -314,7 +320,7 @@ mod tests {
     fn notification_schema17_migration_and_account_removal() {
         let (root, mut s, a) = setup();
         s.apply_folder_batch(&a, &batch(1, &[1]), 1).unwrap();
-        s.connection.execute_batch("DROP TABLE autostart_intent; DROP TABLE notification_candidates; DROP TABLE notification_pending; DROP TABLE notification_baselines; DROP TABLE desktop_settings; PRAGMA user_version=17;").unwrap();
+        s.connection.execute_batch("DROP TRIGGER track_server_draft_update; CREATE TRIGGER track_server_draft_update AFTER UPDATE OF revision ON drafts BEGIN UPDATE draft_sync SET changed_at=unixepoch() WHERE account_id=NEW.account_id AND draft_id=NEW.id; END; ALTER TABLE draft_sync DROP COLUMN local_only; ALTER TABLE drafts DROP COLUMN deleted_at; ALTER TABLE accounts DROP COLUMN imap_auth; ALTER TABLE accounts DROP COLUMN smtp_auth; ALTER TABLE send_tasks DROP COLUMN save_sent_copy; DROP TABLE autostart_intent; DROP TABLE notification_candidates; DROP TABLE notification_pending; DROP TABLE notification_baselines; DROP TABLE desktop_settings; PRAGMA user_version=17;").unwrap();
         drop(s);
         let mut s = Store::open(&root.path().join("data")).unwrap();
         assert_eq!(

@@ -35,6 +35,7 @@ fn main() {
     assert!(store.accounts().unwrap().is_empty());
     for n in 0..5 {
         let server = ServerSettings {
+            authentication: Default::default(),
             host: if port.is_some() {
                 "localhost"
             } else {
@@ -50,7 +51,11 @@ fn main() {
                 display_name: format!("Performance fixture {n}"),
                 address: format!("fixture-{n}@example.invalid"),
                 imap: server.clone(),
-                smtp: ServerSettings { port: 9, ..server },
+                smtp: ServerSettings {
+                    authentication: Default::default(),
+                    port: 9,
+                    ..server
+                },
             })
             .unwrap();
         store

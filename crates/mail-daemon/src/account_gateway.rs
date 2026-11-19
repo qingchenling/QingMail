@@ -16,6 +16,7 @@ pub struct AccountGateway {
     commits: AccountCommitter,
     checks: Arc<CheckManager>,
     storage: StorageClient,
+    microsoft: crate::microsoft_login::MicrosoftLogin,
 }
 fn error(code: ErrorCode, message: impl Into<String>) -> RpcError {
     RpcError {
@@ -32,6 +33,7 @@ impl AccountGateway {
         let checks = Arc::new(CheckManager::start(enabled)?);
         let commits = AccountCommitter::start(enabled, storage.clone(), checks.clone(), revision)?;
         Ok(Self {
+            microsoft: Default::default(),
             commits,
             checks,
             storage,
@@ -56,6 +58,16 @@ impl AccountGateway {
             )
         })?;
         match &request.command {
+            Command::BeginMicrosoftLogin {
+                address,
+                authentication,
+            } if self.enabled() => self.microsoft.begin(&request.id, address, *authentication),
+            Command::MicrosoftLoginStatus { session } if self.enabled() => {
+                self.microsoft.poll(session)
+            }
+            Command::CancelMicrosoftLogin { session } if self.enabled() => {
+                self.microsoft.cancel(session)
+            }
             Command::CheckAccount {
                 account,
                 settings,
@@ -119,6 +131,7 @@ impl AccountGateway {
         }
     }
     pub fn stop(&mut self) {
+        self.microsoft.stop();
         self.commits.stop();
         if let Some(checks) = Arc::get_mut(&mut self.checks) {
             checks.stop();
@@ -202,6 +215,7 @@ mod tests {
     }
     fn settings() -> AccountSettings {
         let server = ServerSettings {
+            authentication: Default::default(),
             host: "mail.example.test".into(),
             port: 993,
             username: "test".into(),
@@ -245,6 +259,7 @@ mod tests {
         )
         .unwrap();
         let mut gateway = AccountGateway {
+            microsoft: Default::default(),
             commits,
             checks,
             storage: worker.client(),

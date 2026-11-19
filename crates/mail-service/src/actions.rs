@@ -296,6 +296,65 @@ fn move_checked_using(
     })
 }
 
+/// Permanent deletion is restricted to caller-confirmed Trash UIDs. Never use global EXPUNGE.
+pub fn delete_checked(
+    server: &ServerSettings,
+    password: &str,
+    folder: &str,
+    epoch: u32,
+    uids: &[u32],
+) -> Result<(), MoveError> {
+    let connector = tls().map_err(|error| MoveError {
+        error,
+        may_have_changed: false,
+    })?;
+    delete_checked_using(server, password, folder, epoch, uids, &connector)
+}
+fn delete_checked_using(
+    server: &ServerSettings,
+    password: &str,
+    folder: &str,
+    epoch: u32,
+    uids: &[u32],
+    connector: &native_tls::TlsConnector,
+) -> Result<(), MoveError> {
+    let mut may_have_changed = false;
+    let result = (|| {
+        validate(server, password, folder, uids)?;
+        let mut stream = authenticated(server, password, connector)?;
+        let result = (|| {
+            // Refuse before any STORE if this server cannot expunge only the selected UIDs.
+            command(&mut stream, b"QM4 CAPABILITY\r\n")?;
+            let mut uidplus = false;
+            until_done(&mut stream, "QM4", |r| {
+                if let Response::Capabilities(caps) = r {
+                    uidplus |= caps.iter().any(|c| matches!(c, imap_proto::Capability::Atom(a) if a.eq_ignore_ascii_case("UIDPLUS") || a.eq_ignore_ascii_case("IMAP4rev2")));
+                }
+                Ok(())
+            })?;
+            if !uidplus {
+                return Err(CheckError::UnsafeDelete);
+            }
+            select(&mut stream, folder, epoch)?;
+            let set = uid_set(uids);
+            may_have_changed = true;
+            command(
+                &mut stream,
+                format!("QM5 UID STORE {set} +FLAGS.SILENT (\\Deleted)\r\n").as_bytes(),
+            )?;
+            until_done(&mut stream, "QM5", |_| Ok(()))?;
+            command(&mut stream, format!("QM6 UID EXPUNGE {set}\r\n").as_bytes())?;
+            until_done(&mut stream, "QM6", |_| Ok(()))
+        })();
+        logout(&mut stream);
+        result
+    })();
+    result.map_err(|error| MoveError {
+        error,
+        may_have_changed,
+    })
+}
+
 /// 有界只读核对：不存在的 UID 不可当作移动成功证明。
 pub fn probe(
     server: &ServerSettings,

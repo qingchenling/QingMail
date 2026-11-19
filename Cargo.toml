@@ -11,7 +11,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.0.0"
+version = "1.0.1"
 edition = "2024"
 rust-version = "1.98"
 
@@ -56,6 +56,7 @@ lettre = { version = "=0.11.23", default-features = false, features = ["smtp-tra
 native-tls = "=0.2.18"
 zeroize = "=1.9.1"
 reqwest = { version = "=0.13.5", default-features = false, features = ["blocking", "rustls"] }
+tokio = { version = "=1.54.1", features = ["rt", "time", "net"] }
 
 zbus = "=5.19.0"
 

@@ -79,6 +79,7 @@ pub(crate) fn map_error(error: CheckError) -> CopyError {
         CheckError::Authentication => CopyError::Authentication,
         CheckError::Protocol
         | CheckError::Missing
+        | CheckError::UnsafeDelete
         | CheckError::EpochChanged
         | CheckError::Cancelled
         | CheckError::Storage => CopyError::Protocol,
@@ -115,7 +116,7 @@ fn valid_request(server: &ServerSettings, password: &str, message_id: &str, raw:
         && server.username.len() <= 1024
         && !server.username.chars().any(char::is_control)
         && !password.is_empty()
-        && password.len() <= 16384
+        && password.len() <= 65536
         && !password.chars().any(char::is_control)
         && !raw.is_empty()
         && raw.len() <= MAX_COPY_BYTES

@@ -218,6 +218,7 @@ mod tests {
         let _cleanup = Cleanup(root.clone());
         let mut store = mail_storage::Store::open(&root).unwrap();
         let server = mail_core::ServerSettings {
+            authentication: Default::default(),
             host: "example.invalid".into(),
             port: 993,
             username: "synthetic".into(),

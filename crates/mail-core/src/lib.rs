@@ -37,10 +37,22 @@ pub struct AccountSettings {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ServerSettings {
+    #[serde(default)]
+    pub authentication: Authentication,
     pub host: String,
     pub port: u16,
     pub username: String,
     pub security: ConnectionSecurity,
+}
+
+/// Native Microsoft accounts use delegated OAuth tokens, never a password fallback.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Authentication {
+    #[default]
+    Password,
+    MicrosoftPersonal,
+    Microsoft365,
 }
 
 /// 不提供明文和跳过证书验证选项。

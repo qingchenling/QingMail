@@ -216,7 +216,7 @@ impl Composer {
         )
         .when(self.workspace_folder.is_some(), |row| {
             row.child(
-                tool("delete-draft", "delete", "删除本地草稿")
+                tool("delete-draft", "delete", "删除草稿（同步服务器）")
                     .disabled(disabled || self.saving || self.importing)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.confirm_delete = !this.confirm_delete;
@@ -376,11 +376,7 @@ impl Composer {
 impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Account for sidebar + draggable list, rather than the overall window width.
-        let compact = if self.workspace_folder.is_some() {
-            window.bounds().size.width.as_f32() - 216. - self.list_width - 5. < 590.
-        } else {
-            self.pane_width < 590.
-        };
+        let compact = self.pane_width < 590.;
         let editor = div()
             .id("inline-composer")
             .size_full()

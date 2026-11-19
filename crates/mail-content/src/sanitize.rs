@@ -135,9 +135,16 @@ pub(crate) fn sanitize(source: &str, images: &[InlineImage]) -> Result<Sanitized
             ),
             (
                 "table",
-                ["width", "height", "cellpadding", "cellspacing", "border"]
-                    .into_iter()
-                    .collect(),
+                [
+                    "width",
+                    "height",
+                    "cellpadding",
+                    "cellspacing",
+                    "border",
+                    "role",
+                ]
+                .into_iter()
+                .collect(),
             ),
         ]))
         .url_schemes(
@@ -162,6 +169,11 @@ pub(crate) fn sanitize(source: &str, images: &[InlineImage]) -> Result<Sanitized
                 Some(Cow::Owned(source.clone()))
             }
             (_, "style") => Some(Cow::Owned(css::declarations(value))),
+            ("table", "role") => match value.trim().to_ascii_lowercase().as_str() {
+                "presentation" => Some(Cow::Borrowed("presentation")),
+                "none" => Some(Cow::Borrowed("none")),
+                _ => None,
+            },
             (
                 _,
                 "width" | "height" | "cellpadding" | "cellspacing" | "border" | "colspan"

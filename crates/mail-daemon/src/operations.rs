@@ -87,11 +87,14 @@ impl Operations {
         }
         Ok(this)
     }
-    pub fn stop(&mut self) {
+    pub(crate) fn request_stop(&self) {
         self.stop.store(true, Ordering::Release);
         for t in &self.threads {
             t.thread().unpark();
         }
+    }
+    pub fn stop(&mut self) {
+        self.request_stop();
         for t in self.threads.drain(..) {
             let _ = t.join();
         }
@@ -166,6 +169,7 @@ fn execute(
                     .remote_name
                     .clone(),
             ),
+            MailOperation::Trash { destination } => Some(destination.clone()),
             _ => None,
         };
         Ok((access, credentials, source, destination))
@@ -214,6 +218,7 @@ fn execute(
             {
                 (State::Applied, None)
             }
+            (MailOperation::Delete, None) => (State::Applied, None),
             (_, Some(_)) => (
                 State::Uncertain,
                 detail(
@@ -229,6 +234,15 @@ fn execute(
                 ),
             ),
         };
+    }
+    if flags.is_none()
+        && matches!(
+            op.operation,
+            MailOperation::Delete | MailOperation::Trash { .. }
+        )
+    {
+        // A delete intent is already fulfilled if the exact source UID no longer exists.
+        return (State::Applied, None);
     }
     if flags.is_none() {
         return (
@@ -283,13 +297,25 @@ fn execute(
             ),
             Err(e) => classify(e.error, e.may_have_changed),
         },
-        MailOperation::Delete => (
-            State::Failed,
-            detail(
-                ErrorCode::InvalidRequest,
-                "删除操作须在入队时解析为账号垃圾箱",
-            ),
-        ),
+        MailOperation::Trash { destination } => {
+            match actions::move_checked(server, password, &source, epoch, &[uid], destination) {
+                Ok(actions::MoveOutcome::Moved) => (State::Applied, None),
+                Ok(actions::MoveOutcome::CopiedOnly) => (
+                    State::Uncertain,
+                    detail(
+                        ErrorCode::Uncertain,
+                        "已复制至垃圾箱但源移除未确认，请核对，不自动重放",
+                    ),
+                ),
+                Err(e) => classify(e.error, e.may_have_changed),
+            }
+        }
+        MailOperation::Delete => {
+            match actions::delete_checked(server, password, &source, epoch, &[uid]) {
+                Ok(()) => (State::Applied, None),
+                Err(e) => classify(e.error, e.may_have_changed),
+            }
+        }
     }
 }
 #[cfg(test)]

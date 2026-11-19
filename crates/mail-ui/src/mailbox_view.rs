@@ -294,45 +294,16 @@ impl Mailbox {
         use mail_protocol::{Command, OperationResolution, OperationState as State};
         let entity = cx.entity();
         let summary = self.sync_state.summary();
-        let mut items = vec![
-            MaterialMenuItem::new(if self.sync_refreshing {
-                "正在更新状态…".to_owned()
-            } else if self.sync_state.error.is_some() {
-                "无法读取最新状态；下方保留上次结果".to_owned()
-            } else if !self.sync_state.loaded {
-                "尚未读取同步状态".to_owned()
-            } else {
-                format!(
+        let mut items = Vec::new();
+        if summary.pending() > 0 {
+            items.push(
+                MaterialMenuItem::new(format!(
                     "未完成 {} 项 · 需处理 {} 项",
                     summary.pending(),
                     summary.issues
-                )
-            })
-            .disabled(true),
-        ];
-        if let Some(error) = &self.sync_state.error {
-            items.push(
-                MaterialMenuItem::new("状态读取失败")
-                    .supporting_text(error.clone())
-                    .disabled(true),
+                ))
+                .disabled(true),
             );
-        }
-        items.push(
-            MaterialMenuItem::new(format!(
-                "邮件变更 {} · 草稿 {} · 发送 {}",
-                summary.operations, summary.drafts, summary.tasks
-            ))
-            .disabled(true),
-        );
-        for (account, settings) in &self.accounts {
-            let status = crate::lifecycle::account_sync_status(account, cx);
-            if !status.is_empty() {
-                items.push(
-                    MaterialMenuItem::new(format!("收信 · {}", settings.address))
-                        .supporting_text(status)
-                        .disabled(true),
-                );
-            }
         }
         for operation in self
             .sync_state
@@ -340,14 +311,15 @@ impl Mailbox {
             .operations
             .iter()
             .filter(|item| item.state != State::Applied)
-            .take(12)
+            .take(6)
         {
             let summary = match &operation.operation {
                 mail_protocol::MailOperation::Flags { seen, flagged } => {
                     format!("标记：已读 {seen:?} · 星标 {flagged:?}")
                 }
                 mail_protocol::MailOperation::Move { .. } => "移动或删除邮件".into(),
-                mail_protocol::MailOperation::Delete => "删除邮件".into(),
+                mail_protocol::MailOperation::Trash { .. } => "移到服务器垃圾箱".into(),
+                mail_protocol::MailOperation::Delete => "永久删除服务器邮件".into(),
             };
             items.push(
                 MaterialMenuItem::new(format!(
@@ -441,7 +413,7 @@ impl Mailbox {
                         | mail_core::SendState::CopyPending
                 )
             })
-            .take(12)
+            .take(6)
         {
             items.push(
                 MaterialMenuItem::new(format!(
@@ -480,9 +452,10 @@ impl Mailbox {
             .drafts
             .iter()
             .filter(|d| super::sync_status::draft_pending(&d.info))
-            .take(12)
+            .take(6)
         {
             let label = match draft.info.state.as_str() {
+                "deleting" => "正在清理云端草稿",
                 "failed" => "草稿同步失败",
                 "conflict" => "草稿同步冲突",
                 "uncertain" => "草稿上传结果待确认",
@@ -508,13 +481,11 @@ impl Mailbox {
                 )),
             );
         }
-        let entity = entity.clone();
-        items.push(
-            MaterialMenuItem::new("刷新状态").on_click(move |_, _, cx| {
-                entity.update(cx, |this, cx| this.refresh_sync_status(cx))
-            }),
-        );
-        MaterialMenu::new("sync-status-items").items(items)
+        MaterialMenu::new("sync-status-items")
+            .density(MenuDensity::Dense)
+            .width(240.)
+            .max_height(360.)
+            .items(items)
     }
     fn sync_status_popup(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let (icon_name, label) = self.sync_state.indicator();
@@ -636,6 +607,11 @@ impl Mailbox {
     }
     fn topbar(&self, title: &str, wide: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
+        let draft_search = self
+            .composer
+            .as_ref()
+            .filter(|_| self.page == Page::Drafts)
+            .map(|editor| editor.read(cx).workspace_search());
         let menu = MaterialMenu::new("mailbox-menu").items([
             MaterialMenuItem::new("重载本地账号与目录")
                 .disabled(self.busy)
@@ -701,31 +677,38 @@ impl Mailbox {
                     .min_w_0()
                     .max_w(px(560.))
                     .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
-                        if event.keystroke.key == "enter" {
+                        if event.keystroke.key == "enter" && this.page != Page::Drafts {
                             this.run_search(cx);
                         }
                     }))
                     .child(
-                        TextField::new("mail-search-text", &self.search_text)
-                            .outlined()
-                            .density(TextFieldDensity::Compact)
-                            .placeholder("搜索本地邮件")
-                            .leading_icon(icon("search"))
-                            .w_full(),
+                        TextField::new(
+                            "mail-search-text",
+                            draft_search.as_ref().unwrap_or(&self.search_text),
+                        )
+                        .outlined()
+                        .density(TextFieldDensity::Compact)
+                        .placeholder(if self.page == Page::Drafts {
+                            "搜索草稿"
+                        } else {
+                            "搜索本地邮件"
+                        })
+                        .leading_icon(icon("search"))
+                        .w_full(),
                     ),
             )
             .child(
                 tool("run-search", "search", "搜索本地邮件")
-                    .disabled(self.busy)
+                    .disabled(self.busy || self.page == Page::Drafts)
                     .on_click(cx.listener(|this, _, _, cx| this.run_search(cx))),
             )
             .child(
-                tool("search-filters", "filter_list", "搜索筛选").on_click(cx.listener(
-                    |this, _, _, cx| {
+                tool("search-filters", "filter_list", "搜索筛选")
+                    .disabled(self.page == Page::Drafts)
+                    .on_click(cx.listener(|this, _, _, cx| {
                         this.filters_open = !this.filters_open;
                         cx.notify();
-                    },
-                )),
+                    })),
             )
             .child(div().flex_1())
             .child(self.page_tools(cx))
@@ -868,8 +851,14 @@ impl Mailbox {
                             let account = this
                                 .accounts
                                 .iter()
-                                .find(|(id, _)| *id == inline.location.account)
-                                .map(|(id, s)| (id.clone(), s.address.clone()));
+                                .find(|(id, _)| {
+                                    inline
+                                        .location
+                                        .as_ref()
+                                        .is_some_and(|loc| *id == loc.account)
+                                })
+                                .map(|(id, s)| (id.clone(), s.address.clone()))
+                                .or_else(|| inline.account.clone());
                             cx.defer(move |cx| crate::reader::open_content(content, account, cx));
                         }
                     })
@@ -1068,7 +1057,7 @@ impl Mailbox {
 impl Render for Mailbox {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::settings::advance_theme(window, cx);
-        if self.page != Page::Mail {
+        if matches!(self.page, Page::Accounts | Page::Settings) {
             let content = match self.page {
                 Page::Accounts => self
                     .account_page
@@ -1082,12 +1071,7 @@ impl Render for Mailbox {
                     .expect("settings page initialized")
                     .clone()
                     .into_any_element(),
-                Page::Drafts => self
-                    .composer
-                    .as_ref()
-                    .map(|e| e.clone().into_any_element())
-                    .unwrap_or_else(|| div().into_any_element()),
-                Page::Mail => unreachable!(),
+                Page::Mail | Page::Drafts => unreachable!(),
             };
             return div()
                 .size_full()
@@ -1102,25 +1086,12 @@ impl Render for Mailbox {
                         .h_full()
                         .flex()
                         .flex_col()
-                        .when(self.page != Page::Drafts, |column| {
-                            column.child(self.page_bar(cx))
-                        })
+                        .child(self.page_bar(cx))
                         .child(motion::page(
                             format!("mailbox-page-{:?}", self.page),
                             div().flex_1().min_h_0().overflow_hidden().child(content),
                             cx,
-                        ))
-                        .when(self.page == Page::Drafts, |column| {
-                            column.child(
-                                div()
-                                    .h(px(28.))
-                                    .px_4()
-                                    .flex()
-                                    .justify_end()
-                                    .items_center()
-                                    .child(self.sync_status_popup(cx)),
-                            )
-                        }),
+                        )),
                 )
                 .into_any_element();
         }
@@ -1294,10 +1265,9 @@ impl Render for Mailbox {
                 ),
         );
         let wide = window.bounds().size.width >= px(1050.);
-        let inline = self
-            .inline
-            .as_ref()
-            .filter(|inline| self.selected_location() == Some(&inline.location));
+        let inline = self.inline.as_ref().filter(|inline| {
+            super::inline_matches_selection(inline.location.as_ref(), self.selected_location())
+        });
         let disabled = self.busy || self.search_results.is_some() || self.targets().is_empty();
         let mut detail = div()
             .h_full()
@@ -1381,7 +1351,7 @@ impl Render for Mailbox {
                         .on_click(cx.listener(|this, _, _, cx| this.move_selected(false, cx))),
                 )
                 .child(
-                    tool("delete-selected", "delete", "移到已删除")
+                    tool("delete-selected", "delete", "删除邮件（同步服务器）")
                         .disabled(disabled)
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.confirm_delete = !this.confirm_delete;
@@ -1399,12 +1369,19 @@ impl Render for Mailbox {
                     .items_center()
                     .gap_2()
                     .bg(theme::color(ColorRole::ERROR_CONTAINER))
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_sm()
-                            .child(format!("将 {} 封邮件移到已删除？", self.targets().len())),
-                    )
+                    .child(div().flex_1().text_sm().child(
+                        if !self.unified
+                            && self.selected_folder.as_deref()
+                                == mail_service::folders::trash(&self.folders, None).as_deref()
+                        {
+                            format!(
+                                "从服务器永久删除 {} 封邮件？此操作无法撤销。",
+                                self.targets().len()
+                            )
+                        } else {
+                            format!("将 {} 封邮件移到服务器垃圾箱？", self.targets().len())
+                        },
+                    ))
                     .child(
                         quiet("confirm-delete", "确认删除")
                             .disabled(disabled)
@@ -1444,13 +1421,15 @@ impl Render for Mailbox {
                     }),
             )
         };
+        let mut list = list.into_any_element();
+        if self.page == Page::Drafts
+            && let Some(editor) = &self.composer
+        {
+            list = editor.update(cx, |editor, cx| editor.workspace_list(window, cx));
+        }
         let available = window.bounds().size.width.as_f32() - 216.;
         self.list_width = self.list_width.clamp(300., (available - 420.).max(300.));
-        if let Some(editor) = self
-            .composer
-            .as_ref()
-            .filter(|e| e.read(cx).workspace_folder().is_none())
-        {
+        if let Some(editor) = self.composer.as_ref() {
             let width = if wide {
                 available - self.list_width - 5.
             } else {
@@ -1458,18 +1437,28 @@ impl Render for Mailbox {
             };
             // Only update the child layout hint; the child renders after this host.
             editor.update(cx, |editor, _| editor.pane_width = width);
-            detail = div().size_full().min_w_0().min_h_0().child(motion::page(
-                "inline-composer-enter",
-                div().size_full().child(editor.clone()),
-                cx,
-            ));
+            detail = if self.page == Page::Drafts {
+                div().size_full().min_w_0().min_h_0().child(editor.clone())
+            } else {
+                div().size_full().min_w_0().min_h_0().child(motion::page(
+                    "inline-composer-enter",
+                    div().size_full().child(editor.clone()),
+                    cx,
+                ))
+            };
         }
         let body = if wide {
             div()
                 .flex()
                 .flex_1()
                 .min_h_0()
-                .child(list.w(px(self.list_width)).flex_none())
+                .child(
+                    div()
+                        .w(px(self.list_width))
+                        .h_full()
+                        .flex_none()
+                        .child(list),
+                )
                 .child(
                     div()
                         .id("mail-pane-divider")
@@ -1495,7 +1484,11 @@ impl Render for Mailbox {
                         .overflow_hidden()
                         .child(detail.w_full()),
                 )
-        } else if self.narrow_detail || self.composer.is_some() {
+        } else if self.narrow_detail
+            || self.composer.as_ref().is_some_and(|editor| {
+                self.page != Page::Drafts || !editor.read(cx).workspace_list_visible()
+            })
+        {
             div().flex_1().min_h_0().child(detail)
         } else {
             div().flex_1().min_h_0().child(list)
@@ -1540,7 +1533,7 @@ impl Render for Mailbox {
                     .flex()
                     .flex_col()
                     .child(self.topbar(&title, wide, cx))
-                    .when(self.filters_open, |column| {
+                    .when(self.filters_open && self.page != Page::Drafts, |column| {
                         column.child(motion::enter(
                             "search-filter-enter",
                             div().flex_none().child(self.search_filters(cx)),

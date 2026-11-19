@@ -329,6 +329,12 @@ impl Server {
             drop(sender);
             result
         });
+        // 退出已确认：先同时发出停止/读取取消信号，避免等待某个 join 时其他任务继续联网。
+        self.service.drafts.request_stop();
+        self.service.downloads.request_stop();
+        self.service.operations.request_stop();
+        self.service.business.cancel_reads();
+        self.service.sync.request_stop();
         notifications.stop();
         let mut service = Arc::try_unwrap(self.service)
             .map_err(|_| io::Error::other("后台工作线程尚未释放状态"))?;
@@ -563,6 +569,9 @@ impl Service {
                 ]);
                 if self.accounts.enabled() {
                     commands.extend([
+                        CommandName::BeginMicrosoftLogin,
+                        CommandName::MicrosoftLoginStatus,
+                        CommandName::CancelMicrosoftLogin,
                         CommandName::CheckAccount,
                         CommandName::AccountCheckStatus,
                         CommandName::CommitAccount,
@@ -833,7 +842,11 @@ impl Service {
             }
             Command::PrepareShutdown => {
                 let _guard = self.ownership.lock().unwrap_or_else(|e| e.into_inner());
-                if self.accounts.saving() || self.sending.active() || self.business.active() {
+                self.business.cancel_reads();
+                if self.accounts.saving()
+                    || self.sending.active()
+                    || self.business.has_non_read_work()
+                {
                     return Err(rpc_error(ErrorCode::Busy, "账号正在保存，请稍后退出"));
                 }
                 if self.sessions().prepare(Instant::now()) {
@@ -844,7 +857,9 @@ impl Service {
             Command::FinishShutdown { session, saved } => {
                 let _guard = self.ownership.lock().unwrap_or_else(|e| e.into_inner());
                 if *saved
-                    && (self.accounts.saving() || self.sending.active() || self.business.active())
+                    && (self.accounts.saving()
+                        || self.sending.active()
+                        || self.business.has_non_read_work())
                 {
                     return Err(rpc_error(ErrorCode::Busy, "账号正在保存，请稍后退出"));
                 }
@@ -871,7 +886,10 @@ impl Service {
                 }
                 self.accounts.call(request)
             }
-            Command::CheckAccount { .. }
+            Command::BeginMicrosoftLogin { .. }
+            | Command::MicrosoftLoginStatus { .. }
+            | Command::CancelMicrosoftLogin { .. }
+            | Command::CheckAccount { .. }
             | Command::AccountCheckStatus { .. }
             | Command::MutationResult { .. } => self.accounts.call(request),
             Command::AutostartSettings | Command::SetAutostart { .. } => {

@@ -43,6 +43,14 @@ pub(super) struct Business {
 fn fail(e: impl ToString) -> RpcError {
     rpc_error(ErrorCode::Storage, e.to_string())
 }
+fn cancellable_read(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Business {
+            operation: BusinessOperation::Read { .. } | BusinessOperation::RemoteImages { .. }
+        }
+    )
+}
 fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -152,6 +160,26 @@ impl Business {
             .values()
             .any(|(_, _, r)| r.is_none())
     }
+    /// A foreground exit can abandon reads; writes and other business work must finish first.
+    pub fn cancel_reads(&self) {
+        let results = self.results.lock().unwrap_or_else(|e| e.into_inner());
+        let cancellations = self.cancellations.lock().unwrap_or_else(|e| e.into_inner());
+        for (id, (request, _, result)) in results.iter() {
+            if result.is_none()
+                && cancellable_read(&request.command)
+                && let Some(cancel) = cancellations.get(id)
+            {
+                cancel.store(true, Ordering::Release);
+            }
+        }
+    }
+    pub fn has_non_read_work(&self) -> bool {
+        self.results
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .any(|(request, _, result)| result.is_none() && !cancellable_read(&request.command))
+    }
     pub fn owns(&self, id: &str) -> bool {
         self.results
             .lock()
@@ -220,7 +248,7 @@ impl Business {
                 }
             }
         }
-        if matches!(operation, BusinessOperation::Read { .. }) {
+        if cancellable_read(&request.command) {
             self.cancellations
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -537,7 +565,8 @@ impl Context {
                     return Err(rpc_error(ErrorCode::Offline, "隔离模式不加载远程图片"));
                 }
                 let mut mail = self.content(&content)?.clone();
-                mail.load_remote_images_after_consent().map_err(fail)?;
+                mail.load_remote_images_with_cancel(&self.cancel)
+                    .map_err(fail)?;
                 self.publish(mail, None)
             }
             ClearCopies => {
@@ -922,6 +951,75 @@ impl Context {
 mod parts_tests {
     use super::*;
     #[test]
+    fn shutdown_cancels_reads_but_still_waits_for_other_business_work() {
+        let root = tempfile::tempdir().unwrap();
+        let mut storage =
+            crate::storage::StorageWorker::start(Some(root.path().join("data"))).unwrap();
+        let read_id = "a".repeat(32);
+        let write_id = "b".repeat(32);
+        let image_id = "c".repeat(32);
+        let read = Request::new(
+            read_id.clone(),
+            Command::Business {
+                operation: BusinessOperation::Read {
+                    location: mail_core::MailUid {
+                        account: mail_core::AccountId("fixture".into()),
+                        folder_id: "inbox".into(),
+                        uidvalidity: 42,
+                        uid: 7,
+                    },
+                    folder: "INBOX".into(),
+                },
+            },
+        );
+        let write = Request::new(
+            write_id.clone(),
+            Command::Business {
+                operation: BusinessOperation::RemoveAccount {
+                    account: mail_core::AccountId("fixture".into()),
+                },
+            },
+        );
+        let image = Request::new(
+            image_id.clone(),
+            Command::Business {
+                operation: BusinessOperation::RemoteImages {
+                    content: "fixture".into(),
+                },
+            },
+        );
+        let image_cancel = Arc::new(AtomicBool::new(false));
+        let read_cancel = Arc::new(AtomicBool::new(false));
+        let write_cancel = Arc::new(AtomicBool::new(false));
+        let business = Business {
+            queue: mpsc::sync_channel(1).0,
+            results: Arc::new(Mutex::new(HashMap::from([
+                (read_id.clone(), (read, Instant::now(), None)),
+                (write_id.clone(), (write, Instant::now(), None)),
+                (image_id.clone(), (image, Instant::now(), None)),
+            ]))),
+            cancellations: Arc::new(Mutex::new(HashMap::from([
+                (read_id, read_cancel.clone()),
+                (write_id.clone(), write_cancel.clone()),
+                (image_id, image_cancel.clone()),
+            ]))),
+            storage: storage.client(),
+            worker: None,
+        };
+
+        assert!(business.active());
+        assert!(business.has_non_read_work());
+        business.cancel_reads();
+        assert!(read_cancel.load(Ordering::Acquire));
+        assert!(image_cancel.load(Ordering::Acquire));
+        assert!(!write_cancel.load(Ordering::Acquire));
+        business.results.lock().unwrap().remove(&write_id);
+        assert!(!business.has_non_read_work(), "only cancelled reads remain");
+
+        drop(business);
+        storage.stop();
+    }
+    #[test]
     fn cancelled_read_never_enters_body_fetch_or_publishes_resources() {
         let root = tempfile::tempdir().unwrap();
         let mut worker =
@@ -942,6 +1040,11 @@ mod parts_tests {
                 uid: 7,
             },
             folder: "INBOX".into(),
+        });
+        assert!(result.unwrap_err().message.contains("取消"));
+        assert!(context.contents.is_empty());
+        let result = context.execute(BusinessOperation::RemoteImages {
+            content: "fixture".into(),
         });
         assert!(result.unwrap_err().message.contains("取消"));
         assert!(context.contents.is_empty());

@@ -55,7 +55,7 @@ mod tests {
         let prefs = store.update_desktop_preferences(&prefs).unwrap();
         store
             .connection
-            .execute_batch("DROP TABLE autostart_intent; PRAGMA user_version=18;")
+            .execute_batch("DROP TRIGGER track_server_draft_update; CREATE TRIGGER track_server_draft_update AFTER UPDATE OF revision ON drafts BEGIN UPDATE draft_sync SET changed_at=unixepoch() WHERE account_id=NEW.account_id AND draft_id=NEW.id; END; ALTER TABLE draft_sync DROP COLUMN local_only; ALTER TABLE drafts DROP COLUMN deleted_at; ALTER TABLE accounts DROP COLUMN imap_auth; ALTER TABLE accounts DROP COLUMN smtp_auth; ALTER TABLE send_tasks DROP COLUMN save_sent_copy; DROP TABLE autostart_intent; ALTER TABLE desktop_settings DROP COLUMN save_sent_copy; PRAGMA user_version=18;")
             .unwrap();
         drop(store);
         let mut store = Store::open(&data).unwrap();

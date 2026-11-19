@@ -87,7 +87,7 @@ def rpc(root, kind, **args):
     with socket.socket(socket.AF_UNIX) as stream:
         stream.settimeout(8)
         stream.connect(str(root/'runtime/qingmail/daemon.sock'))
-        stream.sendall(json.dumps(dict(version=2, id=secrets.token_hex(16), command=command)).encode()+b'\n')
+        stream.sendall(json.dumps(dict(version=4, id=secrets.token_hex(16), command=command)).encode()+b'\n')
         result = json.loads(stream.makefile('rb').readline(2*1024*1024))['result']
         if 'Err' in result: raise RuntimeError(result['Err']['code'])
         return result['Ok']

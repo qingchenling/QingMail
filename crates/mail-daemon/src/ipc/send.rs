@@ -212,6 +212,7 @@ mod tests {
         let path = root.path().join("data");
         let mut store = mail_storage::Store::open(&path).unwrap();
         let server = ServerSettings {
+            authentication: Default::default(),
             host: "example.invalid".into(),
             port: 993,
             username: "synthetic".into(),

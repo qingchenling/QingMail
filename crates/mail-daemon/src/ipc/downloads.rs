@@ -78,11 +78,14 @@ impl Downloads {
         }
         Ok(Reply::Download(resources.download_status(id)?))
     }
-    pub fn stop(&mut self) {
+    pub fn request_stop(&self) {
         self.resources
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .cancel_downloads();
+    }
+    pub fn stop(&mut self) {
+        self.request_stop();
         self.queue.take();
         for worker in self.workers.drain(..) {
             let _ = worker.join();

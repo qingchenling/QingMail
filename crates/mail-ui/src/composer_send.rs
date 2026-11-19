@@ -134,11 +134,22 @@ impl Composer {
             let result = task.await;
             let _ = entity.update(cx, |this, cx| {
                 this.sending = false;
-                this.status = match result {
-                    Ok(task) => state_label(&task),
-                    Err(e) => format!("未确认发送完成：{e}"),
-                };
-                this.refresh_send_tasks(cx);
+                match result {
+                    Ok(task) if matches!(task.state, SendState::Sent | SendState::CopyPending) => {
+                        this.status = state_label(&task);
+                        this.refresh_send_tasks(cx);
+                        cx.emit(super::ComposerEvent::Sent(
+                            task.account.clone(),
+                            task.id.clone(),
+                        ));
+                        this.finish_close(cx);
+                    }
+                    Ok(task) => {
+                        this.status = state_label(&task);
+                        this.refresh_send_tasks(cx);
+                    }
+                    Err(e) => this.status = format!("未确认发送完成：{e}"),
+                }
                 cx.notify();
             });
         })

@@ -43,7 +43,7 @@ use private_dir::PrivateDir;
 use rusqlite::{Connection, MAIN_DB, OpenFlags, OptionalExtension, params};
 use std::{fmt, fs::File, io, path::Path, time::Duration};
 
-const SCHEMA_VERSION: u32 = 19;
+const SCHEMA_VERSION: u32 = 23;
 const APPLICATION_ID: u32 = 0x514d4149;
 const SCHEMA: &str = include_str!("schema.sql");
 const SCHEMA_V2: &str = include_str!("schema-v2.sql");
@@ -166,7 +166,7 @@ impl Store {
         }
         let id = AccountId(new_id()?);
         self.connection.execute(
-            "INSERT INTO accounts VALUES (?1,'本地草稿','','',1,'','tls','',1,'','tls','local')",
+            "INSERT INTO accounts(id,display_name,address,imap_host,imap_port,imap_username,imap_security,smtp_host,smtp_port,smtp_username,smtp_security,kind) VALUES (?1,'本地草稿','','',1,'','tls','',1,'','tls','local')",
             [&id.0],
         )?;
         Ok(id)
@@ -205,6 +205,7 @@ impl Store {
         account: &AccountId,
         id: &mail_core::DraftId,
     ) -> Result<()> {
+        self.draft(account, id)?;
         self.connection.execute("INSERT INTO local_editor VALUES (1,?1,?2) ON CONFLICT(singleton) DO UPDATE SET draft_id=excluded.draft_id,account_id=excluded.account_id",params![id.0,account.0])?;
         Ok(())
     }
@@ -224,7 +225,7 @@ impl Store {
             return Err(Error::Invalid("无效账号 ID"));
         }
         self.connection.execute(
-            "INSERT INTO accounts(id,display_name,address,imap_host,imap_port,imap_username,imap_security,smtp_host,smtp_port,smtp_username,smtp_security) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+            "INSERT INTO accounts(id,display_name,address,imap_host,imap_port,imap_username,imap_security,smtp_host,smtp_port,smtp_username,smtp_security,imap_auth,smtp_auth) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
             params![
                 id.0,
                 settings.display_name,
@@ -237,6 +238,8 @@ impl Store {
                 settings.smtp.port,
                 settings.smtp.username,
                 security_name(settings.smtp.security),
+                auth_name(settings.imap.authentication),
+                auth_name(settings.smtp.authentication),
             ],
         )?;
         Ok(())
@@ -244,12 +247,12 @@ impl Store {
 
     pub fn account(&self, id: &AccountId) -> Result<Option<AccountSettings>> {
         Ok(self.connection.query_row(
-            "SELECT display_name,address,imap_host,imap_port,imap_username,imap_security,smtp_host,smtp_port,smtp_username,smtp_security FROM accounts WHERE id=?1 AND kind='remote'",
+            "SELECT display_name,address,imap_host,imap_port,imap_username,imap_security,smtp_host,smtp_port,smtp_username,smtp_security,imap_auth,smtp_auth FROM accounts WHERE id=?1 AND kind='remote'",
             [&id.0],
             |r| Ok(AccountSettings {
                 display_name: r.get(0)?, address: r.get(1)?,
-                imap: ServerSettings { host:r.get(2)?, port:r.get(3)?, username:r.get(4)?, security:read_security(r.get(5)?)? },
-                smtp: ServerSettings { host:r.get(6)?, port:r.get(7)?, username:r.get(8)?, security:read_security(r.get(9)?)? },
+                imap: ServerSettings { authentication: read_auth(r.get(10)?)?, host:r.get(2)?, port:r.get(3)?, username:r.get(4)?, security:read_security(r.get(5)?)? },
+                smtp: ServerSettings { authentication: read_auth(r.get(11)?)?, host:r.get(6)?, port:r.get(7)?, username:r.get(8)?, security:read_security(r.get(9)?)? },
             }),
         ).optional()?)
     }
@@ -261,7 +264,7 @@ impl Store {
     fn update_account_row(&self, id: &AccountId, settings: &AccountSettings) -> Result<()> {
         validate_settings(settings)?;
         let changed = self.connection.execute(
-            "UPDATE accounts SET display_name=?1,address=?2,imap_host=?3,imap_port=?4,imap_username=?5,imap_security=?6,smtp_host=?7,smtp_port=?8,smtp_username=?9,smtp_security=?10 WHERE id=?11 AND kind='remote'",
+            "UPDATE accounts SET display_name=?1,address=?2,imap_host=?3,imap_port=?4,imap_username=?5,imap_security=?6,smtp_host=?7,smtp_port=?8,smtp_username=?9,smtp_security=?10,imap_auth=?12,smtp_auth=?13 WHERE id=?11 AND kind='remote'",
             params![
                 settings.display_name,
                 settings.address,
@@ -274,6 +277,8 @@ impl Store {
                 settings.smtp.username,
                 security_name(settings.smtp.security),
                 id.0,
+                auth_name(settings.imap.authentication),
+                auth_name(settings.smtp.authentication),
             ],
         )?;
         if changed != 1 {
@@ -701,6 +706,25 @@ fn migrate(
     if version < 19 {
         tx.execute_batch(include_str!("schema-v19.sql"))?;
     }
+    if version < 20 {
+        tx.execute_batch(include_str!("schema-v20.sql"))?;
+    }
+    if version < 21 {
+        tx.execute_batch(include_str!("schema-v21.sql"))?;
+    }
+    if version < 22 {
+        tx.execute_batch(include_str!("schema-v22.sql"))?;
+    }
+    if version < 23 {
+        tx.execute_batch(include_str!("schema-v23.sql"))?;
+        if version >= 18 {
+            // Invalidate preferences held by a UI across a daemon upgrade.
+            tx.execute(
+                "UPDATE desktop_settings SET revision=revision+1 WHERE id=1",
+                [],
+            )?;
+        }
+    }
     tx.pragma_update(None, "application_id", APPLICATION_ID)?;
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.commit()?;
@@ -738,6 +762,21 @@ fn validate_settings(settings: &AccountSettings) -> Result<()> {
         }
     }
     Ok(())
+}
+fn auth_name(value: mail_core::Authentication) -> &'static str {
+    match value {
+        mail_core::Authentication::Password => "password",
+        mail_core::Authentication::MicrosoftPersonal => "microsoft_personal",
+        mail_core::Authentication::Microsoft365 => "microsoft365",
+    }
+}
+fn read_auth(value: String) -> rusqlite::Result<mail_core::Authentication> {
+    match value.as_str() {
+        "password" => Ok(mail_core::Authentication::Password),
+        "microsoft_personal" => Ok(mail_core::Authentication::MicrosoftPersonal),
+        "microsoft365" => Ok(mail_core::Authentication::Microsoft365),
+        _ => Err(rusqlite::Error::InvalidQuery),
+    }
 }
 fn security_name(security: ConnectionSecurity) -> &'static str {
     match security {

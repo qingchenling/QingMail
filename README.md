@@ -2,7 +2,9 @@
 
 Linux 原生邮件客户端，Rust + GPUI Kit + gpui-kit-material（Material Design 3 Expressive），优先支持 Arch Linux / Hyprland / Wayland。使用通用 IMAP/SMTP，不依赖 Electron 或 WebView。
 
-当前版本 **1.0.0**。支持多账号与统一收件箱、本地搜索、按需阅读与附件下载、离线操作、本地及服务器草稿、显式确认发送、后台常驻、桌面通知和可选自启动。写信、账号、设置及状态入口整合在主窗口，采用 M3E 动效；已知限制和未覆盖场景见文档。
+当前版本 **1.0.1**。支持多账号与统一收件箱、本地搜索、按需阅读与附件下载、离线操作、本地及服务器草稿、显式确认发送、后台常驻、桌面通知和可选自启动。写信、账号、设置及状态入口整合在主窗口，采用 M3E 动效；已知限制和未覆盖场景见文档。
+
+1.0.1 新增 Outlook / Hotmail 与 Microsoft 365 的浏览器 OAuth 登录（已内置 QingMail 应用 ID）、草稿共用布局、默认关闭的发送副本开关和服务器删除同步；使用schema21 / IPC v4，从1.0.0升级需配套更新前后台。具体见 [发行说明](docs/发行说明.md)。
 
 ## 构建与运行
 
@@ -21,10 +23,12 @@ cargo build --release --locked -p mail-ui -p mail-daemon
 
 默认使用正式 XDG 数据目录，配置账号后可真实收发邮件。隔离验证按 [开发与验证](docs/开发与验证.md) 操作，勿将正式数据目录用作测试夹具。
 
+微软账号注册与接入见 [Outlook 使用说明](docs/Outlook邮箱接入.md)。应用ID已内置，已完成模拟测试，门户配置及真实微软兼容待验收。
+
 ## Arch 安装包
 
 ```sh
-python3 tools/build_arch_package.py --output dist/arch-1.0.0
+python3 tools/build_arch_package.py --output dist/arch-1.0.1
 ```
 
 输出目录须不存在。工具只构建，不自动安装。升级前先保存并退出前后台；卸载保留用户数据与凭据。详细步骤见 [安装与升级说明](packaging/arch/README.md)。
@@ -34,7 +38,7 @@ python3 tools/build_arch_package.py --output dist/arch-1.0.0
 | 文档 | 用途 |
 | --- | --- |
 | [项目状态](docs/项目状态.md) | 当前交付、待验收边界与后续范围 |
-| [1.0.0 发行说明](docs/发行说明.md) | 当前界面、升级方式及交付范围 |
+| [1.0.1 发行说明](docs/发行说明.md) | 当前界面、升级方式及交付范围 |
 | [主交接文档](项目构建与开发交接文档.md) | 需求、架构约束、构建与验收基线 |
 | [模块复用说明](docs/项目全貌与模块复用说明.md) | 代码入口、职责和扩展方法 |
 | [开发与验证](docs/开发与验证.md) | 测试工具、隔离方式、GPUI 使用约束 |

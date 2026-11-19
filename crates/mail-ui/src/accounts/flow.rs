@@ -38,7 +38,7 @@ impl Endpoint for crate::lifecycle::AccountBackend {
         }
     }
 }
-fn message(error: Failure) -> String {
+pub(super) fn message(error: Failure) -> String {
     match error {
         Failure::Remote(e) => e.message,
         Failure::Transport(e) => e,
@@ -59,11 +59,20 @@ pub(super) fn check(
 ) -> Result<AccountCheckResult, String> {
     let reference = vault.stage(&credentials).map_err(|e| e.to_string())?;
     drop(credentials);
+    check_reference(endpoint, vault, account, settings, &reference)
+}
+pub(super) fn check_reference(
+    endpoint: &impl Endpoint,
+    vault: &impl CredentialStaging,
+    account: Option<AccountId>,
+    settings: AccountSettings,
+    reference: &str,
+) -> Result<AccountCheckResult, String> {
     let result = (|| {
         let initial = request(Command::CheckAccount {
             account,
             settings,
-            credential_ref: reference.clone(),
+            credential_ref: reference.to_owned(),
         })?;
         let mut reply = endpoint.call(initial).map_err(message)?;
         let until = Instant::now() + Duration::from_secs(120);
@@ -83,7 +92,47 @@ pub(super) fn check(
     })();
     // 后台检查完成后持有实际验证过的凭据，提交不重新信任临时项。
     // 窗口关闭/检查失败也尽力删除；无法清理的项由 TTL 限制。
-    let _ = vault.discard_staged(&reference);
+    let _ = vault.discard_staged(reference);
+    result
+}
+/// Polling and account checks run outside GPUI. Cancel never commits an account.
+pub(super) fn microsoft(
+    endpoint: &impl Endpoint,
+    vault: &impl CredentialStaging,
+    account: Option<AccountId>,
+    settings: AccountSettings,
+    session: &str,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<AccountCheckResult, String> {
+    let result = (|| {
+        let until = Instant::now() + Duration::from_secs(305);
+        while !cancel.load(std::sync::atomic::Ordering::Acquire) && Instant::now() < until {
+            match endpoint
+                .call(request(Command::MicrosoftLoginStatus {
+                    session: session.into(),
+                })?)
+                .map_err(message)?
+            {
+                Reply::MicrosoftLoginReady { credential_ref } => {
+                    let result =
+                        check_reference(endpoint, vault, account, settings, &credential_ref);
+                    return if cancel.load(std::sync::atomic::Ordering::Acquire) {
+                        Err("已取消登录，未保存账号".into())
+                    } else {
+                        result
+                    };
+                }
+                Reply::MicrosoftLoginPending => std::thread::sleep(Duration::from_millis(250)),
+                _ => return Err("微软登录返回了非预期结果".into()),
+            }
+        }
+        Err("微软登录已取消或超时，未保存账号".into())
+    })();
+    if let Ok(request) = request(Command::CancelMicrosoftLogin {
+        session: session.into(),
+    }) {
+        let _ = endpoint.call(request);
+    }
     result
 }
 pub(super) enum SaveResult {
@@ -197,6 +246,7 @@ mod tests {
     }
     fn settings() -> AccountSettings {
         let server = ServerSettings {
+            authentication: Default::default(),
             host: "mail.example.test".into(),
             port: 993,
             username: "test".into(),
@@ -315,5 +365,80 @@ mod tests {
         assert!(
             matches!(save(&endpoint, &commit().id, None), SaveResult::Finished(Err(e)) if e.code == ErrorCode::Conflict)
         );
+    }
+
+    use std::sync::atomic::AtomicBool;
+    #[test]
+    fn microsoft_reference_reuses_checks_and_cleans_up_session_without_committing() {
+        let endpoint = FakeEndpoint::new(vec![
+            Ok(Reply::MicrosoftLoginReady {
+                credential_ref: "d".repeat(32),
+            }),
+            Ok(Reply::AccountCheck(AccountCheckResult {
+                check: Some("e".repeat(32)),
+                imap: Ok(vec![]),
+                smtp: Ok(()),
+            })),
+            Ok(Reply::Acknowledged),
+        ]);
+        let vault = Staging::default();
+        let settings = mail_service::microsoft::settings(
+            "Test",
+            "test@outlook.com",
+            mail_core::Authentication::MicrosoftPersonal,
+        )
+        .unwrap();
+        let result = microsoft(
+            &endpoint,
+            &vault,
+            None,
+            settings,
+            &"f".repeat(32),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert!(result.check.is_some());
+        let requests = endpoint.requests.borrow();
+        assert!(matches!(
+            &requests[0].command,
+            Command::MicrosoftLoginStatus { .. }
+        ));
+        assert!(
+            matches!(&requests[1].command, Command::CheckAccount { credential_ref, .. } if credential_ref == &"d".repeat(32))
+        );
+        assert!(matches!(
+            &requests[2].command,
+            Command::CancelMicrosoftLogin { .. }
+        ));
+        assert_eq!(requests.len(), 3);
+        assert_eq!(*vault.discarded.lock().unwrap(), vec!["d".repeat(32)]);
+    }
+    #[test]
+    fn microsoft_cancel_never_checks_or_commits_account() {
+        let endpoint = FakeEndpoint::new(vec![Ok(Reply::Acknowledged)]);
+        let vault = Staging::default();
+        let settings = mail_service::microsoft::settings(
+            "Test",
+            "test@outlook.com",
+            mail_core::Authentication::MicrosoftPersonal,
+        )
+        .unwrap();
+        assert!(
+            microsoft(
+                &endpoint,
+                &vault,
+                None,
+                settings,
+                &"f".repeat(32),
+                &AtomicBool::new(true)
+            )
+            .is_err()
+        );
+        let requests = endpoint.requests.borrow();
+        assert_eq!(requests.len(), 1);
+        assert!(matches!(
+            &requests[0].command,
+            Command::CancelMicrosoftLogin { .. }
+        ));
     }
 }

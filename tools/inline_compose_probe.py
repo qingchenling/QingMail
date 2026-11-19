@@ -33,7 +33,7 @@ def run(binary, fixture, evidence):
             with socket.socket(socket.AF_UNIX) as stream:
                 stream.settimeout(5)
                 stream.connect(str(root/'runtime/qingmail/daemon.sock'))
-                stream.sendall(json.dumps(dict(version=2, id=secrets.token_hex(16), command=dict(type=kind))).encode()+b'\n')
+                stream.sendall(json.dumps(dict(version=4, id=secrets.token_hex(16), command=dict(type=kind))).encode()+b'\n')
                 return json.loads(stream.makefile('rb').readline(2*1024*1024))['result']['Ok']['data']
 
         def until(fn, timeout=50):

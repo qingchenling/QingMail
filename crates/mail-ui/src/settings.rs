@@ -13,6 +13,7 @@ pub(crate) struct Preferences {
     pub reduce_motion: bool,
     pub show_log: bool,
     pub show_account_check_details: bool,
+    pub auto_load_images: bool,
 }
 impl Default for Preferences {
     fn default() -> Self {
@@ -23,6 +24,7 @@ impl Default for Preferences {
             reduce_motion: false,
             show_log: false,
             show_account_check_details: false,
+            auto_load_images: true,
         }
     }
 }
@@ -56,6 +58,7 @@ impl Preferences {
                 }
                 ("compact", value) => preferences.compact = value == "1",
                 ("reduce_motion", value) => preferences.reduce_motion = value == "1",
+                ("auto_load_images", value) => preferences.auto_load_images = value != "0",
                 ("show_log", value) => preferences.show_log = value == "1",
                 ("show_account_check_details", value) => {
                     preferences.show_account_check_details = value == "1"
@@ -74,15 +77,7 @@ impl Preferences {
         };
         let _ = fs::create_dir_all(parent);
         let temp = parent.join("settings.txt.tmp");
-        let content = format!(
-            "theme={}\nreader_font={}\ncompact={}\nreduce_motion={}\nshow_log={}\nshow_account_check_details={}\n",
-            if self.dark { "dark" } else { "light" },
-            self.reader_font,
-            u8::from(self.compact),
-            u8::from(self.reduce_motion),
-            u8::from(self.show_log),
-            u8::from(self.show_account_check_details)
-        );
+        let content = self.serialize();
         let result = fs::OpenOptions::new()
             .write(true)
             .create(true)
@@ -93,6 +88,18 @@ impl Preferences {
         if result.is_err() {
             let _ = fs::remove_file(&temp);
         }
+    }
+    fn serialize(&self) -> String {
+        format!(
+            "theme={}\nreader_font={}\ncompact={}\nreduce_motion={}\nshow_log={}\nshow_account_check_details={}\nauto_load_images={}\n",
+            if self.dark { "dark" } else { "light" },
+            self.reader_font,
+            u8::from(self.compact),
+            u8::from(self.reduce_motion),
+            u8::from(self.show_log),
+            u8::from(self.show_account_check_details),
+            u8::from(self.auto_load_images)
+        )
     }
 }
 
@@ -261,7 +268,8 @@ impl Settings {
             match change {
                 0 => preferences.notifications = !preferences.notifications,
                 1 => preferences.show_sender_subject = !preferences.show_sender_subject,
-                _ => preferences.show_preview = !preferences.show_preview,
+                2 => preferences.show_preview = !preferences.show_preview,
+                _ => preferences.save_sent_copy = !preferences.save_sent_copy,
             }
             mail_protocol::Command::UpdateDesktopSettings { preferences }
         } else {
@@ -323,6 +331,17 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn automatic_images_default_on_and_explicit_off_survives_roundtrip() {
+        assert!(Preferences::default().auto_load_images);
+        assert!(Preferences::parse("theme=dark\n").auto_load_images);
+        let mut preferences = Preferences::parse("auto_load_images=0\n");
+        assert!(!preferences.auto_load_images);
+        assert_eq!(Preferences::parse(&preferences.serialize()), preferences);
+        preferences.auto_load_images = true;
+        assert_eq!(Preferences::parse(&preferences.serialize()), preferences);
+    }
 
     #[test]
     fn preferences_parse_defaults_clamp_and_ignore_garbage() {

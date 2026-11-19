@@ -59,7 +59,7 @@ with tempfile.TemporaryDirectory(prefix='qingmail-p3-split-') as directory, evid
         processes.append(proc)
         return proc
 
-    def rpc(kind, params=None, version=2):
+    def rpc(kind, params=None, version=4):
         request = dict(version=version, id=secrets.token_hex(16), command=dict(type=kind))
         if params is not None:
             request['command']['args'] = params

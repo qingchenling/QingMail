@@ -13,6 +13,7 @@ fn main() {
         "fixture requires empty account directory"
     );
     let server = ServerSettings {
+        authentication: Default::default(),
         host: "example.invalid".into(),
         port: 993,
         username: "synthetic-only".into(),

@@ -59,7 +59,8 @@ fn decode_staged(
     now: u64,
 ) -> Result<Credentials, VaultError> {
     let created = metadata(attributes, reference)?;
-    if !(44..=8236).contains(&value.len())
+    if !(44..=({ crate::microsoft::MAX_SECRET_BYTES + OAUTH_MAGIC.len() + 40 }))
+        .contains(&value.len())
         || &value[..32] != reference.as_bytes()
         || value[32..40] != created.to_be_bytes()
         || created > now

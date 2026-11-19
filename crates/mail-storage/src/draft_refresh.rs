@@ -154,6 +154,7 @@ pub(super) mod tests {
     use super::*;
     pub(crate) fn setup(s: &mut Store) -> AccountId {
         let server = ServerSettings {
+            authentication: Default::default(),
             host: "example.invalid".into(),
             port: 993,
             username: "fixture".into(),

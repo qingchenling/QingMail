@@ -9,6 +9,7 @@ mod draft_sync;
 mod instance;
 pub mod ipc;
 pub mod launcher;
+mod microsoft_login;
 mod network_gate;
 mod notifications;
 pub mod sending;

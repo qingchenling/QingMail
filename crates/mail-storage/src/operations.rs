@@ -26,7 +26,7 @@ impl Store {
     pub fn enqueue_operations_with_trash(
         &mut self,
         request: &Request,
-        trash: &std::collections::BTreeMap<String, FolderId>,
+        trash: &std::collections::BTreeMap<String, String>,
     ) -> Result<Reply> {
         let Command::EnqueueOperation {
             locations,
@@ -86,18 +86,30 @@ impl Store {
             let source:Option<String>=tx.query_row("SELECT f.remote_name FROM folders f JOIN folder_messages m ON m.account_id=f.account_id AND m.folder_id=f.id AND m.uidvalidity=f.uidvalidity WHERE f.account_id=?1 AND f.id=?2 AND f.uidvalidity=?3 AND m.uid=?4",params![location.account.0,location.folder_id,location.uidvalidity,location.uid],|r|r.get(0)).optional()?;
             let source = source.ok_or(Error::Invalid("邮件定位已变化，请刷新"))?;
             let op = match operation {
-                MailOperation::Delete => MailOperation::Move {
-                    destination: trash
+                MailOperation::Delete => {
+                    let destination = trash
                         .get(&location.account.0)
-                        .ok_or(Error::Invalid("未找到已同步的垃圾箱"))?
-                        .clone(),
-                },
+                        .ok_or(Error::Invalid("未找到服务器垃圾箱"))?;
+                    if destination == &source {
+                        MailOperation::Delete
+                    } else {
+                        MailOperation::Trash {
+                            destination: destination.clone(),
+                        }
+                    }
+                }
                 op => op.clone(),
             };
             if let MailOperation::Move { destination } = &op {
                 let target:Option<String>=tx.query_row("SELECT f.remote_name FROM folders f JOIN remote_folders r ON r.account_id=f.account_id AND r.remote_name=f.remote_name WHERE f.account_id=?1 AND f.id=?2 AND r.selectable=1",params![location.account.0,destination.0],|r|r.get(0)).optional()?;
                 if target.is_none() || target.as_ref() == Some(&source) {
                     return Err(Error::Invalid("目标文件夹无效或跨账号"));
+                }
+            }
+            if let MailOperation::Trash { destination } = &op {
+                let valid: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM remote_folders WHERE account_id=?1 AND remote_name=?2 AND selectable=1)",params![location.account.0,destination],|r| r.get(0))?;
+                if !valid || destination == &source {
+                    return Err(Error::Invalid("服务器垃圾箱定位无效"));
                 }
             }
             let id = new_id()?;
@@ -592,7 +604,7 @@ mod tests {
     #[test]
     fn paused_account_bounded_retry_and_schema11_upgrade() {
         let (root, store, loc, _) = setup();
-        store.connection.execute_batch("DROP TABLE autostart_intent; DROP TABLE notification_candidates; DROP TABLE notification_pending; DROP TABLE notification_baselines; DROP TABLE desktop_settings; DROP VIEW protected_objects; DROP TRIGGER cache_body_insert; DROP TRIGGER cache_part_insert; DROP TABLE cache_access; DROP TABLE cache_settings; DROP TRIGGER stop_sent_draft_sync; DROP TRIGGER track_draft_scan_account; DROP TABLE draft_conflicts; DROP TABLE draft_scan_failures; DROP TABLE draft_scans; DROP TRIGGER track_server_draft_insert; DROP TRIGGER track_server_draft_update; DROP TABLE draft_uploads; DROP TABLE draft_sync; DROP TABLE server_draft_sources; DROP TABLE server_draft_folders; DROP TABLE part_resources; DROP TABLE message_structures; DROP VIEW visible_folder_messages; DROP TABLE mail_operations; PRAGMA user_version=11;").unwrap();
+        store.connection.execute_batch("DROP TRIGGER track_server_draft_update; CREATE TRIGGER track_server_draft_update AFTER UPDATE OF revision ON drafts BEGIN UPDATE draft_sync SET changed_at=unixepoch() WHERE account_id=NEW.account_id AND draft_id=NEW.id; END; ALTER TABLE draft_sync DROP COLUMN local_only; ALTER TABLE drafts DROP COLUMN deleted_at; ALTER TABLE accounts DROP COLUMN imap_auth; ALTER TABLE accounts DROP COLUMN smtp_auth; ALTER TABLE send_tasks DROP COLUMN save_sent_copy; DROP TABLE autostart_intent; DROP TABLE notification_candidates; DROP TABLE notification_pending; DROP TABLE notification_baselines; DROP TABLE desktop_settings; DROP VIEW protected_objects; DROP TRIGGER cache_body_insert; DROP TRIGGER cache_part_insert; DROP TABLE cache_access; DROP TABLE cache_settings; DROP TRIGGER stop_sent_draft_sync; DROP TRIGGER track_draft_scan_account; DROP TABLE draft_conflicts; DROP TABLE draft_scan_failures; DROP TABLE draft_scans; DROP TRIGGER track_server_draft_insert; DROP TRIGGER track_server_draft_update; DROP TABLE draft_uploads; DROP TABLE draft_sync; DROP TABLE server_draft_sources; DROP TABLE server_draft_folders; DROP TABLE part_resources; DROP TABLE message_structures; DROP VIEW visible_folder_messages; DROP TABLE mail_operations; PRAGMA user_version=11;").unwrap();
         drop(store);
         let mut store = Store::open(&root.path().join("data")).unwrap();
         assert!(
@@ -632,5 +644,47 @@ mod tests {
         assert!(store.claim_operation().unwrap().is_none());
         store.retry_operation(&op.id).unwrap();
         assert!(store.claim_operation().unwrap().is_some());
+    }
+    #[test]
+    fn delete_uses_unsynchronized_trash_and_replays_only_the_saved_result() {
+        let (root, mut s, loc, _) = setup();
+        s.connection
+            .execute(
+                "DELETE FROM folders WHERE account_id=?1 AND remote_name='Trash'",
+                [&loc.account.0],
+            )
+            .unwrap();
+        let request = Request::new(
+            new_id().unwrap(),
+            Command::EnqueueOperation {
+                locations: vec![loc.clone()],
+                operation: MailOperation::Delete,
+            },
+        );
+        let trash = std::collections::BTreeMap::from([(loc.account.0.clone(), "Trash".to_owned())]);
+        let first = s.enqueue_operations_with_trash(&request, &trash).unwrap();
+        assert!(messages(&s, &loc).is_empty());
+        assert!(
+            !s.folders(&loc.account)
+                .unwrap()
+                .iter()
+                .any(|f| f.remote_name == "Trash")
+        );
+        drop(s);
+        let mut s = Store::open(&root.path().join("data")).unwrap();
+        let repeat = s.enqueue_operations_with_trash(&request, &trash).unwrap();
+        assert_eq!(
+            serde_json::to_value(first).unwrap(),
+            serde_json::to_value(repeat).unwrap()
+        );
+        let operations = s.operations(None).unwrap();
+        assert_eq!(operations.len(), 1);
+        assert_eq!(
+            operations[0].operation,
+            MailOperation::Trash {
+                destination: "Trash".into()
+            }
+        );
+        assert!(messages(&s, &loc).is_empty());
     }
 }

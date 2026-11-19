@@ -91,6 +91,12 @@ enum Request {
     NextDraftUpload {
         reply: SyncSender<StorageResult<Option<mail_storage::DraftUploadCandidate>>>,
     },
+    FinishDraftDeletion {
+        account: AccountId,
+        draft: mail_core::DraftId,
+        trash: Option<String>,
+        reply: SyncSender<StorageResult<bool>>,
+    },
     DraftSyncSnapshot {
         draft: StoredDraft,
         reply: SyncSender<StorageResult<mail_storage::OutgoingSnapshot>>,
@@ -112,6 +118,7 @@ enum Request {
         upload: mail_storage::DraftUpload,
         epoch: u32,
         uid: u32,
+        trash: Option<String>,
         reply: SyncSender<StorageResult<()>>,
     },
     FailDraftSync {
@@ -562,6 +569,19 @@ impl StorageClient {
     ) -> StorageResult<Receiver<StorageResult<Option<mail_storage::DraftUploadCandidate>>>> {
         self.request(|reply| Request::NextDraftUpload { reply })
     }
+    pub(crate) fn finish_draft_deletion(
+        &self,
+        account: AccountId,
+        draft: mail_core::DraftId,
+        trash: Option<String>,
+    ) -> StorageResult<Receiver<StorageResult<bool>>> {
+        self.request(|reply| Request::FinishDraftDeletion {
+            account,
+            draft,
+            trash,
+            reply,
+        })
+    }
     pub(crate) fn draft_sync_snapshot(
         &self,
         draft: StoredDraft,
@@ -597,11 +617,13 @@ impl StorageClient {
         upload: mail_storage::DraftUpload,
         epoch: u32,
         uid: u32,
+        trash: Option<String>,
     ) -> StorageResult<Receiver<StorageResult<()>>> {
         self.request(|reply| Request::CompleteDraftUpload {
             upload,
             epoch,
             uid,
+            trash,
             reply,
         })
     }
@@ -1436,6 +1458,17 @@ fn run(path: Option<PathBuf>, receiver: Receiver<Request>) {
                 let _ = reply
                     .send(opened.and_then(|s| s.next_draft_upload().map_err(|e| e.to_string())));
             }
+            Request::FinishDraftDeletion {
+                account,
+                draft,
+                trash,
+                reply,
+            } => {
+                let _ = reply.send(opened.and_then(|s| {
+                    s.finish_draft_deletion(&account, &draft, trash.as_deref())
+                        .map_err(|e| e.to_string())
+                }));
+            }
             Request::DraftSyncSnapshot { draft, reply } => {
                 let _ = reply.send(opened.and_then(|s| {
                     s.draft_send_snapshot(&draft.account, &draft.id, draft.revision)
@@ -1465,10 +1498,11 @@ fn run(path: Option<PathBuf>, receiver: Receiver<Request>) {
                 upload,
                 epoch,
                 uid,
+                trash,
                 reply,
             } => {
                 let _ = reply.send(opened.and_then(|s| {
-                    s.complete_draft_upload(&upload, epoch, uid)
+                    s.complete_draft_upload(&upload, epoch, uid, trash.as_deref())
                         .map_err(|e| e.to_string())
                 }));
             }
@@ -2010,7 +2044,10 @@ fn run(path: Option<PathBuf>, receiver: Receiver<Request>) {
                     let id = attempt.task().clone();
                     // account从许可内的持久任务定位，不能接受UI提供的另一个账号。
                     let account = attempt.account().clone();
-                    s.finish_smtp(attempt, outcome).map_err(|e| e.to_string())?;
+                    let folders = s.remote_folders(&account).map_err(|e| e.to_string())?;
+                    let trash = mail_service::folders::trash(&folders, None);
+                    s.finish_smtp(attempt, outcome, trash.as_deref())
+                        .map_err(|e| e.to_string())?;
                     s.task(&account, &id).map_err(|e| e.to_string())
                 }));
             }
@@ -2260,6 +2297,7 @@ mod tests {
         let account = {
             let mut store = Store::open(&path).unwrap();
             let server = mail_core::ServerSettings {
+                authentication: Default::default(),
                 host: "example.invalid".into(),
                 port: 993,
                 username: "synthetic".into(),
@@ -2341,6 +2379,7 @@ mod tests {
         let account = {
             let mut store = Store::open(&path).unwrap();
             let server = mail_core::ServerSettings {
+                authentication: Default::default(),
                 host: "example.invalid".into(),
                 port: 993,
                 username: "synthetic".into(),
@@ -2392,6 +2431,7 @@ mod tests {
         let (account, other) = {
             let mut store = Store::open(&path).unwrap();
             let server = mail_core::ServerSettings {
+                authentication: Default::default(),
                 host: "example.invalid".into(),
                 port: 993,
                 username: "synthetic".into(),
@@ -2683,6 +2723,7 @@ mod account_tests {
     }
     fn settings() -> AccountSettings {
         let server = ServerSettings {
+            authentication: Default::default(),
             host: "example.invalid".into(),
             port: 993,
             username: "synthetic".into(),

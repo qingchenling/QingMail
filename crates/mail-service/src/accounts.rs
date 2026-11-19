@@ -1,5 +1,5 @@
 use crate::credentials::Credentials;
-use mail_core::{AccountSettings, ConnectionSecurity, ServerSettings};
+use mail_core::{AccountSettings, Authentication, ConnectionSecurity, ServerSettings};
 use std::{
     fmt,
     io::{self, BufRead, BufReader, Read, Write},
@@ -19,6 +19,7 @@ pub enum CheckError {
     Protocol,
     Limit,
     EpochChanged,
+    UnsafeDelete,
     Missing,
     Cancelled,
     Storage,
@@ -33,10 +34,11 @@ impl fmt::Display for CheckError {
             Self::Connect => "无法连接服务器",
             Self::Timeout => "连接或响应超时",
             Self::Tls => "TLS 失败：请检查证书、主机名与加密方式",
-            Self::Authentication => "认证失败，请检查用户名及应用专用密码",
+            Self::Authentication => "认证失败，请检查密码或在账号页重新授权；Microsoft 365 还需管理员允许 IMAP / SMTP AUTH",
             Self::Protocol => "服务器协议响应不符合预期",
             Self::Limit => "服务器响应超过检查上限",
             Self::Missing => "该UID已不在远端文件夹中",
+            Self::UnsafeDelete => "服务器不支持安全的定向清除，未执行永久删除；请在网页邮箱处理",
             Self::EpochChanged => "文件夹 UIDVALIDITY 已变化，请先同步最新邮件",
         })
     }
@@ -82,11 +84,20 @@ pub fn validate(settings: &AccountSettings) -> Result<(), CheckError> {
             return Err(CheckError::Invalid);
         }
     }
+    if !crate::microsoft::valid_servers(settings) {
+        return Err(CheckError::Invalid);
+    }
     Ok(())
 }
 /// 调用专用后台任务；无 MAIL FROM/RCPT TO/DATA 或 APPEND。
 pub fn check(settings: &AccountSettings, credentials: &Credentials) -> AccountCheck {
-    if let Err(e) = validate(settings) {
+    if let Err(e) = validate(settings).and_then(|()| {
+        if credentials.authentication() == settings.imap.authentication {
+            Ok(())
+        } else {
+            Err(CheckError::Invalid)
+        }
+    }) {
         return AccountCheck {
             imap: Err(e),
             smtp: Err(e),
@@ -224,11 +235,56 @@ fn check_imap_with_connector(
     Ok(folders)
 }
 pub(crate) type ImapStream = BufReader<Bounded<native_tls::TlsStream<TcpStream>>>;
+/// 仅用于可丢弃的只读会话：关闭 socket 唤醒完整帧/半帧读取，不复用解析位置。
+pub(crate) fn with_read_cancellation<T>(
+    stream: &mut ImapStream,
+    cancel: &std::sync::atomic::AtomicBool,
+    read: impl FnOnce(&mut ImapStream) -> Result<T, CheckError>,
+) -> Result<T, CheckError> {
+    use std::sync::atomic::Ordering;
+    if cancel.load(Ordering::Acquire) {
+        return Err(CheckError::Cancelled);
+    }
+    let socket = stream
+        .get_ref()
+        .stream
+        .get_ref()
+        .try_clone()
+        .map_err(io_error)?;
+    std::thread::scope(|scope| {
+        let (done, finished) = mpsc::channel::<()>();
+        std::thread::Builder::new()
+            .name("qingmail-read-cancel".into())
+            .spawn_scoped(scope, move || {
+                loop {
+                    if cancel.load(Ordering::Acquire) {
+                        let _ = socket.shutdown(std::net::Shutdown::Both);
+                        break;
+                    }
+                    match finished.recv_timeout(Duration::from_millis(25)) {
+                        Err(RecvTimeoutError::Timeout) => (),
+                        _ => break,
+                    }
+                }
+            })
+            .map_err(io_error)?;
+        let result = read(stream);
+        drop(done);
+        if cancel.load(Ordering::Acquire) {
+            Err(CheckError::Cancelled)
+        } else {
+            result
+        }
+    })
+}
 pub(crate) fn authenticated(
     server: &ServerSettings,
     password: &str,
     connector: &native_tls::TlsConnector,
 ) -> Result<ImapStream, CheckError> {
+    if !crate::microsoft::valid_imap_server(server) {
+        return Err(CheckError::Invalid);
+    }
     let socket = connect(server)?;
     let mut stream = Bounded::new(socket);
     if server.security == ConnectionSecurity::StartTls {
@@ -249,16 +305,68 @@ pub(crate) fn authenticated(
     {
         return Err(CheckError::Protocol);
     }
+    authenticate_imap(&mut stream, server, password)?;
+    Ok(stream)
+}
+fn authenticate_imap<T: Read + Write>(
+    stream: &mut BufReader<T>,
+    server: &ServerSettings,
+    secret: &str,
+) -> Result<(), CheckError> {
+    if server.authentication != Authentication::Password {
+        let sasl =
+            crate::microsoft::xoauth2(&server.username, secret).map_err(|_| CheckError::Invalid)?;
+        let login = zeroize::Zeroizing::new(format!("QM2 AUTHENTICATE XOAUTH2 {}\r\n", *sasl));
+        stream
+            .get_mut()
+            .write_all(login.as_bytes())
+            .map_err(io_error)?;
+        stream.get_mut().flush().map_err(io_error)?;
+        for _ in 0..32 {
+            match imap_response(stream)? {
+                imap_proto::Response::Done { tag, status, .. } if tag.as_bytes() == b"QM2" => {
+                    return if status == imap_proto::Status::Ok {
+                        Ok(())
+                    } else {
+                        Err(CheckError::Authentication)
+                    };
+                }
+                imap_proto::Response::Continue(_) => {
+                    // XOAUTH2 errors may arrive as a SASL challenge. End authentication,
+                    // never fall back to LOGIN and never expose the challenge in logs.
+                    stream.get_mut().write_all(b"\r\n").map_err(io_error)?;
+                    stream.get_mut().flush().map_err(io_error)?;
+                    return Err(CheckError::Authentication);
+                }
+                imap_proto::Response::Data {
+                    status: imap_proto::Status::Ok,
+                    ..
+                }
+                | imap_proto::Response::Capabilities(_) => {}
+                _ => return Err(CheckError::Authentication),
+            }
+        }
+        return Err(CheckError::Limit);
+    }
     let mut login = zeroize::Zeroizing::new(b"QM2 LOGIN ".to_vec());
     quoted(&mut login, &server.username);
     login.push(b' ');
-    quoted(&mut login, password);
+    quoted(&mut login, secret);
     login.extend_from_slice(b"\r\n");
     stream.get_mut().write_all(&login).map_err(io_error)?;
     stream.get_mut().flush().map_err(io_error)?;
-    drop(login);
-    imap_done(&mut stream, "QM2", true, false)?;
-    Ok(stream)
+    imap_done(stream, "QM2", true, false)?;
+    Ok(())
+}
+pub(crate) fn smtp_mechanisms(
+    authentication: Authentication,
+) -> &'static [lettre::transport::smtp::authentication::Mechanism] {
+    use lettre::transport::smtp::authentication::Mechanism;
+    if authentication == Authentication::Password {
+        &[Mechanism::Plain, Mechanism::Login]
+    } else {
+        &[Mechanism::Xoauth2]
+    }
 }
 pub(crate) fn quoted(output: &mut Vec<u8>, text: &str) {
     output.push(b'"');
@@ -434,6 +542,9 @@ pub fn folder_label(raw: &str) -> String {
     decode().unwrap_or_else(|| raw.into())
 }
 fn check_smtp(server: &ServerSettings, password: &str) -> Result<(), CheckError> {
+    if !crate::microsoft::valid_smtp_server(server) {
+        return Err(CheckError::Invalid);
+    }
     use lettre::transport::smtp::SmtpTransport;
     let builder = match server.security {
         ConnectionSecurity::Tls => SmtpTransport::relay(&server.host),
@@ -449,6 +560,7 @@ fn smtp_using_builder(
 ) -> Result<(), CheckError> {
     use lettre::transport::smtp::authentication::Credentials as SmtpCredentials;
     let transport = builder
+        .authentication(smtp_mechanisms(server.authentication).to_vec())
         .port(server.port)
         .timeout(Some(Duration::from_secs(5)))
         .credentials(SmtpCredentials::new(

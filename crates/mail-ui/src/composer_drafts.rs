@@ -1,7 +1,7 @@
 //! 账号草稿列表复用 Composer 的保存与切换流程，不另开编辑窗口。
 use super::*;
 use crate::ui::{icon, motion, quiet, tool};
-use gpui_kit::{AnyElement, MouseButton, MouseDownEvent, MouseMoveEvent};
+use gpui_kit::AnyElement;
 use mail_protocol::{Command, DraftSyncInfo, Reply};
 
 pub(crate) fn sync_label(revision: u32, info: Option<&DraftSyncInfo>) -> &'static str {
@@ -65,11 +65,12 @@ impl Composer {
                 Reply::DraftSyncStatus(v) => v,
                 _ => return Err("草稿同步状态响应无效".to_owned()),
             };
-            let changed = sync.iter().any(|s| {
+            let visible: Vec<_> = sync.iter().filter(|s| s.state != "deleting").collect();
+            let changed = visible.iter().any(|s| {
                 !known
                     .iter()
                     .any(|(id, revision)| id == &s.draft && *revision == s.revision)
-            }) || (sync.len() < 200 && known.len() != sync.len());
+            }) || (sync.len() < 200 && known.len() != visible.len());
             let drafts = if changed {
                 Some(receive(store.account_drafts(account))?)
             } else {
@@ -121,15 +122,30 @@ impl Composer {
         }
         sync_label(d.revision, info)
     }
-    fn show_details(&mut self, cx: &mut Context<Self>) {
-        if self.server_details.is_none()
-            && let (Some((account, _)), Some(folder)) =
-                (&self.account_scope, &self.workspace_folder)
+    pub(super) fn show_details(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.loading
+            || self.deleting
+            || self.importing
+            || self.closing
+            || self.send_locked()
+            || self.composing(window, cx)
         {
+            return;
+        }
+        if self.saving || self.saved != Some(self.session.borrow().revision) {
+            self.pending_details = true;
+            self.status = "正在保存当前编辑，完成后打开冲突处理".into();
+            self.save(cx);
+            cx.notify();
+            return;
+        }
+        if let (Some((account, _)), Some(folder)) = (&self.account_scope, &self.workspace_folder) {
             let account = account.clone();
             let folder = folder.clone();
-            self.server_details =
-                Some(cx.new(|cx| crate::server_drafts::ServerDrafts::new_for(account, folder, cx)));
+            let selected = self.stored.as_ref().map(|d| d.id.clone());
+            self.server_details = Some(cx.new(|cx| {
+                crate::server_drafts::ServerDrafts::new_for(account, folder, selected, cx)
+            }));
         }
         self.show_server_details = true;
         self.list_visible = false;
@@ -212,7 +228,7 @@ impl Composer {
                     Ok(()) => {
                         this.drafts.retain(|d| d.id != deleted);
                         this.clear_selection(window, cx);
-                        this.status = "本地草稿已删除；服务器副本和发送记录保留".into();
+                        this.status = "草稿已删除；云端副本由后台继续核验和清理".into();
                         this.list_visible = true;
                         // Do not create another empty draft after deleting the last one.
                         if let Some(next) = this.drafts.first() {
@@ -232,7 +248,7 @@ impl Composer {
         .detach();
         cx.notify();
     }
-    fn workspace_list(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn workspace_list(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let entity = cx.entity();
         let menu = MaterialMenu::new("draft-list-menu").items([
             MaterialMenuItem::new("刷新草稿列表")
@@ -246,9 +262,14 @@ impl Composer {
                         })
                     }
                 }),
-            MaterialMenuItem::new("服务器原件与同步冲突…")
-                .on_click(move |_, _, cx| entity.update(cx, |this, cx| this.show_details(cx))),
+            MaterialMenuItem::new("草稿同步与恢复…").on_click(move |_, window, cx| {
+                entity.update(cx, |this, cx| this.show_details(window, cx))
+            }),
         ]);
+        let has_sync_issue = self
+            .sync_items
+            .iter()
+            .any(|item| matches!(item.state.as_str(), "conflict" | "uncertain"));
         let filter = self.draft_search.read(cx).value().to_lowercase();
         let mut drafts: Vec<_> = self
             .drafts
@@ -427,7 +448,7 @@ impl Composer {
             .flex_col()
             .child(
                 div()
-                    .h(px(64.))
+                    .h(px(72.))
                     .flex_none()
                     .px_4()
                     .flex()
@@ -440,6 +461,13 @@ impl Composer {
                             .child("草稿"),
                     )
                     .child(div().text_sm().child(self.drafts.len().to_string()))
+                    .when(has_sync_issue, |header| {
+                        header.child(
+                            tool("draft-sync-issues", "warning", "处理草稿同步冲突").on_click(
+                                cx.listener(|this, _, window, cx| this.show_details(window, cx)),
+                            ),
+                        )
+                    })
                     .child(div().flex_1())
                     .child(MenuPopup::new(
                         "draft-list-more",
@@ -463,6 +491,13 @@ impl Composer {
                     .text_color(theme::color(ColorRole::ON_SURFACE_VARIANT))
                     .child(format!("{} 份草稿", drafts.len())),
             )
+            .into_any_element()
+    }
+    pub(crate) fn workspace_search(&self) -> Entity<InputState> {
+        self.draft_search.clone()
+    }
+    pub(crate) fn workspace_list_visible(&self) -> bool {
+        self.list_visible
     }
     pub(super) fn workspace(
         &mut self,
@@ -471,13 +506,6 @@ impl Composer {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let wide = window.bounds().size.width >= px(1050.);
-        let available = window.bounds().size.width.as_f32() - 216.;
-        self.list_width = self.list_width.clamp(300., (available - 420.).max(300.));
-        self.pane_width = if wide {
-            available - self.list_width - 5.
-        } else {
-            available
-        };
         let mut detail = div().size_full().min_w_0().min_h_0().flex().flex_col();
         if !wide || self.show_server_details {
             detail = detail.child(
@@ -490,9 +518,13 @@ impl Composer {
                     },
                 )
                 .icon(icon("arrow_back"))
-                .on_click(cx.listener(|this, _, _, cx| {
+                .on_click(cx.listener(|this, _, window, cx| {
                     if this.show_server_details {
                         this.show_server_details = false;
+                        this.server_details = None;
+                        this.draft_list_generation += 1;
+                        this.loading = true;
+                        this.load_store(window, cx);
                     } else {
                         this.list_visible = true;
                     }
@@ -505,14 +537,7 @@ impl Composer {
                 detail = detail.child(div().flex_1().min_h_0().child(details.clone()));
             }
         } else if self.stored.is_some() || self.load_failed {
-            detail = detail.child(motion::enter(
-                format!(
-                    "draft-editor-{}",
-                    self.stored.as_ref().map_or("unsaved", |d| d.id.0.as_str())
-                ),
-                div().flex_1().min_h_0().child(editor),
-                cx,
-            ));
+            detail = detail.child(div().flex_1().min_h_0().child(editor));
         } else {
             detail = detail.child(
                 div()
@@ -532,121 +557,7 @@ impl Composer {
                     .child(div().px_4().text_sm().child(self.status.clone())),
             );
         }
-        let mut body = div().flex_1().min_h_0().flex();
-        if wide {
-            body = body
-                .child(
-                    div()
-                        .w(px(self.list_width))
-                        .flex_none()
-                        .child(self.workspace_list(window, cx)),
-                )
-                .child(
-                    div()
-                        .id("draft-pane-divider")
-                        .w(px(5.))
-                        .h_full()
-                        .cursor_col_resize()
-                        .bg(theme::color(ColorRole::OUTLINE_VARIANT))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(|this, event: &MouseDownEvent, _, cx| {
-                                this.resize_start =
-                                    Some((event.position.x.as_f32(), this.list_width));
-                                cx.notify();
-                            }),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .h_full()
-                        .overflow_hidden()
-                        .child(detail),
-                );
-        } else if self.list_visible {
-            body = body.child(div().flex_1().child(self.workspace_list(window, cx)));
-        } else {
-            body = body.child(detail);
-        }
-        div()
-            .size_full()
-            .min_w_0()
-            .min_h_0()
-            .flex()
-            .flex_col()
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
-                if event.pressed_button != Some(MouseButton::Left) {
-                    this.resize_start = None;
-                }
-                if let Some((x, width)) = this.resize_start {
-                    this.list_width = (width + event.position.x.as_f32() - x).clamp(
-                        300.,
-                        (window.bounds().size.width.as_f32() - 216. - 420.).max(300.),
-                    );
-                    cx.notify();
-                }
-            }))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.resize_start = None;
-                    cx.notify();
-                }),
-            )
-            .on_mouse_up_out(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.resize_start = None;
-                    cx.notify();
-                }),
-            )
-            .child(
-                div()
-                    .h(px(72.))
-                    .flex_none()
-                    .px_4()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .border_b_1()
-                    .border_color(theme::color(ColorRole::OUTLINE_VARIANT))
-                    .child(div().w(px(190.)).truncate().text_sm().child(format!(
-                            "{} / 草稿",
-                            self.account_scope
-                                .as_ref()
-                                .map_or("邮箱", |(_, a)| a.as_str())
-                        )))
-                    .child(
-                        TextField::new("draft-search", &self.draft_search)
-                            .outlined()
-                            .density(TextFieldDensity::Compact)
-                            .leading_icon(icon("search"))
-                            .placeholder("搜索草稿")
-                            .flex_1()
-                            .max_w(px(420.)),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        tool("draft-accounts", "manage_accounts", "邮箱账号").on_click(
-                            |_, _, cx| {
-                                crate::lifecycle::open_page(crate::mailbox::Page::Accounts, cx)
-                            },
-                        ),
-                    )
-                    .child(
-                        tool("draft-settings", "settings", "设置").on_click(|_, _, cx| {
-                            crate::lifecycle::open_page(crate::mailbox::Page::Settings, cx)
-                        }),
-                    )
-                    .child(
-                        tool("draft-refresh", "sync", "刷新草稿列表")
-                            .on_click(cx.listener(|this, _, _, cx| this.refresh_workspace(cx))),
-                    ),
-            )
-            .child(body)
-            .into_any_element()
+        detail.into_any_element()
     }
     pub(super) fn delete_confirmation(&self, cx: &mut Context<Self>) -> impl IntoElement {
         div()
@@ -658,14 +569,12 @@ impl Composer {
             .gap_2()
             .bg(theme::color(ColorRole::ERROR_CONTAINER))
             .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_sm()
-                    .child("删除这份本地草稿及未保存修改？服务器副本和已确认的发送记录保留。"),
+                div().flex_1().min_w_0().text_sm().child(
+                    "删除这份草稿及未保存修改？云端副本由后台核验后移到垃圾箱；发送记录保留。",
+                ),
             )
             .child(
-                quiet("confirm-delete-draft", "删除本地草稿")
+                quiet("confirm-delete-draft", "删除草稿")
                     .disabled(self.edit_disabled() || self.saving)
                     .on_click(cx.listener(|this, _, w, cx| this.delete_draft(w, cx))),
             )

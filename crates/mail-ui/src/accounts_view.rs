@@ -10,6 +10,7 @@ impl Accounts {
             return;
         }
         self.editing = None;
+        self.authentication = Authentication::Password;
         self.form_initialized = true;
         self.checked = None;
         self.impact = None;
@@ -32,6 +33,57 @@ impl Accounts {
         self.smtp = "尚未检查".into();
         self.status = "填写邮箱服务商提供的 IMAP / SMTP 配置".into();
         cx.notify();
+    }
+    fn provider_controls(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut choices = div().flex().flex_wrap().gap_2();
+        for (id, label, authentication) in [
+            ("generic", "通用邮箱", Authentication::Password),
+            (
+                "outlook",
+                "Outlook / Hotmail",
+                Authentication::MicrosoftPersonal,
+            ),
+            (
+                "microsoft365",
+                "Microsoft 365 工作或学校",
+                Authentication::Microsoft365,
+            ),
+        ] {
+            choices = choices.child(
+                MaterialButton::new(id)
+                    .variant(if self.authentication == authentication {
+                        ButtonVariant::Tonal
+                    } else {
+                        ButtonVariant::Outlined
+                    })
+                    .disabled(self.busy || self.pending.is_some())
+                    .child(label)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.authentication = authentication;
+                        this.checked = None;
+                        this.folders.clear();
+                        this.imap = "尚未检查".into();
+                        this.smtp = "尚未检查".into();
+                        for i in [5, 9] {
+                            this.inputs[i].update(cx, |input, cx| input.set_value("", window, cx));
+                        }
+                        this.status = if authentication == Authentication::Password {
+                            "填写邮箱服务商提供的 IMAP / SMTP 配置"
+                        } else {
+                            "填写邮箱，然后在浏览器登录"
+                        }
+                        .into();
+                        cx.notify();
+                    })),
+            );
+        }
+        div().flex().flex_col().gap_3().child(choices)
+            .when(self.authentication != Authentication::Password, |panel| panel
+                .child(div().text_sm().text_color(theme::color(ColorRole::ON_SURFACE_VARIANT))
+                    .child("使用系统浏览器完成微软授权，无需填写密码。"))
+                .child(MaterialButton::new("microsoft-login-help").variant(ButtonVariant::Text)
+                    .child("查看微软邮箱帮助")
+                    .on_click(cx.listener(|_,_,_,cx| cx.open_url("https://support.microsoft.com/zh-cn/outlook/pop-imap-and-smtp-settings-for-outlook-com")))))
     }
     fn field(&self, i: usize) -> TextField {
         let field = TextField::new(("account-input", i), &self.inputs[i])
@@ -447,6 +499,18 @@ impl Render for Accounts {
                     })),
             );
         }
+        if let Some(cancel) = self.oauth_cancel.clone() {
+            actions = actions.child(
+                MaterialButton::new("cancel-microsoft-login")
+                    .variant(ButtonVariant::Outlined)
+                    .child("取消登录")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cancel.store(true, std::sync::atomic::Ordering::Release);
+                        this.status = "正在取消登录，未保存账号…".into();
+                        cx.notify();
+                    })),
+            );
+        }
         actions = actions
             .child(div().flex_1())
             .child(
@@ -458,7 +522,11 @@ impl Render for Accounts {
                 MaterialButton::new("check-account")
                     .variant(ButtonVariant::Outlined)
                     .disabled(self.busy || self.pending.is_some())
-                    .child("检查连接")
+                    .child(if self.authentication == Authentication::Password {
+                        "检查连接"
+                    } else {
+                        "在浏览器登录并检查"
+                    })
                     .on_click(cx.listener(|this, _, window, cx| this.check(window, cx))),
             )
             .child(
@@ -483,6 +551,7 @@ impl Render for Accounts {
             .flex_col()
             .gap_5()
             .child(heading)
+            .child(self.provider_controls(cx))
             .child(
                 div()
                     .flex()
@@ -491,14 +560,20 @@ impl Render for Accounts {
                     .child(div().flex_1().min_w_0().child(self.field(0)))
                     .child(div().flex_1().min_w_0().child(self.field(1))),
             )
-            .child(
+            .when(self.authentication == Authentication::Password, |panel| panel.child(
                 div()
                     .flex()
                     .when(!wide, |row| row.flex_col())
                     .gap_4()
                     .child(div().flex_1().min_w_0().child(self.server_card(0, cx)))
                     .child(div().flex_1().min_w_0().child(self.server_card(1, cx))),
-            )
+            ))
+            .when(self.authentication != Authentication::Password, |panel| panel.child(
+                div().p_4().rounded(px(16.)).bg(theme::color(ColorRole::SURFACE_CONTAINER_HIGH))
+                    .flex().flex_col().gap_2()
+                    .child("收信：outlook.office365.com · 993 · TLS · OAuth")
+                    .child(if self.authentication == Authentication::MicrosoftPersonal { "发信：smtp-mail.outlook.com · 587 · STARTTLS · OAuth" } else { "发信：smtp.office365.com · 587 · STARTTLS · OAuth" })
+                    .child("Outlook 网页设置需开启 IMAP；工作或学校账号还需管理员允许 IMAP 与 SMTP AUTH。")))
             .child(
                 div()
                     .flex()
@@ -507,7 +582,7 @@ impl Render for Accounts {
                     .text_sm()
                     .text_color(theme::color(ColorRole::ON_SURFACE_VARIANT))
                     .child(icon("lock").size(px(16.)))
-                    .child("密码保存在系统密钥库 · 连接检查不会发送邮件"),
+                    .child("密码或授权令牌仅保存在系统密钥库 · 连接检查不会发送邮件"),
             )
             .child(actions);
         form = form.child(motion::enter(format!("account-form-{:?}", self.editing), details, cx))

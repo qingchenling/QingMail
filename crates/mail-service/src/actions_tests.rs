@@ -146,6 +146,7 @@ fn changed_epoch_or_invalid_input_never_stores() {
     worker.join().unwrap();
 
     let offline = ServerSettings {
+        authentication: Default::default(),
         host: "127.0.0.1".into(),
         port: 1,
         username: "synthetic".into(),
@@ -258,6 +259,51 @@ fn reconciliation_probe_is_read_only_and_checks_uid_and_flags() {
                 None
             }
         );
+        worker.join().unwrap();
+    }
+}
+
+#[test]
+fn permanent_delete_uses_only_selected_uids_and_requires_safe_expunge() {
+    for supported in [true, false] {
+        let (cert, key) = certificate();
+        let accept = acceptor(&cert, &key);
+        let listener = listener();
+        let settings = server(&listener, ConnectionSecurity::Tls);
+        let worker = thread::spawn(move || {
+            let mut r = BufReader::new(accept.accept(socket(listener)).unwrap());
+            r.get_mut().write_all(b"* OK synthetic\r\n").unwrap();
+            assert!(line(&mut r).starts_with("QM2 LOGIN "));
+            r.get_mut().write_all(b"QM2 OK authenticated\r\n").unwrap();
+            assert_eq!(line(&mut r), "QM4 CAPABILITY\r\n");
+            r.get_mut()
+                .write_all(if supported {
+                    b"* CAPABILITY IMAP4rev1 UIDPLUS\r\nQM4 OK capability\r\n"
+                } else {
+                    b"* CAPABILITY IMAP4rev1\r\nQM4 OK capability\r\n"
+                })
+                .unwrap();
+            if supported {
+                assert_eq!(line(&mut r), "QM3 SELECT \"Trash\"\r\n");
+                r.get_mut()
+                    .write_all(b"* OK [UIDVALIDITY 42] stable\r\nQM3 OK selected\r\n")
+                    .unwrap();
+                assert_eq!(
+                    line(&mut r),
+                    "QM5 UID STORE 5,7 +FLAGS.SILENT (\\Deleted)\r\n"
+                );
+                r.get_mut().write_all(b"QM5 OK stored\r\n").unwrap();
+                assert_eq!(line(&mut r), "QM6 UID EXPUNGE 5,7\r\n");
+                r.get_mut().write_all(b"QM6 OK removed\r\n").unwrap();
+            }
+            assert_eq!(line(&mut r), "QM9 LOGOUT\r\n");
+        });
+        let result =
+            delete_checked_using(&settings, "synthetic", "Trash", 42, &[5, 7], &tls(&cert));
+        assert_eq!(result.is_ok(), supported);
+        if let Err(e) = result {
+            assert!(!e.may_have_changed);
+        }
         worker.join().unwrap();
     }
 }

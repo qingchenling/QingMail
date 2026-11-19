@@ -173,11 +173,20 @@ fn smtp_case_message(
     case: Case,
     message: PreparedMessage,
 ) -> Delivery {
+    smtp_case_auth(security, case, message, mail_core::Authentication::Password)
+}
+fn smtp_case_auth(
+    security: ConnectionSecurity,
+    case: Case,
+    message: PreparedMessage,
+    authentication: mail_core::Authentication,
+) -> Delivery {
     use lettre::transport::smtp::client::Certificate;
     let (cert, key) = certificate();
     let accept = acceptor(&cert, &key);
     let listener = listener();
-    let settings = server(&listener, security);
+    let mut settings = server(&listener, security);
+    settings.authentication = authentication;
     let params = TlsParameters::builder("localhost".into())
         .add_root_certificate(Certificate::from_pem(&cert).unwrap())
         .build()
@@ -202,9 +211,25 @@ fn smtp_case_message(
         }
         assert!(line(&mut r).starts_with("EHLO "));
         r.get_mut()
-            .write_all(b"250-localhost\r\n250 AUTH PLAIN\r\n")
+            .write_all(b"250-localhost\r\n250 AUTH XOAUTH2 PLAIN LOGIN\r\n")
             .unwrap();
-        assert!(line(&mut r).starts_with("AUTH PLAIN "));
+        let auth = line(&mut r);
+        assert!(
+            auth.starts_with(if authentication == mail_core::Authentication::Password {
+                "AUTH PLAIN "
+            } else {
+                "AUTH XOAUTH2 "
+            })
+        );
+        if authentication != mail_core::Authentication::Password {
+            use base64::Engine;
+            assert_eq!(
+                base64::engine::general_purpose::STANDARD
+                    .decode(auth.split_whitespace().nth(2).unwrap())
+                    .unwrap(),
+                b"user=synthetic-user\x01auth=Bearer synthetic-password\x01\x01"
+            );
+        }
         if matches!(case, Case::Authentication) {
             r.get_mut()
                 .write_all(b"535 secret-server-text\r\n")
@@ -345,7 +370,12 @@ fn persisted_attempt_maps_results_and_restart_never_reopens_smtp_permission() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("data");
         let mut store = Store::open(&path).unwrap();
+        // This case explicitly exercises the optional CopyPending branch.
+        let mut preferences = store.desktop_preferences().unwrap();
+        preferences.save_sent_copy = true;
+        store.update_desktop_preferences(&preferences).unwrap();
         let server = ServerSettings {
+            authentication: Default::default(),
             host: "example.invalid".into(),
             port: 993,
             username: "synthetic".into(),
@@ -383,7 +413,7 @@ fn persisted_attempt_maps_results_and_restart_never_reopens_smtp_permission() {
         );
         assert!(store.begin_smtp(&account, &task).is_err());
         let delivery = smtp_case_message(ConnectionSecurity::Tls, case, validated);
-        store.finish_smtp(attempt, delivery.outcome).unwrap();
+        store.finish_smtp(attempt, delivery.outcome, None).unwrap();
         drop(store);
         let mut store = Store::open(&path).unwrap();
         assert_eq!(store.task(&account, &task).unwrap().state, expected);
@@ -478,4 +508,24 @@ fn draft_mime_accepts_empty_recipients_preserves_bcc_and_validated_rich_model_wi
     assert!(!mime.contains("application/vnd.qingmail.draft+json"));
     input.plain = "external modified body".into();
     assert!(mail_content::server_draft_model(&prepare_draft(&input, &json).unwrap()).is_none());
+}
+
+#[test]
+fn microsoft_smtp_submit_once_keeps_uncertain_and_rejected_outcomes_without_fallback() {
+    for (case, expected) in [
+        (Case::Accept, SmtpOutcome::Accepted),
+        (Case::DisconnectFinal, SmtpOutcome::Uncertain),
+        (Case::Authentication, SmtpOutcome::DefinitelyRejected),
+    ] {
+        let delivery = smtp_case_auth(
+            ConnectionSecurity::StartTls,
+            case,
+            prepare(&snapshot(), false).unwrap(),
+            mail_core::Authentication::MicrosoftPersonal,
+        );
+        assert_eq!(
+            std::mem::discriminant(&delivery.outcome),
+            std::mem::discriminant(&expected)
+        );
+    }
 }

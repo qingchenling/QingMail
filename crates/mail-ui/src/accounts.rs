@@ -4,7 +4,7 @@ use gpui_kit::{
     base::input::{InputEvent, InputState},
     prelude::*,
 };
-use mail_core::{AccountId, AccountSettings, ConnectionSecurity, ServerSettings};
+use mail_core::{AccountId, AccountSettings, Authentication, ConnectionSecurity, ServerSettings};
 use mail_daemon::storage::receive;
 use mail_service::{
     accounts::{self, RemoteFolder},
@@ -37,6 +37,8 @@ struct Checked {
 }
 pub(super) struct Accounts {
     inputs: Vec<Entity<InputState>>,
+    authentication: Authentication,
+    oauth_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     _subscriptions: Vec<gpui_kit::Subscription>,
     security: [ConnectionSecurity; 2],
     busy: bool,
@@ -76,6 +78,8 @@ impl Accounts {
             .collect();
         let mut this = Self {
             inputs,
+            authentication: Authentication::Password,
+            oauth_cancel: None,
             _subscriptions: vec![],
             security: [ConnectionSecurity::Tls; 2],
             busy: false,
@@ -118,7 +122,7 @@ impl Accounts {
         this.refresh(cx);
         if std::env::args().any(|a| a == "--accounts-probe") {
             cx.spawn_in(window, async move |entity, cx| {
-                for step in 0..4 {
+                for step in 0..8 {
                     cx.background_executor()
                         .timer(std::time::Duration::from_millis(250))
                         .await;
@@ -175,7 +179,7 @@ impl Accounts {
                 });
                 assert!(!self.can_save(cx));
             }
-            _ => {
+            3 => {
                 assert!(
                     self.checked.is_none(),
                     "editing must discard checked credentials"
@@ -185,8 +189,36 @@ impl Accounts {
                 self.check(window, cx);
                 assert!(!self.busy);
                 assert!(!self.can_save(cx));
+            }
+            4 => {
+                self.authentication = Authentication::MicrosoftPersonal;
+                self.inputs[1].update(cx, |input, cx| {
+                    input.set_value("probe@outlook.com", window, cx)
+                });
+                let settings = self.settings(cx).unwrap();
+                assert_eq!(settings.imap.host, "outlook.office365.com");
+                assert_eq!(settings.smtp.host, "smtp-mail.outlook.com");
+                assert!(!self.can_save(cx));
+            }
+            5 => {
+                self.authentication = Authentication::Microsoft365;
+                assert_eq!(self.settings(cx).unwrap().smtp.host, "smtp.office365.com");
+                self.checked = Some(Checked {
+                    settings: self.settings(cx).unwrap(),
+                    token: "b".repeat(32),
+                });
+                assert!(self.can_save(cx));
+            }
+            6 => {
+                self.inputs[1].update(cx, |input, cx| {
+                    input.replace_text_in_range(Some(0..17), "changed@outlook.com", window, cx)
+                });
+                assert!(!self.can_save(cx));
+            }
+            _ => {
+                assert!(self.checked.is_none());
                 eprintln!(
-                    "QINGMAIL_ACCOUNT_PROBE: PASS · input values / validation / settings binding / invalidation / no network or credential writes"
+                    "QINGMAIL_ACCOUNT_PROBE: PASS · generic / Outlook / Microsoft365 profiles / built-in client ID / input binding / invalidation / no network or credential writes"
                 );
                 cx.quit();
             }
@@ -197,8 +229,17 @@ impl Accounts {
         self.inputs[index].read(cx).value().to_string()
     }
     fn settings(&self, cx: &App) -> Result<AccountSettings, String> {
+        if self.authentication != Authentication::Password {
+            return mail_service::microsoft::settings(
+                &self.value(0, cx),
+                self.value(1, cx).trim(),
+                self.authentication,
+            )
+            .map_err(|e| e.to_string());
+        }
         let server = |offset: usize, security| {
             Ok::<_, String>(ServerSettings {
+                authentication: Default::default(),
                 host: self.value(offset, cx).trim().into(),
                 port: self
                     .value(offset + 1, cx)
@@ -317,6 +358,10 @@ impl Accounts {
         if self.busy || self.pending.is_some() {
             return;
         }
+        if self.authentication != Authentication::Password {
+            self.check_microsoft(cx);
+            return;
+        }
         self.checked = None;
         self.folders.clear();
         self.imap = "尚未检查".into();
@@ -358,28 +403,157 @@ impl Accounts {
             let (settings, result) = task.await;
             let _ = entity.update(cx, |this, cx| {
                 this.busy = false;
-                match result {
-                    Ok(result) => {
-                        this.smtp = result
-                            .smtp
-                            .map(|()| "连接与认证通过".into())
-                            .unwrap_or_else(|e| e.message);
-                        match result.imap {
-                            Ok(folders) => {
-                                this.imap = format!("连接与认证通过 · {} 个文件夹", folders.len());
-                                this.folders = folders;
-                            }
-                            Err(e) => this.imap = e.message,
-                        }
-                        if let Some(token) = result.check {
-                            this.checked = Some(Checked { settings, token });
-                            this.status = "检查通过，可以保存；修改配置后需重新检查".into();
-                        } else {
-                            this.status = "未保存账号。请修正配置并重新输入密码后检查".into();
-                        }
+                this.checked_result(settings, result);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+    fn checked_result(
+        &mut self,
+        settings: AccountSettings,
+        result: Result<mail_protocol::AccountCheckResult, String>,
+    ) {
+        match result {
+            Ok(result) => {
+                self.smtp = result
+                    .smtp
+                    .map(|()| "连接与认证通过".into())
+                    .unwrap_or_else(|e| e.message);
+                match result.imap {
+                    Ok(folders) => {
+                        self.imap = format!("连接与认证通过 · {} 个文件夹", folders.len());
+                        self.folders = folders;
                     }
-                    Err(e) => this.status = format!("连接检查未完成：{e}；请重新输入密码后检查"),
+                    Err(e) => self.imap = e.message,
                 }
+                if let Some(token) = result.check {
+                    self.checked = Some(Checked { settings, token });
+                    self.status = "检查通过，可以保存；修改配置后需重新检查".into();
+                } else {
+                    self.status = format!("未保存账号。收信：{}；发信：{}", self.imap, self.smtp);
+                }
+            }
+            Err(e) => self.status = format!("连接检查未完成：{e}；请检查配置后重试"),
+        }
+    }
+    fn check_microsoft(&mut self, cx: &mut Context<Self>) {
+        use flow::Endpoint;
+        let settings = match self.settings(cx) {
+            Ok(s) => s,
+            Err(e) => {
+                self.status = e;
+                cx.notify();
+                return;
+            }
+        };
+        let id = match request_id() {
+            Ok(id) => id,
+            Err(e) => {
+                self.status = e.to_string();
+                cx.notify();
+                return;
+            }
+        };
+        self.checked = None;
+        self.folders.clear();
+        self.busy = true;
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.oauth_cancel = Some(cancel.clone());
+        self.status = "正在启动系统浏览器登录…".into();
+        let backend = crate::lifecycle::account_backend(cx);
+        let address = settings.address.clone();
+        let authentication = settings.imap.authentication;
+        let session_id = id.clone();
+        let cleanup_backend = backend.clone();
+        let task = cx.background_executor().spawn(async move {
+            let result = backend
+                .call(Request::new(
+                    id,
+                    Command::BeginMicrosoftLogin {
+                        address,
+                        authentication,
+                    },
+                ))
+                .map_err(flow::message);
+            if result.is_err() {
+                // A lost begin response can still have started a listener. Cancel its
+                // known session ID; never repeat the authorization request blindly.
+                let _ = backend.call(Request::new(
+                    request_id().unwrap_or_else(|_| session_id.clone()),
+                    Command::CancelMicrosoftLogin {
+                        session: session_id.clone(),
+                    },
+                ));
+            }
+            (session_id, result)
+        });
+        cx.spawn(async move |entity, cx| {
+            let (session_id, result) = task.await;
+            let updated = entity.update(cx, |this, cx| match result {
+                Ok(mail_protocol::Reply::MicrosoftLoginStarted {
+                    session,
+                    authorization_url,
+                }) => {
+                    if !cancel.load(std::sync::atomic::Ordering::Acquire) {
+                        cx.open_url(&authorization_url);
+                    }
+                    this.status =
+                        "请在浏览器完成微软授权；返回后会检查收发连接，不会发送邮件".into();
+                    this.wait_microsoft(settings, session, cancel, cx);
+                }
+                other => {
+                    this.busy = false;
+                    this.oauth_cancel = None;
+                    this.status = other
+                        .err()
+                        .unwrap_or_else(|| "后台返回了非预期登录结果".into());
+                    cx.notify();
+                }
+            });
+            if updated.is_err() {
+                cx.background_executor()
+                    .spawn(async move {
+                        let _ = cleanup_backend.call(Request::new(
+                            request_id().unwrap_or_else(|_| session_id.clone()),
+                            Command::CancelMicrosoftLogin {
+                                session: session_id,
+                            },
+                        ));
+                    })
+                    .detach();
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+    fn wait_microsoft(
+        &mut self,
+        settings: AccountSettings,
+        session: String,
+        cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        cx: &mut Context<Self>,
+    ) {
+        let backend = crate::lifecycle::account_backend(cx);
+        let account = self.editing.clone();
+        let task = cx.background_executor().spawn(async move {
+            let result = flow::microsoft(
+                &*backend,
+                &SystemVault,
+                account,
+                settings.clone(),
+                &session,
+                &cancel,
+            );
+            (settings, result)
+        });
+        cx.spawn(async move |entity, cx| {
+            let (settings, result) = task.await;
+            let _ = entity.update(cx, |this, cx| {
+                this.busy = false;
+                this.oauth_cancel = None;
+                this.checked_result(settings, result);
                 cx.notify();
             });
         })
@@ -528,6 +702,7 @@ impl Accounts {
             return;
         }
         self.form_initialized = true;
+        self.authentication = settings.imap.authentication;
         self.editing = Some(account.clone());
         self.impact = None;
         self.checked = None;
@@ -550,7 +725,12 @@ impl Accounts {
         self.folders.clear();
         self.imap = "待重新检查".into();
         self.smtp = "待重新检查".into();
-        self.status = "编辑账号：请输入密码并重新检查连接后才可更新".into();
+        self.status = if self.authentication == Authentication::Password {
+            "编辑账号：请输入密码并重新检查连接后才可更新"
+        } else {
+            "微软账号：点击浏览器登录可更新授权，原有凭据保留至保存成功"
+        }
+        .into();
         cx.notify();
     }
     fn request_remove(&mut self, account: AccountId, cx: &mut Context<Self>) {
@@ -630,5 +810,13 @@ impl Accounts {
         })
         .detach();
         cx.notify();
+    }
+}
+
+impl Drop for Accounts {
+    fn drop(&mut self) {
+        if let Some(cancel) = &self.oauth_cancel {
+            cancel.store(true, std::sync::atomic::Ordering::Release);
+        }
     }
 }

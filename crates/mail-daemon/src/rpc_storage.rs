@@ -107,6 +107,12 @@ pub(super) fn dispatch(store: &mut Store, request: mail_protocol::Request) -> Re
             return Err(error(ErrorCode::Unsupported, "此命令尚未接入独立后台"));
         }
         if matches!(request.command, Rpc::EnqueueOperation { .. }) {
+            if matches!(
+                store.mutation_result(&request.id).map_err(storage_error)?,
+                MutationStatus::Finished(_)
+            ) {
+                return store.enqueue_operations(&request).map_err(storage_error);
+            }
             let mut trash = std::collections::BTreeMap::new();
             if let Rpc::EnqueueOperation {
                 locations,
@@ -115,15 +121,10 @@ pub(super) fn dispatch(store: &mut Store, request: mail_protocol::Request) -> Re
             {
                 for loc in locations {
                     let catalog = store.remote_folders(&loc.account).map_err(storage_error)?;
-                    if let Some(name) = mail_service::folders::trash(&catalog, None)
-                        && let Some(folder) = store
-                            .folders(&loc.account)
-                            .map_err(storage_error)?
-                            .into_iter()
-                            .find(|f| f.remote_name == name)
-                    {
-                        trash.insert(loc.account.0.clone(), folder.id);
-                    }
+                    let name = mail_service::folders::trash(&catalog, None).ok_or_else(|| {
+                        error(ErrorCode::InvalidRequest, "未找到服务器垃圾箱，未执行删除")
+                    })?;
+                    trash.insert(loc.account.0.clone(), name);
                 }
             }
             return store
@@ -379,8 +380,10 @@ fn execute(store: &mut Store, command: Rpc) -> Result<Reply, RpcError> {
             draft,
             revision,
         } => {
+            let catalog = store.remote_folders(&account).map_err(storage_error)?;
+            let trash = mail_service::folders::trash(&catalog, None);
             store
-                .discard_draft(&account, &draft, revision)
+                .delete_draft(&account, &draft, revision, trash.as_deref())
                 .map_err(storage_error)?;
             Reply::Acknowledged
         }
@@ -617,5 +620,82 @@ mod tests {
             MutationStatus::NotFound
         ));
         assert!(store.accounts().unwrap().is_empty());
+    }
+    #[test]
+    fn delete_rpc_persists_remote_intent_and_old_version_cannot_write() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("data");
+        let mut store = Store::open(&path).unwrap();
+        let server = mail_core::ServerSettings {
+            authentication: Default::default(),
+            host: "synthetic.invalid".into(),
+            port: 993,
+            username: "test".into(),
+            security: mail_core::ConnectionSecurity::Tls,
+        };
+        let account = store
+            .create_account(&mail_core::AccountSettings {
+                display_name: "test".into(),
+                address: "test@example.invalid".into(),
+                imap: server.clone(),
+                smtp: server,
+            })
+            .unwrap();
+        let catalog = ["INBOX", "Trash"].map(|name| mail_core::RemoteFolder {
+            name: name.into(),
+            display_name: name.into(),
+            delimiter: None,
+            selectable: true,
+        });
+        store.replace_remote_folders(&account, &catalog, 1).unwrap();
+        let folder = store.upsert_folder(&account, "INBOX", 42).unwrap();
+        let location = mail_core::MailUid {
+            account: account.clone(),
+            folder_id: folder.id.0,
+            uidvalidity: 42,
+            uid: 7,
+        };
+        store
+            .cache_message(
+                &location,
+                &mail_core::MessageEnvelope {
+                    subject: "test".into(),
+                    sender: "sender".into(),
+                    received_at: 1,
+                },
+            )
+            .unwrap();
+        let delete = request(
+            'd',
+            Rpc::EnqueueOperation {
+                locations: vec![location],
+                operation: mail_protocol::MailOperation::Delete,
+            },
+        );
+        let mut old = delete.clone();
+        old.version = 2;
+        assert_eq!(
+            dispatch(&mut store, old).result.unwrap_err().code,
+            ErrorCode::VersionMismatch
+        );
+        assert!(store.operations(None).unwrap().is_empty());
+        let first = dispatch(&mut store, delete.clone());
+        assert!(first.result.is_ok());
+        assert!(
+            !store
+                .folders(&account)
+                .unwrap()
+                .iter()
+                .any(|f| f.remote_name == "Trash")
+        );
+        drop(store);
+        let mut store = Store::open(&path).unwrap();
+        store.replace_remote_folders(&account, &[], 2).unwrap();
+        let repeated = dispatch(&mut store, delete);
+        assert_eq!(
+            serde_json::to_value(first.result).unwrap(),
+            serde_json::to_value(repeated.result).unwrap()
+        );
+        assert_eq!(store.operations(None).unwrap().len(), 1);
     }
 }

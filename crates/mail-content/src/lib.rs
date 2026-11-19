@@ -924,3 +924,38 @@ mod draft_identity_tests {
         assert!(server_draft_identity(b"X-QingMail-Draft: a\r\nX-QingMail-Draft: b\r\nMessage-ID: <a@example.invalid>\r\n\r\nbody").is_none());
     }
 }
+
+/// QQ IMAP may insert one X-QQ-mid transport trace on APPEND. Only that
+/// additional header is allowed; every original header and MIME body byte must match.
+/// Keep the actual received original as the subsequent conflict baseline.
+pub fn same_server_draft_content(expected: &[u8], received: &[u8]) -> bool {
+    if expected == received {
+        return true;
+    }
+    fn without_trace(raw: &[u8]) -> Option<(Vec<u8>, usize)> {
+        let end = raw.windows(4).position(|w| w == b"\r\n\r\n")?;
+        let mut result = Vec::with_capacity(raw.len());
+        let mut count = 0;
+        let mut skipping = false;
+        for line in raw[..end + 2].split_inclusive(|&b| b == b'\n') {
+            if line.starts_with(b" ") || line.starts_with(b"\t") {
+                if !skipping {
+                    result.extend_from_slice(line);
+                }
+                continue;
+            }
+            skipping = line
+                .split(|&b| b == b':')
+                .next()?
+                .eq_ignore_ascii_case(b"X-QQ-mid");
+            if skipping {
+                count += 1;
+            } else {
+                result.extend_from_slice(line);
+            }
+        }
+        result.extend_from_slice(&raw[end + 2..]);
+        Some((result, count))
+    }
+    matches!((without_trace(expected), without_trace(received)), (Some((a, 0)), Some((b, 1))) if a == b)
+}

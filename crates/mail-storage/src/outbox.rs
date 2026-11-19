@@ -61,6 +61,144 @@ impl SmtpAttempt {
     }
 }
 
+fn discard_draft_on(
+    db: &rusqlite::Connection,
+    account: &AccountId,
+    id: &DraftId,
+    revision: u32,
+) -> Result<()> {
+    let protected: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM draft_uploads WHERE account_id=?1 AND draft_id=?2 AND state IN ('prepared','in_flight','uncertain')) OR EXISTS(SELECT 1 FROM draft_conflicts WHERE account_id=?1 AND draft_id=?2 AND state='open')",
+        params![account.0,id.0], |r|r.get(0),
+    )?;
+    if protected {
+        return Err(Error::Invalid(
+            "请等待草稿上传完成，或先处理同步冲突，再删除草稿",
+        ));
+    }
+    if db.execute(
+        "DELETE FROM drafts WHERE id=?1 AND account_id=?2 AND revision=?3",
+        params![id.0, account.0, revision],
+    )? != 1
+    {
+        return Err(Error::Conflict);
+    }
+    // converted remains a tombstone to prevent ordinary scans resurrecting the draft.
+    Ok(())
+}
+
+pub(super) fn queue_sent_draft_cleanup(
+    db: &rusqlite::Connection,
+    account: &AccountId,
+    draft: &DraftId,
+    trash: Option<&str>,
+) -> Result<bool> {
+    let sources_exist: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM server_draft_sources s WHERE s.account_id=?1 AND (s.converted=?2 OR s.id IN (SELECT remote_source FROM draft_conflicts WHERE account_id=?1 AND draft_id=?2 AND state='deleted')))",
+        params![account.0, draft.0],
+        |r| r.get(0),
+    )?;
+    if !sources_exist {
+        return Ok(true);
+    }
+    let Some(trash) = trash else {
+        return Ok(false);
+    };
+    let valid: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM remote_folders WHERE account_id=?1 AND remote_name=?2 AND selectable=1)",
+        params![account.0, trash],
+        |row| row.get(0),
+    )?;
+    if !valid {
+        return Ok(false);
+    }
+    let mut query = db.prepare(
+        "SELECT DISTINCT remote_name,uidvalidity,uid FROM server_draft_sources s WHERE account_id=?1 AND (converted=?2 OR s.id IN (SELECT remote_source FROM draft_conflicts WHERE account_id=?1 AND draft_id=?2 AND state='deleted'))",
+    )?;
+    let sources = query
+        .query_map(params![account.0, draft.0], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, u32>(1)?,
+                row.get::<_, u32>(2)?,
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    drop(query);
+    let pending: usize = db.query_row(
+        "SELECT COUNT(*) FROM mail_operations WHERE state!='applied'",
+        [],
+        |row| row.get::<_, u32>(0),
+    )? as usize;
+    if pending + sources.len() > 200 {
+        return Ok(false);
+    }
+    for (name, epoch, uid) in sources {
+        let folder: Option<(String, u32)> = db
+            .query_row(
+                "SELECT id,uidvalidity FROM folders WHERE account_id=?1 AND remote_name=?2",
+                params![account.0, name],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let folder = match folder {
+            Some((id, current)) if current == epoch => id,
+            Some(_) => return Ok(false),
+            None => {
+                let id = new_id()?;
+                db.execute(
+                    "INSERT INTO folders VALUES (?1,?2,?3,?4)",
+                    params![id, account.0, name, epoch],
+                )?;
+                id
+            }
+        };
+        let operation = if name == trash {
+            mail_protocol::MailOperation::Delete
+        } else {
+            mail_protocol::MailOperation::Trash {
+                destination: trash.to_owned(),
+            }
+        };
+        db.execute(
+            "INSERT INTO mail_operations(id,account_id,folder_id,uidvalidity,uid,operation,state) SELECT ?1,?2,?3,?4,?5,?6,'pending' WHERE NOT EXISTS(SELECT 1 FROM mail_operations WHERE account_id=?2 AND folder_id=?3 AND uidvalidity=?4 AND uid=?5 AND json_extract(operation,'$.type') IN ('trash','delete','move'))",
+            params![new_id()?, account.0, folder, epoch, uid, serde_json::to_string(&operation).expect("static operation")],
+        )?;
+    }
+    Ok(true)
+}
+
+pub(super) fn finish_draft_deletion_on(
+    db: &Connection,
+    account: &AccountId,
+    draft: &DraftId,
+    trash: Option<&str>,
+) -> Result<bool> {
+    let marked: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM drafts WHERE account_id=?1 AND id=?2 AND deleted_at IS NOT NULL)",params![account.0,draft.0],|r|r.get(0))?;
+    if !marked {
+        return Err(Error::Conflict);
+    }
+    let unknown: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM draft_uploads WHERE account_id=?1 AND draft_id=?2 AND state IN ('in_flight','uncertain'))",params![account.0,draft.0],|r|r.get(0))?;
+    let queued = queue_sent_draft_cleanup(db, account, draft, trash)?;
+    if !unknown && queued {
+        db.execute(
+            "DELETE FROM drafts WHERE account_id=?1 AND id=?2 AND deleted_at IS NOT NULL",
+            params![account.0, draft.0],
+        )?;
+        return Ok(true);
+    }
+    let detail = if unknown {
+        "本地已删除；正在确认此前上传结果，不会重新上传"
+    } else {
+        "本地已删除；云端清理未完成，请检查垃圾箱目录、文件夹定位或同步队列"
+    };
+    db.execute(
+        "UPDATE draft_sync SET state='stopped',detail=?1 WHERE account_id=?2 AND draft_id=?3",
+        params![detail, account.0, draft.0],
+    )?;
+    Ok(false)
+}
+
 impl Store {
     /// reader 来自后台已经打开的输入，不让前台提交任意路径。
     pub fn import_attachment(
@@ -166,7 +304,7 @@ impl Store {
             object.insert(&tx)?;
             let recipients = encode_recipients(&document.headers)?;
             if let Some(previous) = expected {
-                let changed=tx.execute("UPDATE drafts SET revision=?1,subject=?2,recipients=?3,body_id=?4 WHERE id=?5 AND account_id=?6 AND revision=?7",params![revision,document.headers.subject,recipients,object.id,id.0,account.0,previous])?;
+                let changed=tx.execute("UPDATE drafts SET revision=?1,subject=?2,recipients=?3,body_id=?4 WHERE id=?5 AND account_id=?6 AND revision=?7 AND deleted_at IS NULL",params![revision,document.headers.subject,recipients,object.id,id.0,account.0,previous])?;
                 if changed != 1 {
                     return Err(Error::Conflict);
                 }
@@ -198,6 +336,18 @@ impl Store {
     }
 
     pub fn draft(&self, account: &AccountId, id: &DraftId) -> Result<StoredDraft> {
+        let visible: bool = self.connection.query_row("SELECT EXISTS(SELECT 1 FROM drafts WHERE account_id=?1 AND id=?2 AND deleted_at IS NULL)", params![account.0,id.0], |r|r.get(0))?;
+        if !visible {
+            return Err(Error::Conflict);
+        }
+        self.draft_including_deleted(account, id)
+    }
+
+    pub(super) fn draft_including_deleted(
+        &self,
+        account: &AccountId,
+        id: &DraftId,
+    ) -> Result<StoredDraft> {
         let (revision,subject,recipients,body):(u32,String,String,String)=self.connection.query_row("SELECT revision,subject,recipients,body_id FROM drafts WHERE id=?1 AND account_id=?2",params![id.0,account.0],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
         let bytes = objects::read(
             &self.objects,
@@ -269,7 +419,7 @@ impl Store {
 
     /// IPC keyset page; never collects every draft body in the database.
     pub fn draft_ids_page(&self, account: &AccountId, after: Option<&str>) -> Result<Vec<DraftId>> {
-        let mut query = self.connection.prepare("SELECT id FROM drafts WHERE account_id=?1 AND (?2 IS NULL OR id>?2) ORDER BY id LIMIT 2")?;
+        let mut query = self.connection.prepare("SELECT id FROM drafts WHERE account_id=?1 AND deleted_at IS NULL AND (?2 IS NULL OR id>?2) ORDER BY id LIMIT 2")?;
         Ok(query
             .query_map(params![account.0, after], |r| Ok(DraftId(r.get(0)?)))?
             .collect::<std::result::Result<_, _>>()?)
@@ -285,14 +435,55 @@ impl Store {
             .collect::<std::result::Result<_, _>>()?)
     }
     pub fn draft_ids(&self, account: &AccountId) -> Result<Vec<DraftId>> {
-        let mut query = self
-            .connection
-            .prepare("SELECT id FROM drafts WHERE account_id=?1 ORDER BY id")?;
+        let mut query = self.connection.prepare(
+            "SELECT id FROM drafts WHERE account_id=?1 AND deleted_at IS NULL ORDER BY id",
+        )?;
         Ok(query
             .query_map([&account.0], |r| Ok(DraftId(r.get(0)?)))?
             .collect::<std::result::Result<_, _>>()?)
     }
 
+    /// User deletion queues all known server versions and removes the local editor copy atomically.
+    /// Original MIME evidence and immutable send snapshots remain available.
+    pub fn delete_draft(
+        &mut self,
+        account: &AccountId,
+        id: &DraftId,
+        expected_revision: u32,
+        trash: Option<&str>,
+    ) -> Result<()> {
+        let tx = self.connection.savepoint()?;
+        if tx.execute("UPDATE drafts SET deleted_at=COALESCE(deleted_at,unixepoch()) WHERE account_id=?1 AND id=?2 AND revision=?3",params![account.0,id.0,expected_revision])? != 1 {
+            return Err(Error::Conflict);
+        }
+        // Withdraw visibility and future APPEND permission atomically, while
+        // retaining the row (and its evidence) until cloud cleanup is safe.
+        tx.execute("UPDATE draft_uploads SET state='failed',detail='用户已删除，取消尚未开始的上传' WHERE account_id=?1 AND draft_id=?2 AND state='prepared'",params![account.0,id.0])?;
+        tx.execute("UPDATE draft_conflicts SET state='deleted' WHERE account_id=?1 AND draft_id=?2 AND state='open'",params![account.0,id.0])?;
+        tx.execute(
+            "DELETE FROM local_editor WHERE account_id=?1 AND draft_id=?2",
+            params![account.0, id.0],
+        )?;
+        tx.execute("UPDATE draft_sync SET local_only=0,state='stopped',detail='本地草稿已删除，正在清理云端副本',changed_at=unixepoch()-5,attempted_at=0 WHERE account_id=?1 AND draft_id=?2",params![account.0,id.0])?;
+        finish_draft_deletion_on(&tx, account, id, trash)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Background-only: complete an existing deletion, never create an upload.
+    pub fn finish_draft_deletion(
+        &mut self,
+        account: &AccountId,
+        id: &DraftId,
+        trash: Option<&str>,
+    ) -> Result<bool> {
+        let tx = self.connection.savepoint()?;
+        let done = finish_draft_deletion_on(&tx, account, id, trash)?;
+        tx.commit()?;
+        Ok(done)
+    }
+
+    /// Internal/local-only discard retains archived originals, without scheduling a server action.
     pub fn discard_draft(
         &mut self,
         account: &AccountId,
@@ -300,25 +491,7 @@ impl Store {
         expected_revision: u32,
     ) -> Result<()> {
         let tx = self.connection.savepoint()?;
-        // Keep uncertain upload evidence and conflict links until explicitly resolved.
-        let protected: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM draft_uploads WHERE account_id=?1 AND draft_id=?2 AND state IN ('prepared','in_flight','uncertain')) OR EXISTS(SELECT 1 FROM draft_conflicts WHERE account_id=?1 AND draft_id=?2 AND state='open')",
-            params![account.0, id.0], |r| r.get(0),
-        )?;
-        if protected {
-            return Err(Error::Invalid(
-                "请等待草稿上传完成，或先在更多中处理同步冲突，再删除本地草稿",
-            ));
-        }
-        let n = tx.execute(
-            "DELETE FROM drafts WHERE id=?1 AND account_id=?2 AND revision=?3",
-            params![id.0, account.0, expected_revision],
-        )?;
-        if n != 1 {
-            return Err(Error::Conflict);
-        }
-        // Retain source.converted as a tombstone: ordinary scans must not resurrect
-        // this local copy. Explicit conversion may restore it from the original.
+        discard_draft_on(&tx, account, id, expected_revision)?;
         tx.commit()?;
         Ok(())
     }
@@ -379,7 +552,7 @@ impl Store {
         if let Some(id)=self.connection.query_row("SELECT id FROM send_tasks WHERE source_draft=?1 AND source_revision=?2 AND account_id=?3 AND resend_of IS NULL",params![id.0,expected_revision,account.0],|r|r.get::<_,String>(0)).optional()? {return Ok(SendTaskId(id));}
         let task = SendTaskId(new_id()?);
         let tx = self.connection.transaction()?;
-        tx.execute("INSERT INTO send_tasks(id,account_id,source_draft,source_revision,sender,subject,recipients,body_id,state,created_at) SELECT ?1,d.account_id,d.id,d.revision,a.address,d.subject,d.recipients,d.body_id,'pending',?5 FROM drafts d JOIN accounts a ON a.id=d.account_id WHERE d.id=?2 AND d.account_id=?3 AND d.revision=?4",params![task.0,id.0,account.0,expected_revision,unix_now()?])?;
+        tx.execute("INSERT INTO send_tasks(id,account_id,source_draft,source_revision,sender,subject,recipients,body_id,state,created_at,save_sent_copy) SELECT ?1,d.account_id,d.id,d.revision,a.address,d.subject,d.recipients,d.body_id,'pending',?5,(SELECT save_sent_copy FROM desktop_settings WHERE id=1) FROM drafts d JOIN accounts a ON a.id=d.account_id WHERE d.id=?2 AND d.account_id=?3 AND d.revision=?4",params![task.0,id.0,account.0,expected_revision,unix_now()?])?;
         tx.execute("INSERT INTO task_attachments SELECT ?1,account_id,ordinal,attachment_id FROM draft_attachments WHERE draft_id=?2 AND account_id=?3",params![task.0,id.0,account.0])?;
         tx.commit()?;
         Ok(task)
@@ -494,14 +667,52 @@ impl Store {
         })
     }
 
-    /// 消费提交许可；SMTP 接受后必先进入 copy_pending，不能返回可发送队列。
-    pub fn finish_smtp(&mut self, attempt: SmtpAttempt, outcome: SmtpOutcome) -> Result<()> {
+    /// 消费提交许可；按任务冻结策略进入 Sent 或 CopyPending，不能返回可发送队列。
+    pub fn finish_smtp(
+        &mut self,
+        attempt: SmtpAttempt,
+        outcome: SmtpOutcome,
+        trash: Option<&str>,
+    ) -> Result<()> {
         let (state, detail) = match outcome {
-            SmtpOutcome::Accepted => ("copy_pending", ""),
+            SmtpOutcome::Accepted => {
+                let save_copy: bool = self.connection.query_row(
+                    "SELECT save_sent_copy FROM send_tasks WHERE id=?1 AND account_id=?2",
+                    params![attempt.task.0, attempt.account.0],
+                    |r| r.get(0),
+                )?;
+                (if save_copy { "copy_pending" } else { "sent" }, "")
+            }
             SmtpOutcome::DefinitelyRejected => ("failed", "smtp_rejected"),
             SmtpOutcome::Uncertain => ("uncertain", "smtp_result_unknown"),
         };
-        self.transition(&attempt.account, &attempt.task, "sending", state, detail)
+        if !matches!(outcome, SmtpOutcome::Accepted) {
+            return self.transition(&attempt.account, &attempt.task, "sending", state, detail);
+        }
+
+        let tx = self.connection.transaction()?;
+        if tx.execute(
+            "UPDATE send_tasks SET state=?1,detail=?2 WHERE id=?3 AND account_id=?4 AND state='sending'",
+            params![state, detail, attempt.task.0, attempt.account.0],
+        )? != 1
+        {
+            return Err(Error::Conflict);
+        }
+        let draft: DraftId = DraftId(tx.query_row(
+            "SELECT source_draft FROM send_tasks WHERE id=?1 AND account_id=?2",
+            params![attempt.task.0, attempt.account.0],
+            |row| row.get(0),
+        )?);
+        queue_sent_draft_cleanup(&tx, &attempt.account, &draft, trash)?;
+        // Keep unknown APPEND evidence until query-only recovery verifies it;
+        // deleting the draft would cascade-delete its upload intent. A newer edit
+        // must also survive a delayed SMTP result.
+        tx.execute(
+            "DELETE FROM drafts WHERE id=(SELECT source_draft FROM send_tasks WHERE id=?1 AND account_id=?2) AND account_id=?2 AND revision=(SELECT source_revision FROM send_tasks WHERE id=?1 AND account_id=?2) AND NOT EXISTS(SELECT 1 FROM draft_uploads u WHERE u.account_id=?2 AND u.draft_id=drafts.id AND u.state IN ('in_flight','uncertain'))",
+            params![attempt.task.0, attempt.account.0],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn begin_copy(&self, account: &AccountId, id: &SendTaskId) -> Result<OutgoingSnapshot> {
@@ -630,7 +841,7 @@ impl Store {
         self.task_snapshot(account, id)?;
         let next = SendTaskId(new_id()?);
         let tx = self.connection.transaction()?;
-        tx.execute("INSERT INTO send_tasks(id,account_id,source_draft,source_revision,sender,subject,recipients,body_id,state,resend_of,created_at) SELECT ?1,account_id,source_draft,source_revision,sender,subject,recipients,body_id,'pending',id,?4 FROM send_tasks WHERE id=?2 AND account_id=?3",params![next.0,id.0,account.0,unix_now()?])?;
+        tx.execute("INSERT INTO send_tasks(id,account_id,source_draft,source_revision,sender,subject,recipients,body_id,state,resend_of,created_at,save_sent_copy) SELECT ?1,account_id,source_draft,source_revision,sender,subject,recipients,body_id,'pending',id,?4,(SELECT save_sent_copy FROM desktop_settings WHERE id=1) FROM send_tasks WHERE id=?2 AND account_id=?3",params![next.0,id.0,account.0,unix_now()?])?;
         tx.execute("INSERT INTO task_attachments SELECT ?1,account_id,ordinal,attachment_id FROM task_attachments WHERE task_id=?2 AND account_id=?3",params![next.0,id.0,account.0])?;
         tx.commit()?;
         Ok(next)

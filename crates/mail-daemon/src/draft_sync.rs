@@ -88,10 +88,15 @@ impl DraftSync {
         };
         Ok(Self { stop, thread })
     }
-    pub fn stop(&mut self) {
+    pub(crate) fn request_stop(&self) {
         self.stop.store(true, Ordering::Release);
-        if let Some(t) = self.thread.take() {
+        if let Some(t) = &self.thread {
             t.thread().unpark();
+        }
+    }
+    pub fn stop(&mut self) {
+        self.request_stop();
+        if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
     }
@@ -113,6 +118,13 @@ fn execute(
     candidate: mail_storage::DraftUploadCandidate,
 ) -> Result<(), Failure> {
     let account = &candidate.draft.account.clone();
+    if candidate.deleting && candidate.previous.is_none() {
+        let catalog = receive(store.catalog(account.clone())).map_err(pending)?;
+        let trash = mail_service::folders::trash(&catalog.0, None);
+        receive(store.finish_draft_deletion(account.clone(), candidate.draft.id, trash))
+            .map_err(pending)?;
+        return Ok(());
+    }
     let baseline = receive(store.account_version(account.clone())).map_err(pending)?;
     if matches!(store.control(Command::AccountOptions),Ok(Reply::AccountOptions{paused,..}) if paused.contains(account))
     {
@@ -230,7 +242,9 @@ fn execute(
                     "账号配置已变化，请核对服务器；不会重新APPEND".into(),
                 ));
             }
-            receive(store.complete_draft_upload(upload, uidvalidity, uid))
+            let catalog = receive(store.catalog(account.clone())).map_err(pending)?;
+            let trash = mail_service::folders::trash(&catalog.0, None);
+            receive(store.complete_draft_upload(upload, uidvalidity, uid, trash))
                 .map_err(|e| ("uncertain", e))?;
             Ok(())
         }
