@@ -139,6 +139,28 @@ struct InlineReading {
     content: mail_content::MailContent,
     view: Entity<crate::reader::Reader>,
 }
+struct SentConfirmation {
+    account: AccountId,
+    task: mail_core::SendTaskId,
+    details: Option<mail_storage::SendTask>,
+    body_preview: Option<String>,
+    error: Option<String>,
+    notice: Option<String>,
+    status_open: bool,
+}
+fn sent_record_content(
+    store: &StorageClient,
+    account: AccountId,
+    task: mail_core::SendTaskId,
+) -> Result<mail_content::MailContent, String> {
+    if let Some(client) = store.ipc_client() {
+        return mail_daemon::client::content(&client, Op::TaskContent { account, task });
+    }
+    let snapshot = receive(store.task_snapshot(account, task))?;
+    let mime =
+        mail_service::outgoing::prepare(&snapshot, true).map_err(|error| error.to_string())?;
+    mail_content::parse(mime.raw()).map_err(|error| error.to_string())
+}
 fn inline_matches_selection(
     inline: Option<&mail_core::MailUid>,
     selected: Option<&mail_core::MailUid>,
@@ -147,6 +169,25 @@ fn inline_matches_selection(
         Some(location) => selected == Some(location),
         None => selected.is_none(),
     }
+}
+fn sent_confirmation_row_index(
+    cache: &FolderCache,
+    task: &mail_storage::SendTask,
+) -> Option<usize> {
+    let copy = task.copy.as_ref()?;
+    let uid = copy.uid?;
+    if cache.folder.account != task.account
+        || cache.folder.remote_name != copy.folder
+        || cache.folder.uidvalidity != copy.uidvalidity
+    {
+        return None;
+    }
+    cache.messages.iter().position(|message| {
+        message.location.account == task.account
+            && message.location.folder_id == cache.folder.id.0
+            && message.location.uidvalidity == copy.uidvalidity
+            && message.location.uid == uid
+    })
 }
 type ComposeRequest = (
     Option<(AccountId, String)>,
@@ -211,6 +252,7 @@ pub(super) struct Mailbox {
     restore_uid: Option<u32>,
     restore_count: usize,
     inline: Option<InlineReading>,
+    sent_confirmation: Option<SentConfirmation>,
     reading: Option<mail_core::MailUid>,
     read_running: bool,
     read_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -283,6 +325,7 @@ impl Mailbox {
             restore_uid: None,
             restore_count: 200,
             inline: None,
+            sent_confirmation: None,
             reading: None,
             read_running: false,
             read_cancel: Default::default(),
@@ -306,6 +349,8 @@ impl Mailbox {
         Self::start_compose_probe(window, cx);
         Self::start_drafts_probe(window, cx);
         Self::start_motion_probe(window, cx);
+        #[cfg(debug_assertions)]
+        Self::start_sent_confirmation_probe(window, cx);
         if std::env::var("QINGMAIL_WINDOW_PERF").as_deref() == Ok("interaction")
             && std::env::var_os("QINGMAIL_IPC_ROOT").is_some()
         {
@@ -508,6 +553,7 @@ impl Mailbox {
                 .is_some_and(|p| p.read(cx).saving())
     }
     pub(super) fn show_page(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
+        self.sent_confirmation = None;
         self.pane_generation += 1;
         self.pending_compose = None;
         self.pending_page = None;
@@ -570,6 +616,18 @@ impl Mailbox {
             let result = task.await;
             let _ = entity.update(cx, |this, cx| {
                 this.sync_refreshing = false;
+                if let Ok(snapshot) = &result
+                    && let Some(confirmation) = &mut this.sent_confirmation
+                    && let Some(task) = snapshot.tasks.iter().find(|task| {
+                        task.account == confirmation.account && task.id == confirmation.task
+                    })
+                {
+                    confirmation.details = Some(task.clone());
+                    this.selected = this
+                        .cache
+                        .as_ref()
+                        .and_then(|cache| sent_confirmation_row_index(cache, task));
+                }
                 this.sync_state.update(result);
                 cx.notify();
             });
@@ -616,6 +674,7 @@ impl Mailbox {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.sent_confirmation = None;
         let workspace = self.page == Page::Drafts
             && document.is_none()
             && self.account.as_ref().map(|(id, _)| id) == account.as_ref().map(|(id, _)| id);
@@ -667,8 +726,8 @@ impl Mailbox {
             &editor,
             window,
             |this, editor, event: &crate::composer::ComposerEvent, window, cx| {
-                if let crate::composer::ComposerEvent::Sent(account, task) = event {
-                    this.open_local_sent_record(account.clone(), task.clone(), cx);
+                if let crate::composer::ComposerEvent::Sent(task) = event {
+                    this.show_sent_confirmation(task.as_ref().clone(), cx);
                     return;
                 }
                 if matches!(event, crate::composer::ComposerEvent::CloseCancelled) {
@@ -733,6 +792,7 @@ impl Mailbox {
         cx.notify();
     }
     fn leave_composer(&mut self, cx: &mut Context<Self>) {
+        self.sent_confirmation = None;
         self.page = Page::Mail;
         self.pending_page = None;
         self.pane_generation += 1;
@@ -740,6 +800,131 @@ impl Mailbox {
         if let Some(editor) = &self.composer {
             editor.update(cx, |editor, cx| editor.request_close(cx));
         }
+    }
+    fn show_sent_confirmation(&mut self, details: mail_storage::SendTask, cx: &mut Context<Self>) {
+        let account = details.account.clone();
+        let task = details.id.clone();
+        let sent_folder = details.copy.as_ref().map(|copy| copy.folder.as_str());
+        self.pane_generation += 1;
+        self.pending_compose = None;
+        self.page = Page::Mail;
+        self.pending_page = None;
+        self.unified = false;
+        self.search_results = None;
+        self.search_previous = None;
+        self.search_selected = None;
+        self.selected = None;
+        self.checked.clear();
+        self.account = self.accounts.iter().find(|(id, _)| id == &account).cloned();
+        let (folders, at) = self.catalogs.get(&account.0).cloned().unwrap_or_default();
+        self.selected_folder = mail_service::sent::choose_sent_folder(&folders, sent_folder);
+        self.sent_confirmation = Some(SentConfirmation {
+            account: account.clone(),
+            task: task.clone(),
+            details: Some(details),
+            body_preview: None,
+            error: None,
+            notice: None,
+            status_open: false,
+        });
+        self.folders = folders;
+        self.catalog_at = at;
+        self.invalidate_read();
+        self.cache = None;
+        self.inbox = None;
+        self.narrow_detail = true;
+        self.before = None;
+        self.restore_uid = None;
+        self.restore_selected = None;
+        self.restore_count = 200;
+        self.confirm_delete = false;
+        self.status = "邮件已提交；发送状态可在右下角查看".into();
+        if self.selected_folder.is_some() {
+            self.quiet_reload = false;
+            self.load_cache(cx);
+        }
+        let store = self.store.clone();
+        let target_account = account.clone();
+        let target_task = task.clone();
+        let future = cx.background_executor().spawn(async move {
+            let content = sent_record_content(&store, target_account, target_task)?;
+            Ok::<_, String>(content.plain)
+        });
+        cx.spawn(async move |entity, cx| {
+            let result = future.await;
+            let _ = entity.update(cx, |this, cx| {
+                let Some(confirmation) = this
+                    .sent_confirmation
+                    .as_mut()
+                    .filter(|current| current.account == account && current.task == task)
+                else {
+                    return;
+                };
+                match result {
+                    Ok(body) => {
+                        let mut characters = body.chars();
+                        let mut preview = characters.by_ref().take(600).collect::<String>();
+                        if characters.next().is_some() {
+                            preview.push('…');
+                        }
+                        confirmation.body_preview = Some(preview);
+                    }
+                    Err(error) => confirmation.error = Some(error),
+                }
+                if let Some(details) = this
+                    .sent_confirmation
+                    .as_ref()
+                    .and_then(|confirmation| confirmation.details.as_ref())
+                {
+                    this.selected = this
+                        .cache
+                        .as_ref()
+                        .and_then(|cache| sent_confirmation_row_index(cache, details));
+                }
+                this.refresh_sync_status(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+    fn return_to_inbox_after_send(&mut self, cx: &mut Context<Self>) {
+        let Some(confirmation) = self.sent_confirmation.take() else {
+            return;
+        };
+        let Some((folders, at)) = self.catalogs.get(&confirmation.account.0).cloned() else {
+            self.status = "无法读取邮箱文件夹，请重新选择账号".into();
+            cx.notify();
+            return;
+        };
+        let inbox = folders.iter().find(|folder| {
+            folder.selectable
+                && (folder.name.eq_ignore_ascii_case("INBOX") || folder.display_name == "收件箱")
+        });
+        let Some(name) = inbox.map(|folder| folder.name.clone()) else {
+            self.status = "此账号没有可用的收件箱".into();
+            cx.notify();
+            return;
+        };
+        self.account = self
+            .accounts
+            .iter()
+            .find(|(id, _)| id == &confirmation.account)
+            .cloned();
+        self.folders = folders;
+        self.catalog_at = at;
+        self.select_folder(name, cx);
+    }
+    fn continue_writing_after_send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(confirmation) = self.sent_confirmation.take() else {
+            return;
+        };
+        let account = self
+            .accounts
+            .iter()
+            .find(|(id, _)| id == &confirmation.account)
+            .map(|(id, settings)| (id.clone(), settings.address.clone()));
+        self.compose(account, None, false, window, cx);
     }
     pub(super) fn locate_notification(
         &mut self,
@@ -888,6 +1073,7 @@ impl Mailbox {
         if self.busy {
             return;
         }
+        self.sent_confirmation = None;
         self.unified = true;
         self.selected_folder = None;
         self.search_scope = 2;
@@ -1127,6 +1313,7 @@ impl Mailbox {
         }
     }
     fn select_message(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.sent_confirmation = None;
         self.leave_composer(cx);
         self.selected = Some(index);
         self.confirm_delete = false;
@@ -1134,6 +1321,7 @@ impl Mailbox {
         cx.notify();
     }
     fn select_folder(&mut self, name: String, cx: &mut Context<Self>) {
+        self.sent_confirmation = None;
         if let Some(editor) = &self.composer
             && editor.read(cx).workspace_folder().is_some()
         {
@@ -1207,6 +1395,8 @@ impl Mailbox {
         }
         let store = self.store.clone();
         let before = self.before;
+        let requested_account = account.clone();
+        let requested_folder = name.clone();
         let target = if quiet {
             self.messages().len().max(200)
         } else {
@@ -1219,6 +1409,13 @@ impl Mailbox {
             let result = task.await;
             let _ = entity.update(cx, |this, cx| {
                 this.busy = false;
+                if this.unified
+                    || this.account.as_ref().map(|(id, _)| id) != Some(&requested_account)
+                    || this.selected_folder.as_ref() != Some(&requested_folder)
+                    || this.before != before
+                {
+                    return;
+                }
                 match result {
                     Ok((cache, exhausted)) => {
                         this.list_exhausted = exhausted;
@@ -1248,9 +1445,25 @@ impl Mailbox {
                                 .iter()
                                 .position(|message| message.location.uid == uid);
                         }
-                        if this.selected.is_some() {
+                        if this.selected.is_none()
+                            && let Some(task) = this
+                                .sent_confirmation
+                                .as_ref()
+                                .and_then(|confirmation| confirmation.details.as_ref())
+                        {
+                            this.selected = this
+                                .cache
+                                .as_ref()
+                                .and_then(|cache| sent_confirmation_row_index(cache, task));
+                        }
+                        if this.selected.is_some() && this.sent_confirmation.is_none() {
                             this.read_message(cx);
-                        } else {
+                        } else if this.sent_confirmation.is_some()
+                            || this
+                                .inline
+                                .as_ref()
+                                .is_none_or(|inline| inline.location.is_some())
+                        {
                             this.invalidate_read();
                         }
                         if !quiet {
@@ -1547,6 +1760,7 @@ impl Mailbox {
         folder: String,
         cx: &mut Context<Self>,
     ) {
+        self.sent_confirmation = None;
         let Some((account, settings)) = self
             .accounts
             .iter()
@@ -1693,6 +1907,17 @@ impl Mailbox {
         task: mail_core::SendTaskId,
         cx: &mut Context<Self>,
     ) {
+        self.pane_generation += 1;
+        let generation = self.pane_generation;
+        let preferred_folder = self.sent_confirmation.as_ref().and_then(|confirmation| {
+            confirmation
+                .details
+                .as_ref()?
+                .copy
+                .as_ref()
+                .map(|copy| copy.folder.clone())
+        });
+        self.sent_confirmation = None;
         self.page = Page::Mail;
         self.pending_page = None;
         self.unified = false;
@@ -1700,20 +1925,9 @@ impl Mailbox {
         self.search_previous = None;
         self.search_selected = None;
         self.selected = None;
-        self.selected_folder = self
-            .catalogs
-            .get(&account.0)
-            .and_then(|(folders, _)| {
-                folders.iter().find(|folder| {
-                    let name = folder.name.to_ascii_lowercase();
-                    name == "sent"
-                        || name == "sent items"
-                        || name == "sent messages"
-                        || folder.display_name.contains("已发送")
-                        || folder.display_name.contains("已发件")
-                })
-            })
-            .map(|folder| folder.name.clone());
+        self.selected_folder = self.catalogs.get(&account.0).and_then(|(folders, _)| {
+            mail_service::sent::choose_sent_folder(folders, preferred_folder.as_deref())
+        });
         self.account = self.accounts.iter().find(|(id, _)| id == &account).cloned();
         if let Some((folders, at)) = self.catalogs.get(&account.0).cloned() {
             self.folders = folders;
@@ -1729,22 +1943,31 @@ impl Mailbox {
             self.load_cache(cx);
         }
         let store = self.store.clone();
+        let target_account = account.clone();
+        let target_folder = self.selected_folder.clone();
         let task = cx.background_executor().spawn(async move {
-            let snapshot = receive(store.task_snapshot(account.clone(), task))?;
-            let mime = mail_service::outgoing::prepare(&snapshot, true)
-                .map_err(|error| error.to_string())?;
-            let content = mail_content::parse(mime.raw()).map_err(|error| error.to_string())?;
+            let content = sent_record_content(&store, account.clone(), task)?;
             let settings = receive(store.accounts())?
                 .into_iter()
                 .find(|(id, _)| id == &account)
                 .ok_or("发送记录所属账号已移除")?;
-            Ok::<_, String>((account, snapshot, content, settings.1.address))
+            Ok::<_, String>((account, content, settings.1.address))
         });
         cx.spawn(async move |entity, cx| {
             let result = task.await;
             let _ = entity.update(cx, |this, cx| {
+                if this.pane_generation != generation
+                    || this.page != Page::Mail
+                    || this.account.as_ref().map(|(id, _)| id) != Some(&target_account)
+                    || this.selected_folder != target_folder
+                    || this.sent_confirmation.is_some()
+                    || this.selected_location().is_some()
+                {
+                    return;
+                }
                 match result {
-                    Ok((account, snapshot, content, address)) => {
+                    Ok((account, content, address)) => {
+                        let subject = content.subject.clone();
                         let view = cx.new(|cx| {
                             crate::reader::Reader::embedded(
                                 content.clone(),
@@ -1763,7 +1986,7 @@ impl Mailbox {
                             view,
                         });
                         this.reading_status.clear();
-                        this.status = format!("已发送：{}", snapshot.headers.subject);
+                        this.status = format!("已发送：{subject}");
                     }
                     Err(error) => {
                         this.reading_status = format!("本地发送记录暂不可用：{error}");
@@ -1780,6 +2003,7 @@ impl Mailbox {
         if self.busy {
             return;
         }
+        self.sent_confirmation = None;
         let Some((account, _)) = self.account.clone() else {
             self.status = "请先添加邮箱".into();
             cx.notify();
@@ -2632,6 +2856,76 @@ mod tests {
         assert!(!inline_matches_selection(Some(&inbox), None));
         assert!(inline_matches_selection(None, None));
         assert!(!inline_matches_selection(None, Some(&inbox)));
+    }
+
+    #[test]
+    fn sent_confirmation_selects_only_the_confirmed_copy_identity() {
+        let mut task = mail_storage::SendTask {
+            id: mail_core::SendTaskId("send-task".into()),
+            account: AccountId("test-account".into()),
+            source_draft: mail_core::DraftId("draft".into()),
+            source_revision: 1,
+            sender: "sender@example.invalid".into(),
+            recipients: mail_core::DraftHeaders {
+                subject: "重复主题".into(),
+                to: vec!["to@example.invalid".into()],
+                ..Default::default()
+            },
+            created_at: 1,
+            state: mail_core::SendState::Sent,
+            detail: String::new(),
+            resend_of: None,
+            copy: Some(mail_storage::SentCopy {
+                folder: "Sent".into(),
+                uidvalidity: 42,
+                uid: Some(2),
+            }),
+        };
+        let mut cache = FolderCache {
+            folder: mail_core::Folder {
+                id: mail_core::FolderId("inbox".into()),
+                account: task.account.clone(),
+                remote_name: "Sent".into(),
+                uidvalidity: 42,
+            },
+            synced_at: 1,
+            since: 0,
+            has_more: false,
+            messages: [3, 2]
+                .into_iter()
+                .map(|uid| CachedMessage {
+                    id: mail_core::MessageId(format!("message-{uid}")),
+                    location: location(uid),
+                    envelope: mail_core::MessageEnvelope {
+                        subject: "重复主题".into(),
+                        sender: task.sender.clone(),
+                        received_at: 1,
+                    },
+                    seen: true,
+                    flagged: false,
+                })
+                .collect(),
+        };
+        assert_eq!(sent_confirmation_row_index(&cache, &task), Some(1));
+        cache.folder.remote_name = "INBOX".into();
+        assert_eq!(sent_confirmation_row_index(&cache, &task), None);
+        cache.folder.remote_name = "Sent".into();
+        cache.folder.account = AccountId("other-account".into());
+        assert_eq!(sent_confirmation_row_index(&cache, &task), None);
+        cache.folder.account = task.account.clone();
+        cache.folder.uidvalidity = 43;
+        assert_eq!(sent_confirmation_row_index(&cache, &task), None);
+        cache.folder.uidvalidity = 42;
+        cache.messages[1].location.uidvalidity = 43;
+        assert_eq!(sent_confirmation_row_index(&cache, &task), None);
+        cache.messages[1].location = location(2);
+        cache.messages[1].location.folder_id = "another-folder".into();
+        assert_eq!(sent_confirmation_row_index(&cache, &task), None);
+        cache.messages[1].location = location(2);
+        task.copy.as_mut().unwrap().uid = None;
+        assert_eq!(sent_confirmation_row_index(&cache, &task), None);
+        task.copy = None;
+        assert_eq!(sent_confirmation_row_index(&cache, &task), None);
     }
 
     #[test]

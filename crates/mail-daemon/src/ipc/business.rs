@@ -518,35 +518,14 @@ impl Context {
                 })
             }
             TaskContent { account, task } => {
-                let record =
-                    receive(self.store.task(account.clone(), task.clone())).map_err(fail)?;
-                let mut remote = None;
-                if self.enabled
-                    && record.state == mail_core::SendState::Sent
-                    && let Some(copy) = record.copy
-                    && let Some(uid) = copy.uid
-                    && let Ok((settings, credentials)) = self.credentials(account.clone())
-                {
-                    remote = sync::message(
-                        &settings.imap,
-                        &credentials.imap,
-                        &copy.folder,
-                        copy.uidvalidity,
-                        uid,
-                    )
-                    .ok();
-                }
-                let raw = match remote {
-                    Some(raw) => raw,
-                    None => {
-                        let snapshot =
-                            receive(self.store.task_snapshot(account, task)).map_err(fail)?;
-                        outgoing::prepare(&snapshot, true)
-                            .map_err(fail)?
-                            .raw()
-                            .to_vec()
-                    }
-                };
+                // A sent receipt and its read-only local record always describe
+                // the frozen send snapshot, even when a server copy exists.
+                // Opening this view must not require credentials or network.
+                let snapshot = receive(self.store.task_snapshot(account, task)).map_err(fail)?;
+                let raw = outgoing::prepare(&snapshot, true)
+                    .map_err(fail)?
+                    .raw()
+                    .to_vec();
                 self.publish(mail_content::parse(&raw).map_err(fail)?, None)
             }
             BrowserCopy { content } => {

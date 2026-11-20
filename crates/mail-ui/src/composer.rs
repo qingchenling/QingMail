@@ -263,7 +263,7 @@ fn open_scoped(
 pub(super) enum ComposerEvent {
     Closed,
     CloseCancelled,
-    Sent(mail_core::AccountId, mail_core::SendTaskId),
+    Sent(Box<mail_storage::SendTask>),
 }
 impl EventEmitter<ComposerEvent> for Composer {}
 

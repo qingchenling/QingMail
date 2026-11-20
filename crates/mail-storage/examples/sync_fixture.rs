@@ -27,7 +27,7 @@ fn main() {
             smtp: server,
         })
         .unwrap();
-    let folders = vec![
+    let mut folders = vec![
         RemoteFolder {
             name: "INBOX".into(),
             display_name: "INBOX".into(),
@@ -53,6 +53,15 @@ fn main() {
             selectable: true,
         },
     ];
+    let sent_confirmation = std::env::args().any(|arg| arg == "--sent-confirmation");
+    if sent_confirmation {
+        folders.push(RemoteFolder {
+            name: "Sent".into(),
+            display_name: "Sent".into(),
+            delimiter: Some("/".into()),
+            selectable: true,
+        });
+    }
     store
         .replace_remote_folders(&account, &folders, 1794816000)
         .unwrap();
@@ -116,5 +125,85 @@ fn main() {
             store.save_message_body(&message.location, raw).unwrap();
         }
     }
+    if sent_confirmation {
+        seed_sent_confirmation(&mut store, &account);
+    }
     println!("合成目录与240封头部索引已写入隔离目录；未创建系统凭据或访问网络");
+}
+
+fn seed_sent_confirmation(store: &mut Store, account: &mail_core::AccountId) {
+    use mail_core::SmtpOutcome;
+    use mail_storage::{CopyOutcome, DraftDocument};
+    for (name, save_copy) in [
+        ("已保存副本", true),
+        ("仅本地记录", false),
+        ("副本待保存", true),
+    ] {
+        let mut preferences = store.desktop_preferences().unwrap();
+        preferences.save_sent_copy = save_copy;
+        store.update_desktop_preferences(&preferences).unwrap();
+        let draft = store
+            .create_draft(
+                account,
+                &DraftDocument {
+                    headers: mail_core::DraftHeaders {
+                        subject: format!("发送确认测试 · {name}"),
+                        to: vec!["recipient@example.invalid".into()],
+                        ..Default::default()
+                    },
+                    body: mail_content::draft::Draft::plain(
+                        &"陈雨，你好：\n\n评审资料已整理好。\n".repeat(80),
+                    )
+                    .unwrap(),
+                    attachments: vec![],
+                },
+            )
+            .unwrap();
+        let id = store
+            .enqueue_draft(account, &draft.id, draft.revision)
+            .unwrap();
+        let permit = store.begin_smtp(account, &id).unwrap();
+        // Store-only simulated outcome: no network transport or credentials.
+        store
+            .finish_smtp(permit, SmtpOutcome::Accepted, None)
+            .unwrap();
+        if name == "已保存副本" {
+            store
+                .finish_copy(
+                    account,
+                    &id,
+                    CopyOutcome::Saved {
+                        folder: "Sent".into(),
+                        uidvalidity: 52,
+                        uid: Some(11),
+                        existed: false,
+                    },
+                )
+                .unwrap();
+            let task = store.task(account, &id).unwrap();
+            store
+                .apply_folder_batch(
+                    account,
+                    &FolderBatch {
+                        remote_name: "Sent".into(),
+                        uidvalidity: 52,
+                        since: 0,
+                        has_more: false,
+                        complete: true,
+                        kind: mail_core::BatchKind::Recent,
+                        flags: Default::default(),
+                        messages: vec![(
+                            11,
+                            MessageEnvelope {
+                                subject: task.recipients.subject,
+                                sender: task.sender,
+                                received_at: task.created_at,
+                            },
+                        )],
+                    },
+                    task.created_at,
+                )
+                .unwrap();
+        }
+    }
 }

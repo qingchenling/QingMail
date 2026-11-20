@@ -138,10 +138,7 @@ impl Composer {
                     Ok(task) if matches!(task.state, SendState::Sent | SendState::CopyPending) => {
                         this.status = state_label(&task);
                         this.refresh_send_tasks(cx);
-                        cx.emit(super::ComposerEvent::Sent(
-                            task.account.clone(),
-                            task.id.clone(),
-                        ));
+                        cx.emit(super::ComposerEvent::Sent(Box::new(task)));
                         this.finish_close(cx);
                     }
                     Ok(task) => {

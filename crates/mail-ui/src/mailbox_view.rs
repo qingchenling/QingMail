@@ -8,6 +8,264 @@ use gpui_kit_material::{prelude::*, theme};
 use motion::MotionToken;
 
 impl Mailbox {
+    fn sent_confirmation_view(
+        &self,
+        confirmation: &super::SentConfirmation,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let title = confirmation.details.as_ref().map_or_else(
+            || "邮件已发送".to_owned(),
+            |task| match task.state {
+                mail_core::SendState::CopyPending => "邮件已发送，发件箱副本待保存".into(),
+                _ => "邮件已发送".into(),
+            },
+        );
+        let recipient = confirmation
+            .details
+            .as_ref()
+            .map(|task| task.recipients.to.join("、"))
+            .unwrap_or_else(|| "正在读取…".into());
+        let subject = confirmation
+            .details
+            .as_ref()
+            .map(|task| {
+                if task.recipients.subject.is_empty() {
+                    "（无主题）".to_owned()
+                } else {
+                    task.recipients.subject.clone()
+                }
+            })
+            .unwrap_or_else(|| "正在读取…".into());
+        let state = confirmation
+            .details
+            .as_ref()
+            .map(crate::send_labels::state_label)
+            .unwrap_or_else(|| "正在读取发送记录…".into());
+        let submitted_at = confirmation.details.as_ref().map_or_else(
+            || "刚刚".into(),
+            |task| mail_service::sync::display_time(task.created_at),
+        );
+        let body = confirmation.body_preview.clone().unwrap_or_else(|| {
+            confirmation
+                .error
+                .clone()
+                .unwrap_or_else(|| "正在读取邮件内容…".into())
+        });
+        let account = confirmation.account.clone();
+        let task = confirmation.task.clone();
+        let surface = theme::color(ColorRole::SURFACE);
+        let outline = theme::color(ColorRole::OUTLINE_VARIANT);
+        let success = theme::color(ColorRole::PRIMARY);
+        div()
+            .size_full()
+            .min_w_0()
+            .min_h_0()
+            .p_4()
+            .bg(theme::color(ColorRole::SURFACE_CONTAINER_LOW))
+            .child(
+                div()
+                    .size_full()
+                    .min_w_0()
+                    .min_h_0()
+                    .flex()
+                    .flex_col()
+                    .overflow_hidden()
+                    .rounded(px(12.))
+                    .border_1()
+                    .border_color(outline)
+                    .bg(surface)
+                    .child(
+                        div()
+                            .h(px(52.))
+                            .flex_none()
+                            .px_6()
+                            .flex()
+                            .items_center()
+                            .border_b_1()
+                            .border_color(outline)
+                            .bg(theme::color(ColorRole::SURFACE_CONTAINER_LOW))
+                            .text_size(px(12.))
+                            .text_color(theme::color(ColorRole::ON_SURFACE_VARIANT))
+                            .child("发送结果"),
+                    )
+                    .child(
+                        div()
+                            .id("sent-confirmation-scroll")
+                            .flex_1()
+                            .min_h_0()
+                            .overflow_y_scroll()
+                            .px_6()
+                            .py_6()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .child(
+                                        div()
+                                            .size(px(48.))
+                                            .flex_none()
+                                            .rounded_full()
+                                            .bg(success)
+                                            .flex()
+                                            .items_center()
+                                            .justify_center()
+                                            .text_size(px(24.))
+                                            .text_color(theme::color(ColorRole::ON_PRIMARY))
+                                            .child(icon("check")),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(24.))
+                                            .font_weight(gpui_kit::FontWeight::BOLD)
+                                            .text_color(theme::color(ColorRole::ON_SURFACE))
+                                            .child(title),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .mt_3()
+                                    .flex()
+                                    .flex_wrap()
+                                    .gap_2()
+                                    .items_center()
+                                    .border_b_1()
+                                    .border_color(outline)
+                                    .pb_2()
+                                    .child(
+                                        quiet("sent-recall", "撤回邮件").on_click(
+                                            cx.listener(|this, _, _, cx| {
+                                                if let Some(confirmation) = &mut this.sent_confirmation {
+                                                    confirmation.notice = Some("普通 SMTP 邮件提交后无法保证撤回；如需撤回，请联系收件人处理。".into());
+                                                }
+                                                cx.notify();
+                                            }),
+                                        ),
+                                    )
+                                    .child(
+                                        quiet("sent-show-status", "显示发送状态").on_click(
+                                            cx.listener(|this, _, _, cx| {
+                                                if let Some(confirmation) = &mut this.sent_confirmation {
+                                                    confirmation.status_open = !confirmation.status_open;
+                                                }
+                                                this.refresh_sync_status(cx);
+                                                cx.notify();
+                                            }),
+                                        ),
+                                    )
+                                    .child(
+                                        quiet("sent-open-message", "查看已发送邮件").disabled(self.busy).on_click(
+                                            cx.listener(move |this, _, _, cx| {
+                                                this.open_local_sent_record(account.clone(), task.clone(), cx);
+                                            }),
+                                        ),
+                                    ),
+                            )
+                            .when_some(confirmation.notice.clone(), |panel, notice| {
+                                panel.child(
+                                    div()
+                                        .flex_none()
+                                        .mt_3()
+                                        .rounded(px(8.))
+                                        .bg(theme::color(ColorRole::ERROR_CONTAINER))
+                                        .px_3()
+                                        .py_2()
+                                        .text_size(px(12.))
+                                        .child(notice),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .mt_5()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_3()
+                                    .child(sent_detail_row("收件人", recipient))
+                                    .child(sent_detail_row("主题", subject))
+                                    .child(sent_detail_row("提交时间", submitted_at))
+                                    .when(confirmation.status_open, |details| {
+                                        details.child(sent_detail_row("发送状态", state))
+                                    }),
+                            )
+                            .child(div().flex_none().my_4().h(px(1.)).bg(outline))
+                            .child(
+                                div()
+                                    .id("sent-confirmation-preview-scroll")
+                                    .min_h(px(144.))
+                                    .max_h(px(300.))
+                                    .flex_none()
+                                    .overflow_y_scroll()
+                                    .rounded(px(8.))
+                                    .border_1()
+                                    .border_color(outline)
+                                    .px_4()
+                                    .py_3()
+                                    .bg(theme::color(ColorRole::SURFACE_CONTAINER_LOW))
+                                    .child(
+                                        div()
+                                            .mb_3()
+                                            .text_size(px(12.))
+                                            .text_color(theme::color(ColorRole::ON_SURFACE_VARIANT))
+                                            .child("邮件内容"),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_size(px(14.))
+                                            .text_color(theme::color(ColorRole::ON_SURFACE))
+                                            .child(if body.is_empty() { "（正文为空）".into() } else { body }),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .mt_5()
+                                    .flex()
+                                    .flex_wrap()
+                                    .items_center()
+                                    .gap_3()
+                                    .child(
+                                        MaterialButton::new("sent-return-inbox")
+                                            .child("返回邮箱")
+                                            .disabled(self.busy)
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.return_to_inbox_after_send(cx);
+                                            })),
+                                    )
+                                    .child(
+                                        MaterialButton::new("sent-continue-writing")
+                                            .variant(ButtonVariant::Outlined)
+                                            .child("继续写信")
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.continue_writing_after_send(window, cx);
+                                            })),
+                                    )
+                                    .child(div().flex_1())
+                                    .child(
+                                        div()
+                                            .text_size(px(12.))
+                                            .text_color(theme::color(ColorRole::ON_SURFACE_VARIANT))
+                                            .child(confirmation.details.as_ref().map_or_else(
+                                                || "发送记录已保存到本地".to_owned(),
+                                                |task| {
+                                                    if task.copy.is_some() {
+                                                        "邮件已保存在“已发送”".to_owned()
+                                                    } else if task.state == mail_core::SendState::CopyPending {
+                                                        "发件箱副本等待保存；请勿重复发送".to_owned()
+                                                    } else {
+                                                        "本地发送记录已保存".to_owned()
+                                                    }
+                                                },
+                                            )),
+                                    ),
+                            )
+                    ),
+            )
+    }
     fn sidebar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mut folders = div()
             .id("folder-tree")
@@ -1421,6 +1679,17 @@ impl Render for Mailbox {
                     }),
             )
         };
+        let mut detail = if let Some(confirmation) = &self.sent_confirmation {
+            motion::page(
+                format!("sent-confirmation-{}", confirmation.task.0),
+                div()
+                    .size_full()
+                    .child(self.sent_confirmation_view(confirmation, cx)),
+                cx,
+            )
+        } else {
+            detail.into_any_element()
+        };
         let mut list = list.into_any_element();
         if self.page == Page::Drafts
             && let Some(editor) = &self.composer
@@ -1437,7 +1706,7 @@ impl Render for Mailbox {
             };
             // Only update the child layout hint; the child renders after this host.
             editor.update(cx, |editor, _| editor.pane_width = width);
-            detail = if self.page == Page::Drafts {
+            detail = (if self.page == Page::Drafts {
                 div().size_full().min_w_0().min_h_0().child(editor.clone())
             } else {
                 div().size_full().min_w_0().min_h_0().child(motion::page(
@@ -1445,7 +1714,8 @@ impl Render for Mailbox {
                     div().size_full().child(editor.clone()),
                     cx,
                 ))
-            };
+            })
+            .into_any_element();
         }
         let body = if wide {
             div()
@@ -1482,7 +1752,7 @@ impl Render for Mailbox {
                         .min_w_0()
                         .h_full()
                         .overflow_hidden()
-                        .child(detail.w_full()),
+                        .child(div().size_full().child(detail)),
                 )
         } else if self.narrow_detail
             || self.composer.as_ref().is_some_and(|editor| {
@@ -1567,4 +1837,25 @@ impl Render for Mailbox {
             )
             .into_any_element()
     }
+}
+
+fn sent_detail_row(label: &'static str, value: String) -> impl IntoElement {
+    div()
+        .flex()
+        .items_start()
+        .gap_3()
+        .text_size(px(13.))
+        .child(
+            div()
+                .w(px(58.))
+                .flex_none()
+                .text_color(theme::color(ColorRole::ON_SURFACE_VARIANT))
+                .child(label),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .text_color(theme::color(ColorRole::ON_SURFACE))
+                .child(value),
+        )
 }

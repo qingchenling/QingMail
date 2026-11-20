@@ -1,6 +1,101 @@
 //! 隔离的主窗口写信集成探针，不使用真实账号、密钥库或 SMTP。
 use super::*;
 impl Mailbox {
+    #[cfg(debug_assertions)]
+    pub(super) fn start_sent_confirmation_probe(window: &mut Window, cx: &mut Context<Self>) {
+        if std::env::var_os("QINGMAIL_SENT_CONFIRMATION_PROBE").is_none() {
+            return;
+        }
+        assert!(
+            std::env::var_os("QINGMAIL_IPC_ROOT").is_some(),
+            "isolated root required"
+        );
+        cx.spawn_in(window, async move |entity, cx| {
+            let started = std::time::Instant::now();
+            let mut step = 0;
+            let mut tasks = None;
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(180)).await;
+                let request = entity.update_in(cx, |this, _, _| {
+                    if tasks.is_none() && !this.busy {
+                        this.account.as_ref().map(|(account, _)| this.store.tasks(account.clone()))
+                    } else { None }
+                }).unwrap();
+                if let Some(request) = request {
+                    tasks = Some(cx.background_executor().spawn(async move { receive(request) }).await.unwrap());
+                }
+                let done = entity.update_in(cx, |this, window, cx| {
+                    assert!(started.elapsed().as_secs() < 30, "sent confirmation timeout step={step}");
+                    assert_eq!(cx.windows().len(), 1);
+                    let Some(tasks) = &tasks else { return false; };
+                    if this.busy || this.sync_refreshing { return false; }
+                    let saved = tasks.iter().find(|task| task.copy.is_some()).unwrap();
+                    let local = tasks.iter().find(|task| task.copy.is_none() && task.state == mail_core::SendState::Sent).unwrap();
+                    let pending = tasks.iter().find(|task| task.state == mail_core::SendState::CopyPending).unwrap();
+                    match step {
+                        0 => this.show_sent_confirmation(saved.clone(), cx),
+                        1 => {
+                            let confirmation = this.sent_confirmation.as_ref().unwrap();
+                            assert!(confirmation.error.is_none(), "{:?}", confirmation.error);
+                            if confirmation.body_preview.is_none() { return false; }
+                            assert_eq!(this.selected_folder.as_deref(), Some("Sent"));
+                            assert_eq!(this.selected_location().unwrap().uid, 11);
+                            this.show_sent_confirmation(pending.clone(), cx);
+                        }
+                        2 => {
+                            let confirmation = this.sent_confirmation.as_ref().unwrap();
+                            if confirmation.body_preview.is_none() { return false; }
+                            assert_eq!(confirmation.details.as_ref().unwrap().state, mail_core::SendState::CopyPending);
+                            assert!(this.selected.is_none());
+                            window.resize(size(px(900.), px(620.)));
+                            this.show_sent_confirmation(local.clone(), cx);
+                        }
+                        3 => {
+                            let confirmation = this.sent_confirmation.as_ref().unwrap();
+                            if confirmation.body_preview.is_none() { return false; }
+                            assert!(this.selected.is_none());
+                            assert!(this.narrow_detail);
+                            this.open_local_sent_record(local.account.clone(), local.id.clone(), cx);
+                        }
+                        4 => {
+                            if this.inline.is_none() { return false; }
+                            assert!(this.inline.as_ref().unwrap().location.is_none());
+                            this.show_sent_confirmation(saved.clone(), cx);
+                        }
+                        5 => {
+                            if this.sent_confirmation.as_ref().unwrap().body_preview.is_none() { return false; }
+                            this.continue_writing_after_send(window, cx);
+                        }
+                        6 => {
+                            let Some(editor) = &this.composer else { return false; };
+                            assert!(this.sent_confirmation.is_none());
+                            assert_eq!(editor.read(cx).account_id(), Some(&saved.account));
+                            this.leave_composer(cx);
+                        }
+                        7 => {
+                            if this.composer.is_some() { return false; }
+                            this.show_sent_confirmation(saved.clone(), cx);
+                        }
+                        8 => {
+                            this.return_to_inbox_after_send(cx);
+                        }
+                        _ => {
+                            assert!(this.sent_confirmation.is_none());
+                            assert_eq!(this.selected_folder.as_deref(), Some("INBOX"));
+                            eprintln!("SENT_CONFIRMATION PASS saved_copy pending_copy local_record narrow compose inbox one_window no_network_send");
+                            crate::lifecycle::close_frontend(cx);
+                            return true;
+                        }
+                    }
+                    eprintln!("SENT_CONFIRMATION step={step}");
+                    step += 1;
+                    cx.notify();
+                    false
+                }).unwrap();
+                if done { break; }
+            }
+        }).detach();
+    }
     pub(super) fn start_motion_probe(window: &mut Window, cx: &mut Context<Self>) {
         if std::env::var_os("QINGMAIL_MOTION_PROBE").is_none() {
             return;
