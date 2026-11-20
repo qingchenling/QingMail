@@ -55,6 +55,10 @@ pub(super) struct Lifecycle {
     quitting: bool,
     error: Option<String>,
     probe_step: u8,
+    vault_unlock_attempted: bool,
+    vault_unlocking: bool,
+    vault_error: Option<String>,
+    vault_cancel: Arc<std::sync::atomic::AtomicBool>,
 }
 impl Global for Lifecycle {}
 
@@ -161,6 +165,10 @@ pub(super) fn start(
         quitting: false,
         error: None,
         probe_step: 0,
+        vault_unlock_attempted: false,
+        vault_unlocking: false,
+        vault_error: None,
+        vault_cancel: Default::default(),
     });
     if tray_enabled {
         let task = cx
@@ -192,6 +200,7 @@ pub(super) fn start(
         }
     })
     .detach();
+    request_startup_unlock(cx);
     Ok(())
 }
 
@@ -209,6 +218,90 @@ fn activate(window: AnyWindowHandle, cx: &mut App) -> bool {
 /// 正式入口是邮件主界面；P0 合成首页只保留为显式 `--home-demo` 诊断窗口。
 pub(super) fn open_main(cx: &mut App) {
     crate::mailbox::open(cx);
+    request_startup_unlock(cx);
+}
+fn request_startup_unlock(cx: &mut App) {
+    // Synthetic/legacy probes and a daemon running without a foreground never
+    // touch the user's keyring or open a password prompt.
+    if std::env::var_os("QINGMAIL_IPC_ROOT").is_some()
+        || std::env::var_os("QINGMAIL_P0_RUNTIME_ROOT").is_some()
+        || std::env::var_os("QINGMAIL_P0_DRAFT_ROOT").is_some()
+    {
+        return;
+    }
+    let state = cx.global_mut::<Lifecycle>();
+    if state.vault_unlock_attempted || state.vault_unlocking || state.quitting {
+        return;
+    }
+    let Some(remote) = &state.remote else {
+        return;
+    };
+    if remote.snapshot().snapshot.accounts.is_empty() {
+        return;
+    }
+    state.vault_unlock_attempted = true;
+    state.vault_unlocking = true;
+    if state
+        .vault_cancel
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        state.vault_cancel = Default::default();
+    }
+    let cancel = state.vault_cancel.clone();
+    let task = cx
+        .background_executor()
+        .spawn(async move { mail_service::credentials::SystemVault.request_unlock(&cancel) });
+    cx.spawn(async move |cx| {
+        let result = task.await;
+        cx.update(|cx| {
+            let state = cx.global_mut::<Lifecycle>();
+            state.vault_unlocking = false;
+            if state.quitting { return; }
+            match result {
+                Ok(true) => vault_unlocked(cx),
+                Ok(false) => state.vault_error = None,
+                Err(error) => {
+                    state.vault_error = Some(match error {
+                        mail_service::credentials::VaultError::Locked => "密钥库仍锁定；可在邮箱账号页点击“检查密钥库”再次请求解锁，本地缓存仍可阅读".into(),
+                        mail_service::credentials::VaultError::Timeout => "等待密钥库解锁超时；可在邮箱账号页重试，本地缓存仍可阅读".into(),
+                        _ => error.to_string(),
+                    });
+                }
+            }
+        });
+    }).detach();
+}
+pub(super) fn vault_unlocked(cx: &mut App) {
+    let state = cx.global_mut::<Lifecycle>();
+    state.vault_error = None;
+    if let Some(remote) = &state.remote {
+        let client = remote.client.clone();
+        cx.background_executor()
+            .spawn(async move {
+                let _ = client.request(mail_protocol::Command::SyncNow {
+                    account: None,
+                    folder: None,
+                    before: None,
+                });
+            })
+            .detach();
+    } else if let Some(sync) = &state.sync {
+        sync.request_sync();
+    }
+}
+pub(super) fn vault_is_unlocking(cx: &App) -> bool {
+    cx.global::<Lifecycle>().vault_unlocking
+}
+pub(super) fn vault_cancellation(cx: &mut App) -> Arc<std::sync::atomic::AtomicBool> {
+    let state = cx.global_mut::<Lifecycle>();
+    if !state.quitting
+        && state
+            .vault_cancel
+            .load(std::sync::atomic::Ordering::Acquire)
+    {
+        state.vault_cancel = Default::default();
+    }
+    state.vault_cancel.clone()
 }
 /// 写信入口只激活主窗口，编辑器始终由邮箱右侧持有。
 pub(super) fn compose_in_mailbox(
@@ -347,6 +440,12 @@ pub(super) fn set_pending_account_save(
 
 pub(super) fn sync_status(cx: &App) -> String {
     let state = cx.global::<Lifecycle>();
+    if state.vault_unlocking {
+        return "正在等待系统密钥库解锁…".into();
+    }
+    if let Some(error) = &state.vault_error {
+        return error.clone();
+    }
     state
         .remote
         .as_ref()
@@ -411,6 +510,9 @@ pub(super) fn close_frontend(cx: &mut App) {
     state.quitting = true;
     state.shutdown = false;
     state.error = None;
+    state
+        .vault_cancel
+        .store(true, std::sync::atomic::Ordering::Release);
 }
 pub(super) fn quit(cx: &mut App) {
     let queue = &cx.global::<Lifecycle>().queue;
@@ -464,24 +566,30 @@ fn tick(cx: &mut App) {
                 remote
                     .ack
                     .store(activation.sequence, std::sync::atomic::Ordering::Release);
-                cx.defer(move |cx| match activation.target {
-                    mail_protocol::WindowTarget::Mailbox => open_main(cx),
-                    mail_protocol::WindowTarget::Mail { target } => {
-                        crate::mailbox::open(cx);
-                        let entity = cx
-                            .global::<Lifecycle>()
-                            .mailbox
-                            .as_ref()
-                            .map(|(_, e)| e.clone());
-                        if let Some(entity) = entity {
-                            let _ =
-                                entity.update(cx, |this, cx| this.locate_notification(target, cx));
+                cx.defer(move |cx| {
+                    // A new launcher/tray activation is an explicit foreground
+                    // action and may retry a previously dismissed unlock once.
+                    cx.global_mut::<Lifecycle>().vault_unlock_attempted = false;
+                    request_startup_unlock(cx);
+                    match activation.target {
+                        mail_protocol::WindowTarget::Mailbox => open_main(cx),
+                        mail_protocol::WindowTarget::Mail { target } => {
+                            crate::mailbox::open(cx);
+                            let entity = cx
+                                .global::<Lifecycle>()
+                                .mailbox
+                                .as_ref()
+                                .map(|(_, e)| e.clone());
+                            if let Some(entity) = entity {
+                                let _ = entity
+                                    .update(cx, |this, cx| this.locate_notification(target, cx));
+                            }
                         }
+                        mail_protocol::WindowTarget::Composer => composer::open(cx),
+                        mail_protocol::WindowTarget::Reader => reader::open(cx),
+                        mail_protocol::WindowTarget::Accounts => crate::accounts::open(cx),
+                        mail_protocol::WindowTarget::SendTasks => open_sync_status(cx),
                     }
-                    mail_protocol::WindowTarget::Composer => composer::open(cx),
-                    mail_protocol::WindowTarget::Reader => reader::open(cx),
-                    mail_protocol::WindowTarget::Accounts => crate::accounts::open(cx),
-                    mail_protocol::WindowTarget::SendTasks => open_sync_status(cx),
                 });
             }
             if view.shutdown {
@@ -537,6 +645,11 @@ fn tick(cx: &mut App) {
                     });
                 }
             }
+        }
+        if state.quitting {
+            state
+                .vault_cancel
+                .store(true, std::sync::atomic::Ordering::Release);
         }
         if state.remote.is_some()
             && std::env::var_os("QINGMAIL_IPC_TEST_EDITOR").is_some()

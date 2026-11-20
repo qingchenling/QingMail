@@ -334,16 +334,26 @@ impl Accounts {
         if self.busy {
             return;
         }
+        if crate::lifecycle::vault_is_unlocking(cx) {
+            self.status = "正在等待系统密钥库解锁，请在系统对话框中完成".into();
+            cx.notify();
+            return;
+        }
         self.busy = true;
         self.vault = "检查中…".into();
         self.status = "正在检查系统密钥库…".into();
-        let task = cx
-            .background_executor()
-            .spawn(async { SystemVault.status() });
+        let cancel = crate::lifecycle::vault_cancellation(cx);
+        let task = cx.background_executor().spawn(async move {
+            SystemVault.request_unlock(&cancel)?;
+            SystemVault.status()
+        });
         cx.spawn(async move |entity, cx| {
             let result = task.await;
             let _ = entity.update(cx, |this, cx| {
                 this.busy = false;
+                if result.is_ok() {
+                    crate::lifecycle::vault_unlocked(cx);
+                }
                 this.vault = result
                     .map(|()| "可用，保存时将再次检查".into())
                     .unwrap_or_else(|e| e.to_string());

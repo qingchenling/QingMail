@@ -3,6 +3,8 @@
 mod compose_probe;
 #[path = "mailbox_loading.rs"]
 mod loading;
+#[path = "mailbox_read_state.rs"]
+mod read_state;
 #[path = "mailbox_sync.rs"]
 mod sync_status;
 #[path = "mailbox_view.rs"]
@@ -256,6 +258,7 @@ pub(super) struct Mailbox {
     reading: Option<mail_core::MailUid>,
     read_running: bool,
     read_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    read_marks: read_state::ReadMarks,
     pending_read: Option<(mail_core::MailUid, String)>,
     reading_status: String,
     sync_revision: u64,
@@ -329,6 +332,7 @@ impl Mailbox {
             reading: None,
             read_running: false,
             read_cancel: Default::default(),
+            read_marks: Default::default(),
             pending_read: None,
             reading_status: String::new(),
             sync_revision: 0,
@@ -351,6 +355,8 @@ impl Mailbox {
         Self::start_motion_probe(window, cx);
         #[cfg(debug_assertions)]
         Self::start_sent_confirmation_probe(window, cx);
+        #[cfg(debug_assertions)]
+        Self::start_auto_read_probe(window, cx);
         if std::env::var("QINGMAIL_WINDOW_PERF").as_deref() == Ok("interaction")
             && std::env::var_os("QINGMAIL_IPC_ROOT").is_some()
         {
@@ -1318,6 +1324,7 @@ impl Mailbox {
         self.selected = Some(index);
         self.confirm_delete = false;
         self.read_message(cx);
+        self.mark_visible_mail_read(cx);
         cx.notify();
     }
     fn select_folder(&mut self, name: String, cx: &mut Context<Self>) {
@@ -1753,6 +1760,7 @@ impl Mailbox {
         self.search_selected = Some(index);
         self.narrow_detail = true;
         self.read_location(hit.message.location, hit.folder, cx);
+        self.mark_visible_mail_read(cx);
     }
     fn read_location(
         &mut self,
@@ -1877,12 +1885,13 @@ impl Mailbox {
                                 )
                             });
                             this.inline = Some(InlineReading {
-                                location: Some(inline_location),
+                                location: Some(inline_location.clone()),
                                 account: reader_account,
                                 content,
                                 view,
                             });
                             this.reading_status.clear();
+                            this.mark_visible_mail_read(cx);
                         }
                         Err(e) => {
                             this.reading_status = format!("无法加载邮件：{e}。可重新点击邮件重试")
@@ -2236,6 +2245,9 @@ impl Mailbox {
         cx.notify();
     }
     fn apply_flags(&mut self, seen: Option<bool>, flagged: Option<bool>, cx: &mut Context<Self>) {
+        if seen.is_some() {
+            self.read_marks.manual_revision += 1;
+        }
         if self.unified {
             self.unified_action(Some((seen, flagged)), false, cx);
             return;

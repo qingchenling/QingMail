@@ -2,6 +2,83 @@
 use super::*;
 impl Mailbox {
     #[cfg(debug_assertions)]
+    pub(super) fn start_auto_read_probe(window: &mut Window, cx: &mut Context<Self>) {
+        if std::env::var_os("QINGMAIL_AUTO_READ_PROBE").is_none() {
+            return;
+        }
+        assert!(
+            std::env::var_os("QINGMAIL_IPC_ROOT").is_some(),
+            "isolated root required"
+        );
+        cx.spawn_in(window, async move |entity, cx| {
+            let started = std::time::Instant::now();
+            let mut step = 0;
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(150)).await;
+                let done = entity.update_in(cx, |this, _, cx| {
+                    assert!(started.elapsed().as_secs() < 30, "auto read timeout step={step}: {}", this.status);
+                    if this.busy { return false; }
+                    match step {
+                        0 => {
+                            assert!(this.messages().len() >= 4);
+                            this.checked.insert(this.messages()[1].location.clone());
+                            this.select_message(0, cx);
+                        }
+                        1 => {
+                            if !this.messages()[0].seen { return false; }
+                            assert!(!this.messages()[1].seen, "checked mail must remain unread");
+                            assert_eq!(this.inline.as_ref().unwrap().location.as_ref().unwrap().uid, 240);
+                            this.checked.clear();
+                            this.apply_flags(Some(false), None, cx);
+                        }
+                        2 => {
+                            assert!(!this.messages()[0].seen, "explicit mark unread must survive refresh");
+                            this.quiet_reload = true;
+                            this.load_cache(cx);
+                        }
+                        3 => {
+                            assert!(!this.messages()[0].seen);
+                            this.select_message(0, cx);
+                        }
+                        4 => {
+                            if !this.messages()[0].seen { return false; }
+                            this.select_message(3, cx);
+                        }
+                        5 => {
+                            if this.read_running { return false; }
+                            assert!(!this.messages()[3].seen, "failed body read must remain unread");
+                            assert!(this.reading_status.contains("无法加载"));
+                            this.select_message(1, cx);
+                            this.select_message(2, cx);
+                        }
+                        6 => {
+                            if !this.messages()[2].seen { return false; }
+                            assert!(!this.messages()[1].seen, "abandoned read must remain unread");
+                            this.search_results = Some(vec![mail_storage::SearchHit {
+                                message: this.messages()[1].clone(), folder: "INBOX".into(),
+                            }]);
+                            this.open_hit(0, cx);
+                        }
+                        _ => {
+                            if !this.search_results.as_ref().unwrap()[0].message.seen { return false; }
+                            assert!(this.messages()[1].seen);
+                            assert!(!this.messages()[3].seen);
+                            assert_eq!(cx.windows().len(), 1);
+                            eprintln!("AUTO_READ PASS displayed_only checked_untouched manual_unread refresh reopen failed_body cancelled_read search offline_queue");
+                            crate::lifecycle::close_frontend(cx);
+                            return true;
+                        }
+                    }
+                    eprintln!("AUTO_READ step={step}");
+                    step += 1;
+                    cx.notify();
+                    false
+                }).unwrap();
+                if done { break; }
+            }
+        }).detach();
+    }
+    #[cfg(debug_assertions)]
     pub(super) fn start_sent_confirmation_probe(window: &mut Window, cx: &mut Context<Self>) {
         if std::env::var_os("QINGMAIL_SENT_CONFIRMATION_PROBE").is_none() {
             return;

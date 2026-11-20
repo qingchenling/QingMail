@@ -12,15 +12,17 @@ import tempfile
 import time
 
 
-def run(binary, fixture, evidence):
+def run(binary, fixture, evidence, *, fixture_args=('--sent-confirmation',),
+        probe_env='QINGMAIL_SENT_CONFIRMATION_PROBE', marker='SENT_CONFIRMATION PASS', checks=None):
     evidence.parent.mkdir(parents=True, exist_ok=True)
     log_path = evidence.with_suffix('.log')
     with tempfile.TemporaryDirectory(prefix='qingmail-sent-confirmation-') as directory, log_path.open('w') as log:
         root = Path(directory)
         root.chmod(0o700)
-        subprocess.run([str(fixture), str(root / 'data'), '--sent-confirmation'], check=True, stdout=log)
-        env = dict(os.environ, QINGMAIL_IPC_ROOT=str(root), QINGMAIL_SENT_CONFIRMATION_PROBE='1',
+        subprocess.run([str(fixture), str(root / 'data'), *fixture_args], check=True, stdout=log)
+        env = dict(os.environ, QINGMAIL_IPC_ROOT=str(root),
                    XDG_CONFIG_HOME=str(root / 'config'), XDG_CACHE_HOME=str(root / 'cache'))
+        env[probe_env] = '1'
         env.setdefault('WAYLAND_DISPLAY', 'wayland-1')
         env.setdefault('VK_DRIVER_FILES', '/usr/share/vulkan/icd.d/intel_icd.json')
         backend = None
@@ -40,9 +42,9 @@ def run(binary, fixture, evidence):
                         pass
                 time.sleep(.1)
             assert proc.poll() == 0, f'frontend failed or timed out; see {log_path}'
-            assert 'SENT_CONFIRMATION PASS' in log_path.read_text(), f'probe did not finish; see {log_path}'
+            assert marker in log_path.read_text(), f'probe did not finish; see {log_path}'
             evidence.write_text(json.dumps(dict(passed=True, synthetic_only=True, network_sends=0,
-                checks=['saved copy selected by stable identity', 'pending copy and local-only states',
+                checks=checks or ['saved copy selected by stable identity', 'pending copy and local-only states',
                         'narrow pane renders', 'local frozen record opens', 'continue writing uses same account',
                         'return to account inbox', 'one native window'],
                 limits=['Native state/rendering smoke test; physical clicks and visual acceptance remain manual']),

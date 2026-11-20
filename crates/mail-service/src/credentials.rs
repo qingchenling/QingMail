@@ -3,6 +3,7 @@ use secret_service::{EncryptionType, SecretService};
 use std::{collections::HashMap, fmt, time::Duration};
 use zeroize::Zeroizing;
 pub mod staging;
+mod unlock;
 
 /// 不实现 Debug/Clone，避免意外日志和无意扩散；不承诺第三方库内存副本全部清零。
 pub struct Credentials {
