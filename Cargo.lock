@@ -3918,7 +3918,7 @@ checksum = "dae608c151f68243f2b000364e1f7b186d9c29845f7d2d85bd31b9ad77ad552b"
 
 [[package]]
 name = "mail-content"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "ammonia",
  "base64 0.22.1",
@@ -3939,14 +3939,14 @@ dependencies = [
 
 [[package]]
 name = "mail-core"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "mail-daemon"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "getrandom 0.4.3",
  "mail-content",
@@ -3976,7 +3976,7 @@ dependencies = [
 
 [[package]]
 name = "mail-protocol"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "getrandom 0.4.3",
  "mail-content",
@@ -3988,7 +3988,7 @@ dependencies = [
 
 [[package]]
 name = "mail-service"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "async-io",
  "base64 0.22.1",
@@ -4016,7 +4016,7 @@ dependencies = [
 
 [[package]]
 name = "mail-storage"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "getrandom 0.4.3",
  "mail-content",
@@ -4031,7 +4031,7 @@ dependencies = [
 
 [[package]]
 name = "mail-ui"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "gpui-fps",
  "gpui-kit",

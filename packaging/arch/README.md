@@ -1,12 +1,12 @@
 # QingMail Arch 安装包
 
-1.0.1 使用数据库 schema21、IPC v4，包含 Outlook / Hotmail 与 Microsoft 365 浏览器授权、草稿共用布局、可选发送副本与服务器删除同步；从1.0.0（schema19 / IPC v2）升级时必须配套更新前后台。包含配套 UI/daemon、主窗口整合、草稿列表与删除、同步状态自动刷新及 M3E 动效。项目尚未选定许可证，NOTICE 和 LicenseRef-Unspecified 不构成再分发授权；本次只构建安装包，不执行公开发布。
+1.0.2 使用数据库 schema23、IPC v4，包含 Outlook / Hotmail 与 Microsoft 365 浏览器授权、草稿共用布局、可选发送副本与服务器删除同步；从1.0.0（schema19 / IPC v2）升级时必须配套更新前后台。包含配套 UI/daemon、主窗口整合、草稿列表与删除、同步状态自动刷新及 M3E 动效。项目尚未选定许可证，NOTICE 和 LicenseRef-Unspecified 不构成再分发授权；本次只构建安装包，不执行公开发布。
 
 ## 构建与安装
 
-在仓库根目录执行 `python3 tools/build_arch_package.py --output dist/arch-1.0.1-2`。输出目录必须不存在。上游版本统一读取 Cargo.toml；同一上游版本发布更新包时递增 pkgrel。工具创建带逐文件摘要、提交号及脏工作区标记的源码快照、PKGBUILD、.SRCINFO、源码包、安装包、BUILD-INFO.json 及 SHA256SUMS；然后运行 makepkg，不自动安装依赖或软件。构建需 Arch base-devel、Rust >=1.100.0、clang、cmake、pkgconf、desktop-file-utils，以及 PKGBUILD 中的运行依赖。首次 Cargo 构建需要访问锁文件对应的依赖源。
+在仓库根目录执行 `python3 tools/build_arch_package.py --output dist/arch-1.0.2`。输出目录必须不存在。上游版本统一读取 Cargo.toml；同一上游版本发布更新包时递增 pkgrel。工具创建带逐文件摘要、提交号及脏工作区标记的源码快照、PKGBUILD、.SRCINFO、源码包、安装包、BUILD-INFO.json 及 SHA256SUMS；然后运行 makepkg，不自动安装依赖或软件。构建需 Arch base-devel、Rust >=1.100.0、clang、cmake、pkgconf、desktop-file-utils，以及 PKGBUILD 中的运行依赖。首次 Cargo 构建需要访问锁文件对应的依赖源。
 
-安装前先在 QingMail 选择“保存并退出”，确保前后台均已退出；保存失败时应先解决，不强行终止。用户自行执行 `sudo pacman -U /绝对路径/qingmail-1.0.1-2-x86_64.pkg.tar.zst`。前台和后台必须一起更新，不能混用旧包。运行 `mail-ui` 或桌面菜单 QingMail 启动。
+安装前先在 QingMail 选择“保存并退出”，确保前后台均已退出；保存失败时应先解决，不强行终止。用户自行执行 `sudo pacman -U /绝对路径/qingmail-1.0.2-1-x86_64.pkg.tar.zst`。前台和后台必须一起更新，不能混用旧包。运行 `mail-ui` 或桌面菜单 QingMail 启动。
 
 包安装 `/usr/bin/mail-ui` 和 `/usr/bin/mail-daemon`，复用程序现有同目录查找机制。桌面入口及图标同名 `org.qingmail.QingMail`，所有 GPUI 窗口使用此 Wayland app_id。没有 mailto 协议处理声明，不新增系统服务、强制 GPU 配置或默认自启动。
 

@@ -1,7 +1,7 @@
 # tools/build_arch_package.py supplies the version and checked source snapshot.
 pkgname=qingmail
 pkgver=@VERSION@
-pkgrel=2
+pkgrel=1
 pkgdesc='Native IMAP/SMTP email client for Linux'
 arch=('x86_64')
 # No project license has been chosen. This metadata does not grant distribution rights.
